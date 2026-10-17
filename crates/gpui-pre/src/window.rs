@@ -4972,6 +4972,7 @@ impl Window {
                 content_mask,
                 tile,
                 opacity,
+                transformation: TransformationMatrix::unit(),
             });
         }
         Ok(())
@@ -5144,6 +5145,82 @@ impl Window {
             corner_radii,
             tile: sub_tile,
             opacity,
+            transformation: TransformationMatrix::unit(),
+        });
+        Ok(())
+    }
+
+    /// Paint the part `source` of an image into `bounds`, and map `bounds` to
+    /// the window with `transformation`. `source` is in the pixels of the
+    /// image.
+    ///
+    /// The transformation works on scaled pixels. It maps a point of `bounds`
+    /// times the scale factor to a point of the window in scaled pixels. The
+    /// content mask clips the image after the transformation. The image has no
+    /// rounded corners.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn paint_image_transformed(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        source: Bounds<DevicePixels>,
+        transformation: TransformationMatrix,
+        data: Arc<RenderImage>,
+        frame_index: usize,
+    ) -> Result<()> {
+        self.invalidator.debug_assert_paint();
+
+        if bounds.size.width <= Pixels::ZERO || bounds.size.height <= Pixels::ZERO {
+            return Ok(());
+        }
+
+        let params = RenderImageParams {
+            image_id: data.id,
+            frame_index,
+        };
+
+        let tile = self
+            .sprite_atlas
+            .get_or_insert_with(params.into(), &mut || {
+                Ok(Some((
+                    data.size(frame_index),
+                    Cow::Borrowed(
+                        data.as_bytes(frame_index)
+                            .expect("It's the caller's job to pass a valid frame index"),
+                    ),
+                )))
+            })?
+            .expect("Callback above only returns Some");
+
+        let image = Bounds {
+            origin: point(DevicePixels(0), DevicePixels(0)),
+            size: tile.bounds.size,
+        };
+        let source = source.intersect(&image);
+        if source.size.width <= DevicePixels(0) || source.size.height <= DevicePixels(0) {
+            return Ok(());
+        }
+        let sub_tile = AtlasTile {
+            bounds: Bounds {
+                origin: tile.bounds.origin + source.origin,
+                size: source.size,
+            },
+            ..tile
+        };
+
+        let content_mask = self.snapped_content_mask();
+        let opacity = self.element_opacity();
+
+        self.next_frame.scene.insert_primitive(PolychromeSprite {
+            order: 0,
+            pad: 0,
+            grayscale: false.into(),
+            bounds: bounds.scale(self.scale_factor()),
+            content_mask,
+            corner_radii: Default::default(),
+            tile: sub_tile,
+            opacity,
+            transformation,
         });
         Ok(())
     }

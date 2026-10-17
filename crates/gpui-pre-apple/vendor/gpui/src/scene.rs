@@ -753,8 +753,12 @@ pub struct PolychromeSprite {
     pub opacity: f32,
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
+    /// Applies only to a sprite with no transformation.
     pub corner_radii: Corners<ScaledPixels>,
     pub tile: AtlasTile,
+    /// Maps `bounds` to the window. A sprite with a transformation has no
+    /// corner radii.
+    pub transformation: TransformationMatrix,
 }
 
 impl From<PolychromeSprite> for Primitive {
