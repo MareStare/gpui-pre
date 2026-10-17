@@ -9,9 +9,15 @@ change, under `crates/`. Use them in place of the crates.io versions:
 [patch.crates-io]
 gpui-pre         = { git = "https://github.com/MareStare/gpui-pre", rev = "<commit>" }
 gpui-pre-apple   = { git = "https://github.com/MareStare/gpui-pre", rev = "<commit>" }
+gpui-pre-macos   = { git = "https://github.com/MareStare/gpui-pre", rev = "<commit>" }
 gpui-pre-wgpu    = { git = "https://github.com/MareStare/gpui-pre", rev = "<commit>" }
 gpui-pre-windows = { git = "https://github.com/MareStare/gpui-pre", rev = "<commit>" }
 ```
+
+## Build
+
+The root workspace builds the crates together, with each one patched to
+its copy here: `cargo build -p gpui-pre-wgpu`.
 
 ## Layout of the history
 
