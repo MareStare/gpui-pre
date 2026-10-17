@@ -1221,6 +1221,40 @@ struct PolychromeSprite {
     Corners corner_radii;
 };
 
+// Averages four bilinear samples that together cover the pixel. Where a
+// pixel spans r texels, each sample is (r - 1) / 2 texels from the center,
+// toward one corner of the pixel. Where r is 1 or less, the samples are at
+// the center. The average weighs the color by alpha. Each sample stays
+// between the centers of the edge texels of the tile, so no sample reads
+// the texels next to the tile.
+float4 sample_pixel_footprint(float2 tile_position, AtlasBounds tile) {
+    float2 atlas_size;
+    t_sprite.GetDimensions(atlas_size.x, atlas_size.y);
+    float2 lo = (float2(tile.origin) + 0.5) / atlas_size;
+    float2 hi = (float2(tile.origin + tile.size) - 0.5) / atlas_size;
+    float2 dx = ddx(tile_position);
+    float2 dy = ddy(tile_position);
+    float texels = max(length(dx * atlas_size), length(dy * atlas_size));
+    float spread = max(texels - 1.0, 0.0) / (2.0 * max(texels, 1.0));
+    float2 a = (dx + dy) * spread;
+    float2 b = (dx - dy) * spread;
+    float4 s0 = t_sprite.Sample(s_sprite, clamp(tile_position + a, lo, hi));
+    float4 s1 = t_sprite.Sample(s_sprite, clamp(tile_position - a, lo, hi));
+    float4 s2 = t_sprite.Sample(s_sprite, clamp(tile_position + b, lo, hi));
+    float4 s3 = t_sprite.Sample(s_sprite, clamp(tile_position - b, lo, hi));
+    float alpha = s0.a + s1.a + s2.a + s3.a;
+    if (alpha <= 0.0) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
+    float3 color = s0.rgb * s0.a + s1.rgb * s1.a + s2.rgb * s2.a + s3.rgb * s3.a;
+    return float4(color / alpha, alpha * 0.25);
+}
+
+bool has_corner_radii(Corners corner_radii) {
+    return corner_radii.top_left > 0.0 || corner_radii.top_right > 0.0 ||
+           corner_radii.bottom_right > 0.0 || corner_radii.bottom_left > 0.0;
+}
+
 struct PolychromeSpriteVertexOutput {
     nointerpolation uint sprite_id: TEXCOORD0;
     float4 position: SV_Position;
@@ -1255,8 +1289,10 @@ PolychromeSpriteVertexOutput polychrome_sprite_vertex(uint vertex_id: SV_VertexI
 
 float4 polychrome_sprite_fragment(PolychromeSpriteFragmentInput input): SV_Target {
     PolychromeSprite sprite = poly_sprites[input.sprite_id];
-    float4 sample = t_sprite.Sample(s_sprite, input.tile_position);
-    float distance = quad_sdf(input.position.xy, sprite.bounds, sprite.corner_radii);
+    float4 sample = sample_pixel_footprint(input.tile_position, sprite.tile.bounds);
+    float distance = has_corner_radii(sprite.corner_radii)
+        ? quad_sdf(input.position.xy, sprite.bounds, sprite.corner_radii)
+        : -1.0;
 
     float4 color = sample;
     if (sprite.grayscale != 0u) {

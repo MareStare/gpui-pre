@@ -1270,6 +1270,38 @@ struct PolychromeSprite {
     corner_radii: Corners,
 }
 
+// Averages four bilinear samples that together cover the pixel. Where a
+// pixel spans r texels, each sample is (r - 1) / 2 texels from the center,
+// toward one corner of the pixel. Where r is 1 or less, the samples are at
+// the center. The average weighs the color by alpha. Each sample stays
+// between the centers of the edge texels of the tile, so no sample reads
+// the texels next to the tile.
+fn sample_pixel_footprint(tile_position: vec2<f32>, tile: AtlasBounds) -> vec4<f32> {
+    let atlas_size = vec2<f32>(textureDimensions(t_sprite, 0));
+    let lo = (vec2<f32>(tile.origin) + 0.5) / atlas_size;
+    let hi = (vec2<f32>(tile.origin + tile.size) - 0.5) / atlas_size;
+    let dx = dpdx(tile_position);
+    let dy = dpdy(tile_position);
+    let texels = max(length(dx * atlas_size), length(dy * atlas_size));
+    let spread = max(texels - 1.0, 0.0) / (2.0 * max(texels, 1.0));
+    let a = (dx + dy) * spread;
+    let b = (dx - dy) * spread;
+    let s0 = textureSample(t_sprite, s_sprite, clamp(tile_position + a, lo, hi));
+    let s1 = textureSample(t_sprite, s_sprite, clamp(tile_position - a, lo, hi));
+    let s2 = textureSample(t_sprite, s_sprite, clamp(tile_position + b, lo, hi));
+    let s3 = textureSample(t_sprite, s_sprite, clamp(tile_position - b, lo, hi));
+    let alpha = s0.a + s1.a + s2.a + s3.a;
+    if (alpha <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let color = s0.rgb * s0.a + s1.rgb * s1.a + s2.rgb * s2.a + s3.rgb * s3.a;
+    return vec4<f32>(color / alpha, alpha * 0.25);
+}
+
+fn has_corner_radii(corner_radii: Corners) -> bool {
+    return corner_radii.top_left > 0.0 || corner_radii.top_right > 0.0 ||
+        corner_radii.bottom_right > 0.0 || corner_radii.bottom_left > 0.0;
+}
 
 struct PolySpriteVarying {
     @builtin(position) position: vec4<f32>,
@@ -1293,14 +1325,17 @@ fn vs_poly_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index
 
 @fragment
 fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
-    let sample = textureSample(t_sprite, s_sprite, input.tile_position);
+    let sprite = load_poly_sprite(input.sprite_id);
+    let sample = sample_pixel_footprint(input.tile_position, sprite.tile.bounds);
     // Alpha clip after using the derivatives.
     if (any(input.clip_distances < vec4<f32>(0.0))) {
         return vec4<f32>(0.0);
     }
 
-    let sprite = load_poly_sprite(input.sprite_id);
-    let distance = quad_sdf(input.position.xy, sprite.bounds, sprite.corner_radii);
+    var distance = -1.0;
+    if (has_corner_radii(sprite.corner_radii)) {
+        distance = quad_sdf(input.position.xy, sprite.bounds, sprite.corner_radii);
+    }
 
     var color = sample;
     if (sprite.grayscale != 0u) {
