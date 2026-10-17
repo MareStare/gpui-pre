@@ -672,6 +672,45 @@ fragment float4 monochrome_sprite_fragment(
   return color;
 }
 
+// Averages four bilinear samples that together cover the pixel. Where a
+// pixel spans r texels, each sample is (r - 1) / 2 texels from the center,
+// toward one corner of the pixel. Where r is 1 or less, the samples are at
+// the center. The average weighs the color by alpha. No sample reads past
+// the texels next to the tile, as one bilinear sample at its edge does.
+float4 sample_pixel_footprint(texture2d<float> atlas_texture,
+                              float2 tile_position, Bounds_DevicePixels tile) {
+  constexpr sampler atlas_texture_sampler(mag_filter::linear,
+                                          min_filter::linear);
+  float2 atlas_size =
+      float2(atlas_texture.get_width(), atlas_texture.get_height());
+  float2 tile_origin = float2(tile.origin.x, tile.origin.y);
+  float2 tile_size = float2(tile.size.width, tile.size.height);
+  float2 lo = (tile_origin - 0.5) / atlas_size;
+  float2 hi = (tile_origin + tile_size + 0.5) / atlas_size;
+  float2 dx = dfdx(tile_position);
+  float2 dy = dfdy(tile_position);
+  float texels = max(length(dx * atlas_size), length(dy * atlas_size));
+  float spread = max(texels - 1.0, 0.0) / (2.0 * max(texels, 1.0));
+  float2 a = (dx + dy) * spread;
+  float2 b = (dx - dy) * spread;
+  float4 s0 = atlas_texture.sample(atlas_texture_sampler, clamp(tile_position + a, lo, hi));
+  float4 s1 = atlas_texture.sample(atlas_texture_sampler, clamp(tile_position - a, lo, hi));
+  float4 s2 = atlas_texture.sample(atlas_texture_sampler, clamp(tile_position + b, lo, hi));
+  float4 s3 = atlas_texture.sample(atlas_texture_sampler, clamp(tile_position - b, lo, hi));
+  float alpha = s0.a + s1.a + s2.a + s3.a;
+  if (alpha <= 0.0) {
+    return float4(0.0);
+  }
+  float3 color =
+      s0.rgb * s0.a + s1.rgb * s1.a + s2.rgb * s2.a + s3.rgb * s3.a;
+  return float4(color / alpha, alpha * 0.25);
+}
+
+bool has_corner_radii(Corners_ScaledPixels corner_radii) {
+  return corner_radii.top_left > 0.0 || corner_radii.top_right > 0.0 ||
+         corner_radii.bottom_right > 0.0 || corner_radii.bottom_left > 0.0;
+}
+
 struct PolychromeSpriteVertexOutput {
   float4 position [[position]];
   float2 tile_position;
@@ -696,10 +735,11 @@ vertex PolychromeSpriteVertexOutput polychrome_sprite_vertex(
 
   float2 unit_vertex = unit_vertices[unit_vertex_id];
   PolychromeSprite sprite = sprites[sprite_id];
-  float4 device_position =
-      to_device_position(unit_vertex, sprite.bounds, viewport_size);
-  float4 clip_distance = distance_from_clip_rect(unit_vertex, sprite.bounds,
-                                                 sprite.content_mask.bounds);
+  float4 device_position = to_device_position_transformed(
+      unit_vertex, sprite.bounds, sprite.transformation, viewport_size);
+  float4 clip_distance = distance_from_clip_rect_transformed(
+      unit_vertex, sprite.bounds, sprite.content_mask.bounds,
+      sprite.transformation);
   float2 tile_position = to_tile_position(unit_vertex, sprite.tile, atlas_size);
   return PolychromeSpriteVertexOutput{
       device_position,
@@ -713,12 +753,12 @@ fragment float4 polychrome_sprite_fragment(
     constant PolychromeSprite *sprites [[buffer(SpriteInputIndex_Sprites)]],
     texture2d<float> atlas_texture [[texture(SpriteInputIndex_AtlasTexture)]]) {
   PolychromeSprite sprite = sprites[input.sprite_id];
-  constexpr sampler atlas_texture_sampler(mag_filter::linear,
-                                          min_filter::linear);
-  float4 sample =
-      atlas_texture.sample(atlas_texture_sampler, input.tile_position);
+  float4 sample = sample_pixel_footprint(atlas_texture, input.tile_position,
+                                         sprite.tile.bounds);
   float distance =
-      quad_sdf(input.position.xy, sprite.bounds, sprite.corner_radii);
+      has_corner_radii(sprite.corner_radii)
+          ? quad_sdf(input.position.xy, sprite.bounds, sprite.corner_radii)
+          : -1.0;
 
   float4 color = sample;
   if (sprite.grayscale) {
