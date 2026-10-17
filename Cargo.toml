@@ -1,0 +1,10 @@
+# Builds and tests the patched crates together.
+[workspace]
+members  = ["crates/*"]
+resolver = "3"
+
+[patch.crates-io]
+gpui-pre         = { path = "crates/gpui-pre" }
+gpui-pre-apple   = { path = "crates/gpui-pre-apple" }
+gpui-pre-wgpu    = { path = "crates/gpui-pre-wgpu" }
+gpui-pre-windows = { path = "crates/gpui-pre-windows" }

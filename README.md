@@ -13,6 +13,11 @@ gpui-pre-wgpu    = { git = "https://github.com/MareStare/gpui-pre", rev = "<comm
 gpui-pre-windows = { git = "https://github.com/MareStare/gpui-pre", rev = "<commit>" }
 ```
 
+## Build
+
+The root workspace builds the crates together, with each one patched to
+its copy here: `cargo build -p gpui-pre-wgpu`.
+
 ## Layout of the history
 
 1. One commit adds the published sources of one gpui-pre version, with no
