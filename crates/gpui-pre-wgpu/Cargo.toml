@@ -53,6 +53,11 @@ name = "layout_line"
 path = "benches/layout_line.rs"
 harness = false
 
+[[test]]
+name = "sprite_tile"
+path = "tests/sprite_tile.rs"
+required-features = ["test-support"]
+
 [dependencies.anyhow]
 version = "1.0.86"
 
