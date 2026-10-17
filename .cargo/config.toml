@@ -1,0 +1,3 @@
+# The published sources fail this lint of a later clippy.
+[target.'cfg(all())']
+rustflags = ["-Aclippy::approx_constant"]

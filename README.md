@@ -9,9 +9,20 @@ change, under `crates/`. Use them in place of the crates.io versions:
 [patch.crates-io]
 gpui-pre         = { git = "https://github.com/MareStare/gpui-pre", rev = "<commit>" }
 gpui-pre-apple   = { git = "https://github.com/MareStare/gpui-pre", rev = "<commit>" }
+gpui-pre-linux   = { git = "https://github.com/MareStare/gpui-pre", rev = "<commit>" }
+gpui-pre-macos   = { git = "https://github.com/MareStare/gpui-pre", rev = "<commit>" }
 gpui-pre-wgpu    = { git = "https://github.com/MareStare/gpui-pre", rev = "<commit>" }
 gpui-pre-windows = { git = "https://github.com/MareStare/gpui-pre", rev = "<commit>" }
 ```
+
+## Build
+
+The root workspace builds the crates together, with each one patched to
+its copy here: `cargo build -p gpui-pre-wgpu`.
+
+The unit tests of a crate need its `test-support` feature:
+`cargo test -p gpui-pre-wgpu --features test-support`. The tests of
+`gpui-pre-wgpu` read fonts of Zed from `assets/fonts`.
 
 ## Layout of the history
 
@@ -25,9 +36,61 @@ commit, then rebase the patch commits onto it.
 
 ## Patches
 
-- Transformed image sprites: an image sprite can have a transform and a
-  source rectangle of its texture, and can sample it with a filter that
-  keeps thin lines when it is drawn smaller.
+- Image sprite filter: an image sprite samples its texture with a filter
+  that keeps thin lines when it is drawn smaller. The filter reads no
+  texels of the images next to the sprite in the atlas.
+- Custom surfaces: `Window::paint_custom_surface` paints a surface that
+  code outside the renderer draws with wgpu. `gpui-pre-wgpu` exports
+  `WgpuSurface`, `WgpuSurfaceFrame` and `wgpu_custom_surface`.
+- wgpu by default on Windows and macOS: `GPUI_RENDERER=dx11` or
+  `GPUI_RENDERER=metal` picks the native renderer. A window whose wgpu
+  renderer fails to start uses the native renderer. On macOS the wgpu
+  renderer draws to the `CAMetalLayer` of the view, in Display P3 when the
+  window asks for it, and transparent windows show what is behind them.
+  An unknown `GPUI_RENDERER` logs a warning and picks wgpu. On Windows the
+  wgpu renderer takes the DirectWrite text contrast and ClearType glyphs
+  as BGRA. On macOS the wgpu renderer tries the integrated GPU first.
+- Startup log: `GPUI_STARTUP_LOG` logs the time of the startup stages of
+  the renderers.
+- Startup speed: the render pipelines build in parallel, wgpu does not
+  validate indirect calls, DX12 starts only when no Vulkan adapter can
+  draw to the window, and a resize does not wait for the GPU.
+- Backends from the environment: `WGPU_BACKEND` and the wgpu backend
+  options override the default, Vulkan and then DX12 on Windows.
+- Device loss recovery: the wgpu window renderer of macOS and Windows makes
+  a new device after a lost one, with a new identity, and asks the next
+  frame to build the scene again. `Window::gpu_failure` gives the GPU
+  error of a wgpu window that stays after the renderer dropped its GPU
+  caches to recover. The renderer keeps trying to recover and does not
+  panic.
+- Adapter by name: the wgpu renderer tries first the adapter whose name
+  contains `WGPU_ADAPTER_NAME`, case-insensitive. It ranks above the
+  adapter of `ZED_DEVICE_ID`. A window panics when no adapter has the name.
+- Cached views: a cached view keeps its window control areas, such as
+  the drag area of a title bar, in the frames that reuse its paint. Tests
+  run the hit test of the window control areas with
+  `VisualTestContext::hit_test_window_control_area`.
+- Headless apps: the `headless` feature runs an app on the test platform
+  in real time and draws each frame with the wgpu headless renderer.
+  `Window::named_element_bounds` gives the visible bounds of each named
+  element. `Window::render_to_image` works in every build: the wgpu
+  renderer draws the scene to an offscreen texture and reads it back, also
+  for X11 and Wayland windows.
+- Pen input on macOS and Linux: `Window::on_pen` gets each pen sample
+  with its pressure and the proximity changes of the pen, before the
+  mouse event of the same sample. macOS reads the tablet events of
+  AppKit, and `on_pen` turns off mouse coalescing for the whole app.
+  Wayland reads the tablet protocol and makes the mouse events of each
+  tool. X11 reads the pressure valuator of XInput 2 and converts event
+  positions from 16.16 fixed point by 65536.
+- Image cursors: `Window::set_cursor_image` shows an RGBA image as the
+  cursor of a hitbox, with a hotspot and a scale, on Windows, macOS, X11
+  and Wayland. On Wayland the tablet tools show it too. A platform that
+  cannot show the image shows the fallback style. The native cursor of an
+  image lives as long as the image.
+- Cursor warp: `Window::set_mouse_position` moves the mouse cursor of the
+  system to a point of the window. Wayland uses `wp_pointer_warp_v1`
+  while the pointer is over the window, and the compositor may refuse it.
 
 ## License
 
