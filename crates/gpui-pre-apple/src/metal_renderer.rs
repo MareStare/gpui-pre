@@ -1784,6 +1784,7 @@ mod tests {
             bounds,
             content_mask: ContentMask { bounds },
             image_buffer: image_buffer.clone(),
+            custom: None,
         });
         drop(image_buffer);
         scene.finish();
