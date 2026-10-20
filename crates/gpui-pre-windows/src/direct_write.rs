@@ -893,22 +893,7 @@ impl DirectWriteState {
             )?;
         }
 
-        // The output buffer expects RGBA data, so pad the alpha channel with zeros.
-        for pixel_ix in (0..pixel_count).rev() {
-            let src = pixel_ix * 3;
-            let dst = pixel_ix * 4;
-            (
-                bitmap_data[dst],
-                bitmap_data[dst + 1],
-                bitmap_data[dst + 2],
-                bitmap_data[dst + 3],
-            ) = (
-                bitmap_data[src],
-                bitmap_data[src + 1],
-                bitmap_data[src + 2],
-                0,
-            );
-        }
+        rgb_to_bgra(&mut bitmap_data);
 
         Ok(bitmap_data)
     }
@@ -1795,9 +1780,21 @@ fn is_line_separator(character: char) -> bool {
     matches!(character, '\u{2028}' | '\u{2029}')
 }
 
+/// Expands DirectWrite's RGB pixels at the start of `data` in place to the BGRA pixels of the color
+/// atlases, with zero alpha.
+fn rgb_to_bgra(data: &mut [u8]) {
+    let pixel_count = data.len() / 4;
+    for pixel_ix in (0..pixel_count).rev() {
+        let src = pixel_ix * 3;
+        let dst = pixel_ix * 4;
+        (data[dst], data[dst + 1], data[dst + 2], data[dst + 3]) =
+            (data[src + 2], data[src + 1], data[src], 0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::DirectWriteTextSystem;
+    use super::{DirectWriteTextSystem, rgb_to_bgra};
     use crate::direct_write::ClusterAnalyzer;
     use anyhow::Result;
     use gpui::{Font, FontWeight, PlatformTextSystem, TextRun, TextSystem, WindowTextSystem, px};
@@ -2035,6 +2032,13 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn rgb_to_bgra_reorders_and_pads() {
+        let mut data = vec![1, 2, 3, 4, 5, 6, 0, 0];
+        rgb_to_bgra(&mut data);
+        assert_eq!(data, [3, 2, 1, 0, 6, 5, 4, 0]);
     }
 
     #[test]
