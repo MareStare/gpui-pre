@@ -64,7 +64,7 @@ pub struct WindowsWindowState {
     pub last_visibility: Cell<Option<WindowVisibility>>,
     pub direct_manipulation: DirectManipulationHandler,
 
-    pub renderer: RefCell<DirectXRenderer>,
+    pub renderer: RefCell<WindowRenderer>,
     /// Set when the next `draw_window` call must be treated as a forced
     /// render. Used after a GPU device-lost recovery, where the next frame
     /// must both re-enable drawing (via `mark_drawable`) and bypass the GPUI
@@ -129,21 +129,23 @@ impl WindowsWindowState {
             monitor_dpi / USER_DEFAULT_SCREEN_DPI as f32
         };
         let origin = logical_point(window_params.x as f32, window_params.y as f32, scale_factor);
-        let logical_size = {
-            let physical_size = size(
-                DevicePixels(window_params.cx),
-                DevicePixels(window_params.cy),
-            );
-            physical_size.to_pixels(scale_factor)
-        };
+        let device_size = size(
+            DevicePixels(window_params.cx),
+            DevicePixels(window_params.cy),
+        );
+        let logical_size = device_size.to_pixels(scale_factor);
         let fullscreen_restore_bounds = Bounds {
             origin,
             size: logical_size,
         };
         let border_offset = WindowBorderOffset::default();
         let restore_from_minimized = None;
-        let renderer = DirectXRenderer::new(hwnd, directx_devices, disable_direct_composition)
-            .context("Creating DirectX renderer")?;
+        let renderer = WindowRenderer::new(
+            hwnd,
+            directx_devices,
+            disable_direct_composition,
+            device_size,
+        )?;
         let callbacks = Callbacks::default();
         let input_handler = None;
         let pending_surrogate = None;
@@ -1499,7 +1501,7 @@ pub(crate) fn window_from_hwnd(hwnd: HWND) -> Option<Rc<WindowsWindowInner>> {
     }
 }
 
-fn get_module_handle() -> HMODULE {
+pub(crate) fn get_module_handle() -> HMODULE {
     unsafe {
         let mut h_module = std::mem::zeroed();
         GetModuleHandleExW(
