@@ -1,4 +1,5 @@
-use crate::{CompositorGpuHint, DeviceErrorState, WgpuAtlas, WgpuContext};
+use crate::wgpu_custom_surface::as_wgpu_surface;
+use crate::{CompositorGpuHint, DeviceErrorState, WgpuAtlas, WgpuContext, WgpuSurfaceFrame};
 use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
 use collections::FxHashMap;
@@ -480,6 +481,27 @@ impl WgpuRenderer {
             needs_redraw: false,
         })
     }
+}
+
+/// Begins a render pass that keeps what the frame holds.
+fn continue_main_pass<'a>(
+    encoder: &'a mut wgpu::CommandEncoder,
+    frame_view: &wgpu::TextureView,
+) -> wgpu::RenderPass<'a> {
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("main_pass_continued"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: frame_view,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            },
+            depth_slice: None,
+        })],
+        depth_stencil_attachment: None,
+        ..Default::default()
+    })
 }
 
 impl WgpuRendererCore {
@@ -1468,7 +1490,7 @@ impl WgpuRendererCore {
             bytemuck::bytes_of(&gamma_params),
         );
 
-        self.record_frame(scene, target_view, clear_color)
+        self.record_frame(scene, target_view, size, clear_color)
             .inspect_err(|_| {
                 // Queue writes are staged before encoding; flush them even if the frame fails.
                 self.resources.queue.submit(std::iter::empty());
@@ -1479,6 +1501,7 @@ impl WgpuRendererCore {
         &mut self,
         scene: &Scene,
         frame_view: &wgpu::TextureView,
+        frame_size: Size<DevicePixels>,
         clear_color: wgpu::Color,
     ) -> Result<wgpu::SubmissionIndex> {
         let mut instance_offset = 0;
@@ -1548,20 +1571,7 @@ impl WgpuRendererCore {
                             &mut instance_offset,
                         )?;
 
-                        pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                            label: Some("main_pass_continued"),
-                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                view: frame_view,
-                                resolve_target: None,
-                                ops: wgpu::Operations {
-                                    load: wgpu::LoadOp::Load,
-                                    store: wgpu::StoreOp::Store,
-                                },
-                                depth_slice: None,
-                            })],
-                            depth_stencil_attachment: None,
-                            ..Default::default()
-                        });
+                        pass = continue_main_pass(&mut encoder, frame_view);
 
                         if rasterized {
                             self.draw_paths_from_intermediate(
@@ -1609,9 +1619,31 @@ impl WgpuRendererCore {
                             &mut pass,
                         )?;
                     }
-                    // Surfaces are macOS-only for video playback and are not
-                    // implemented by the WGPU renderer.
-                    PrimitiveBatch::Surfaces(_surfaces) => {}
+                    PrimitiveBatch::Surfaces(range) => {
+                        let custom = scene.surfaces[range].iter().filter_map(|surface| {
+                            let content = as_wgpu_surface(surface.custom.as_ref()?)?;
+                            Some((surface, content))
+                        });
+                        let mut custom = custom.peekable();
+                        if custom.peek().is_none() {
+                            continue;
+                        }
+                        drop(pass);
+                        for (surface, content) in custom {
+                            let resources = self.resources();
+                            content.draw(WgpuSurfaceFrame {
+                                device: &resources.device,
+                                queue: &resources.queue,
+                                encoder: &mut encoder,
+                                target: frame_view,
+                                target_format: self.target_format,
+                                target_size: frame_size,
+                                bounds: surface.bounds,
+                                content_mask: surface.content_mask.bounds,
+                            });
+                        }
+                        pass = continue_main_pass(&mut encoder, frame_view);
+                    }
                 }
             }
         }

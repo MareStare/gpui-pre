@@ -5245,6 +5245,28 @@ impl Window {
             bounds,
             content_mask,
             image_buffer,
+            custom: None,
+        });
+    }
+
+    /// Paints a custom surface into the scene for the next frame at the
+    /// current z-index. The renderer hands `content` to the code that
+    /// painted it, with `bounds` in device pixels.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    pub fn paint_custom_surface(&mut self, bounds: Bounds<Pixels>, content: crate::CustomSurface) {
+        use crate::PaintSurface;
+
+        self.invalidator.debug_assert_paint();
+
+        let bounds = self.snap_bounds(bounds);
+        let content_mask = self.snapped_content_mask();
+        self.next_frame.scene.insert_primitive(PaintSurface {
+            order: 0,
+            bounds,
+            content_mask,
+            custom: Some(content),
         });
     }
 
