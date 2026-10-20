@@ -775,7 +775,14 @@ pub struct PaintSurface {
     pub content_mask: ContentMask<ScaledPixels>,
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     pub image_buffer: objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer>,
+    /// Content that the renderer hands to the code that painted it. Each
+    /// renderer names the type that it accepts.
+    pub custom: Option<CustomSurface>,
 }
+
+/// The content of a custom surface. A renderer skips content of a type that
+/// it does not accept.
+pub type CustomSurface = std::sync::Arc<dyn std::any::Any + Send + Sync>;
 
 impl From<PaintSurface> for Primitive {
     fn from(surface: PaintSurface) -> Self {
