@@ -1186,6 +1186,7 @@ impl WgpuRenderer {
             self.failed_frame_count = 0;
         }
 
+        let acquire_start = std::time::Instant::now();
         let frame = match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
@@ -1218,6 +1219,7 @@ impl WgpuRenderer {
             .create_view(&wgpu::TextureViewDescriptor::default());
         let premultiplied_alpha =
             self.surface_config.alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied;
+        let render_start = std::time::Instant::now();
         if let Err(error) = core.render_frame(
             scene,
             &frame_view,
@@ -1229,9 +1231,26 @@ impl WgpuRenderer {
             return false;
         }
 
+        let present_start = std::time::Instant::now();
         frame.present();
+        if frame_log() {
+            let ms = |from: std::time::Instant, to: std::time::Instant| {
+                (to - from).as_secs_f64() * 1000.0
+            };
+            let end = std::time::Instant::now();
+            eprintln!("proto wgpu-acquire {:.3}", ms(acquire_start, render_start));
+            eprintln!("proto wgpu-render {:.3}", ms(render_start, present_start));
+            eprintln!("proto wgpu-present {:.3}", ms(present_start, end));
+        }
         true
     }
+}
+
+/// `GPUI_FRAME_LOG=1` prints the time of each stage of a frame to stderr.
+fn frame_log() -> bool {
+    static ON: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var_os("GPUI_FRAME_LOG").is_some());
+    *ON
 }
 
 impl WgpuRendererCore {
