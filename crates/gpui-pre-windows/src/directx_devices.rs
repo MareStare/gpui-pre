@@ -112,9 +112,13 @@ fn get_adapter(
     ID3D11DeviceContext,
     D3D_FEATURE_LEVEL,
 )> {
+    let device_id = device_id_filter();
     for adapter_index in 0.. {
         let adapter: IDXGIAdapter1 = unsafe { dxgi_factory.EnumAdapters(adapter_index)?.cast()? };
         if let Ok(desc) = unsafe { adapter.GetDesc1() } {
+            if device_id.is_some_and(|id| id != desc.DeviceId) {
+                continue;
+            }
             let gpu_name = String::from_utf16_lossy(&desc.Description)
                 .trim_matches(char::from(0))
                 .to_string();
@@ -137,6 +141,14 @@ fn get_adapter(
     }
 
     unreachable!()
+}
+
+/// `ZED_DEVICE_ID` picks the adapter by its 4 digit hex PCI device id, as in the wgpu renderer.
+fn device_id_filter() -> Option<u32> {
+    let value = std::env::var("ZED_DEVICE_ID").ok()?;
+    u32::from_str_radix(value.trim().trim_start_matches("0x"), 16)
+        .context("Failed to parse `ZED_DEVICE_ID`")
+        .log_err()
 }
 
 #[inline]
