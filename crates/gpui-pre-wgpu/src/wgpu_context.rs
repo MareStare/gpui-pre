@@ -136,26 +136,6 @@ impl WgpuContext {
         surface: &wgpu::Surface<'_>,
         config: &WgpuSurfaceConfig,
         compositor_gpu: Option<CompositorGpuHint>,
-    ) -> anyhow::Result<Self> {
-        Self::new_with_options(instance, surface, config, compositor_gpu, false)
-    }
-
-    #[cfg(not(target_family = "wasm"))]
-    pub fn new_rejecting_software(
-        instance: wgpu::Instance,
-        surface: &wgpu::Surface<'_>,
-        config: &WgpuSurfaceConfig,
-        compositor_gpu: Option<CompositorGpuHint>,
-    ) -> anyhow::Result<Self> {
-        Self::new_with_options(instance, surface, config, compositor_gpu, true)
-    }
-
-    #[cfg(not(target_family = "wasm"))]
-    fn new_with_options(
-        instance: wgpu::Instance,
-        surface: &wgpu::Surface<'_>,
-        config: &WgpuSurfaceConfig,
-        compositor_gpu: Option<CompositorGpuHint>,
         reject_software: bool,
     ) -> anyhow::Result<Self> {
         let device_id_filter = Self::device_id_filter();
@@ -209,7 +189,10 @@ impl WgpuContext {
         any(test, feature = "bench-support", feature = "test-support")
     ))]
     fn create_headless() -> anyhow::Result<(Self, wgpu::TextureFormat)> {
-        let instance = Self::instance(None);
+        let backends = Self::backend_groups()
+            .into_iter()
+            .fold(wgpu::Backends::empty(), |all, group| all | group);
+        let instance = Self::instance(None, backends);
         let device_id_filter = Self::device_id_filter();
         let (adapter, device, queue, dual_source_blending, color_texture_format, target_format) =
             gpui::block_on(async {
@@ -476,8 +459,26 @@ impl WgpuContext {
         ))
     }
 
+    /// The groups of backends to try in turn. `WGPU_BACKEND` overrides them, e.g. `dx12`
+    /// or `vulkan`. On Windows, DX12 comes after Vulkan: a DX12 instance takes 200 to
+    /// 400 ms to enumerate its adapters on an Intel UHD iGPU, so it starts only when no
+    /// Vulkan adapter can draw to the window.
     #[cfg(not(target_family = "wasm"))]
-    pub fn instance(display: Option<Box<dyn wgpu::wgt::WgpuHasDisplayHandle>>) -> wgpu::Instance {
+    pub fn backend_groups() -> Vec<wgpu::Backends> {
+        if let Some(backends) = wgpu::Backends::from_env() {
+            vec![backends]
+        } else if cfg!(windows) {
+            vec![wgpu::Backends::VULKAN, wgpu::Backends::DX12]
+        } else {
+            vec![wgpu::Backends::VULKAN | wgpu::Backends::GL]
+        }
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub fn instance(
+        display: Option<Box<dyn wgpu::wgt::WgpuHasDisplayHandle>>,
+        backends: wgpu::Backends,
+    ) -> wgpu::Instance {
         // The renderer makes no indirect draws. Indirect call validation costs a compute
         // pipeline at device creation and, on DX12, three command signatures for each
         // pipeline layout: about 190 ms for each layout on an Intel UHD iGPU.
@@ -487,9 +488,9 @@ impl WgpuContext {
             .difference(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL)
             .with_env();
         wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
+            backends,
             flags,
-            backend_options: wgpu::BackendOptions::default(),
+            backend_options: wgpu::BackendOptions::from_env_or_default(),
             memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
             display,
         })
