@@ -10,6 +10,7 @@ pub mod keychain;
 mod metal_atlas;
 pub mod metal_renderer;
 pub mod thermal;
+mod window_renderer;
 
 #[cfg(feature = "font-kit")]
 mod open_type;
