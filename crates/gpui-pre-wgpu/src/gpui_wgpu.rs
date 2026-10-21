@@ -14,4 +14,4 @@ pub use wgpu_custom_surface::{WgpuSurface, WgpuSurfaceFrame, wgpu_custom_surface
     any(test, feature = "bench-support", feature = "test-support")
 ))]
 pub use wgpu_renderer::WgpuHeadlessRenderer;
-pub use wgpu_renderer::{GpuContext, WgpuRenderer, WgpuSurfaceConfig};
+pub use wgpu_renderer::{GpuContext, TextContrast, WgpuRenderer, WgpuSurfaceConfig};
