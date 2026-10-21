@@ -78,17 +78,10 @@ impl LineWrapper {
                             continue;
                         }
 
-                        if Self::is_word_char(c) {
-                            if prev_c == ' ' && c != ' ' && first_non_whitespace_ix.is_some() {
-                                last_candidate_ix = ix;
-                                last_candidate_width = width;
-                            }
-                        } else {
-                            // CJK may not be space separated, e.g.: `Hello world你好世界`
-                            if c != ' ' && first_non_whitespace_ix.is_some() {
-                                last_candidate_ix = ix;
-                                last_candidate_width = width;
-                            }
+                        // CJK may not be space separated, e.g.: `Hello world你好世界`
+                        if Self::is_wrap_candidate(prev_c, c, first_non_whitespace_ix.is_some()) {
+                            last_candidate_ix = ix;
+                            last_candidate_width = width;
                         }
 
                         if c != ' ' && first_non_whitespace_ix.is_none() {
@@ -538,6 +531,15 @@ impl LineWrapper {
 
         // Non-breaking glue characters
         matches!(c, '\u{202F}' | '\u{00A0}' | '\u{2011}')
+    }
+
+    /// Whether a line can wrap before the character `c`, which follows
+    /// `prev_c`. A line never wraps before its first non-whitespace character.
+    pub(crate) fn is_wrap_candidate(prev_c: char, c: char, after_first_non_whitespace: bool) -> bool {
+        if !after_first_non_whitespace || c == ' ' {
+            return false;
+        }
+        !Self::is_word_char(c) || prev_c == ' '
     }
 
     #[inline(always)]

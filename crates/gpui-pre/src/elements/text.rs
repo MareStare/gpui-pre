@@ -3,7 +3,7 @@ use crate::{
     HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size, TextOverflow,
     TextRun, TextStyle, TooltipId, TruncateFrom, WhiteSpace, Window, WrappedLine,
-    WrappedLineLayout, register_tooltip_mouse_handlers, set_tooltip_on_window,
+    WrappedLineLayout, px, register_tooltip_mouse_handlers, set_tooltip_on_window,
 };
 use anyhow::Context as _;
 use gpui_util::ResultExt;
@@ -655,10 +655,22 @@ impl TextLayout {
             let element_state = self.clone();
 
             move |known_dimensions, available_space, window, cx| {
+                // The min-content width is the width of the widest part that
+                // wrapping keeps on one row, as in CSS. Then a flex item with
+                // text can shrink below the width of its unwrapped text.
                 let wrap_width = if text_style.white_space == WhiteSpace::Normal {
                     known_dimensions.width.or(match available_space.width {
                         crate::AvailableSpace::Definite(x) => Some(x),
-                        _ => None,
+                        crate::AvailableSpace::MinContent => window
+                            .text_system()
+                            .shape_text(text.clone(), font_size, &runs, None, None)
+                            .log_err()
+                            .map(|lines| {
+                                lines.iter().fold(px(0.), |width, line| {
+                                    width.max(line.unwrapped_layout.min_content_width(&line.text))
+                                })
+                            }),
+                        crate::AvailableSpace::MaxContent => None,
                     })
                 } else {
                     None
@@ -685,7 +697,8 @@ impl TextLayout {
 
                 // Only use cached layout if:
                 // 1. We have a cached size
-                // 2. wrap_width matches (or both are None)
+                // 2. wrap_width matches (a layout wrapped for a min-content
+                //    probe must not answer a max-content probe)
                 // 3. truncate_width is None (if truncate_width is Some, we need to re-layout
                 //    because the previous layout may have been computed without truncation)
                 // 4. the cached layout was not truncated (a truncated layout answers an
@@ -693,7 +706,7 @@ impl TextLayout {
                 //    sizing with whatever width some earlier measure pass happened to use)
                 if let Some(text_layout) = element_state.0.borrow().as_ref()
                     && let Some(size) = text_layout.size
-                    && (wrap_width.is_none() || wrap_width == text_layout.wrap_width)
+                    && wrap_width == text_layout.wrap_width
                     && truncate_width.is_none()
                     && text_layout.truncate_width.is_none()
                 {
@@ -1345,5 +1358,54 @@ mod tests {
             make_text_unstable_id(false).id,
             make_text_unstable_id(true).id
         );
+    }
+
+    #[gpui::test]
+    fn text_in_a_flex_row_wraps_inside_a_narrow_row(cx: &mut crate::TestAppContext) {
+        use crate::{AvailableSpace, ParentElement as _, Styled as _, div, point, size};
+
+        let cx = cx.add_empty_window();
+        let text_bounds = |cx: &mut crate::VisualTestContext, row_width| {
+            let text = StyledText::new("aaa bbb ccc ddd eee");
+            let layout = text.layout().clone();
+            cx.draw(
+                point(px(0.), px(0.)),
+                size(AvailableSpace::Definite(row_width), AvailableSpace::MaxContent),
+                |_, _| div().flex().flex_row().w(row_width).child(div().child(text)),
+            );
+            layout.bounds()
+        };
+        let one_row = text_bounds(cx, px(10_000.));
+        let narrow = one_row.size.width / 2.;
+        let wrapped = text_bounds(cx, narrow);
+        assert!(
+            wrapped.size.width <= narrow,
+            "the text is {:?} wide in a row {narrow:?} wide",
+            wrapped.size.width
+        );
+        assert!(wrapped.size.height >= one_row.size.height * 2.);
+    }
+
+    #[gpui::test]
+    fn a_max_content_probe_after_a_min_content_probe_gets_the_unwrapped_size(
+        cx: &mut crate::TestAppContext,
+    ) {
+        use crate::{AvailableSpace, DrawPhase, size};
+
+        let cx = cx.add_empty_window();
+        cx.update(|window, cx| {
+            window.invalidator.set_phase(DrawPhase::Prepaint);
+            let mut measure = |layout: &TextLayout, width| {
+                let id = layout.layout("aaa bbb ccc".into(), None, window, cx);
+                window.compute_layout(id, size(width, AvailableSpace::MaxContent), cx);
+                layout.0.borrow().as_ref().unwrap().size.unwrap()
+            };
+            let unwrapped = measure(&TextLayout::default(), AvailableSpace::MaxContent);
+            let layout = TextLayout::default();
+            let min_content = measure(&layout, AvailableSpace::MinContent);
+            assert!(min_content.width < unwrapped.width);
+            assert_eq!(measure(&layout, AvailableSpace::MaxContent), unwrapped);
+            window.invalidator.set_phase(DrawPhase::None);
+        });
     }
 }

@@ -190,6 +190,33 @@ impl LineLayout {
         (left, right)
     }
 
+    /// The width of the widest part of this line that wrapping keeps on one
+    /// row: the largest distance between two adjacent wrap candidates. Each
+    /// part includes the whitespace after its word, because the wrapping does
+    /// not let the whitespace hang past the wrap width. Wrapping at this width
+    /// or wider breaks the line only at wrap candidates.
+    ///
+    /// `text` must be the string this line was shaped from.
+    pub fn min_content_width(&self, text: &str) -> Pixels {
+        let mut widest = px(0.);
+        let mut part_start_x = px(0.);
+        let mut after_first_non_whitespace = false;
+        let mut prev_ch = '\0';
+        for glyph in self.runs.iter().flat_map(|run| &run.glyphs) {
+            let ch = text[glyph.index..].chars().next().unwrap();
+            if ch == '\n' {
+                continue;
+            }
+            if LineWrapper::is_wrap_candidate(prev_ch, ch, after_first_non_whitespace) {
+                widest = widest.max(glyph.position.x - part_start_x);
+                part_start_x = glyph.position.x;
+            }
+            after_first_non_whitespace |= ch != ' ';
+            prev_ch = ch;
+        }
+        widest.max(self.width - part_start_x)
+    }
+
     fn compute_wrap_boundaries(
         &self,
         text: &str,
@@ -227,18 +254,9 @@ impl LineLayout {
                 continue;
             }
 
-            // Here is very similar to `LineWrapper::wrap_line` to determine text wrapping,
-            // but there are some differences, so we have to duplicate the code here.
-            if LineWrapper::is_word_char(ch) {
-                if prev_ch == ' ' && ch != ' ' && first_non_whitespace_ix.is_some() {
-                    last_candidate_ix = Some(boundary);
-                    last_candidate_x = x;
-                }
-            } else {
-                if ch != ' ' && first_non_whitespace_ix.is_some() {
-                    last_candidate_ix = Some(boundary);
-                    last_candidate_x = x;
-                }
+            if LineWrapper::is_wrap_candidate(prev_ch, ch, first_non_whitespace_ix.is_some()) {
+                last_candidate_ix = Some(boundary);
+                last_candidate_x = x;
             }
 
             if ch != ' ' && first_non_whitespace_ix.is_none() {
@@ -1186,5 +1204,100 @@ mod tests {
 
         let positions = glyph_x_positions(&layout);
         assert_eq!(positions, vec![0.5, 0.5]);
+    }
+
+    /// Lays out `text` with fixed advances: 4 for a space, 3 for `i`, 12 for
+    /// `m` and 8 for other characters.
+    fn layout_with_advances(text: &str) -> LineLayout {
+        let mut x = 0.;
+        let mut glyphs = Vec::new();
+        for (index, ch) in text.char_indices() {
+            glyphs.push(glyph_at(x, index));
+            x += match ch {
+                ' ' => 4.,
+                'i' => 3.,
+                'm' => 12.,
+                _ => 8.,
+            };
+        }
+        LineLayout {
+            width: px(x),
+            len: text.len(),
+            ..make_layout(glyphs)
+        }
+    }
+
+    /// The rows of `text` wrapped at `wrap_width`, and whether each row
+    /// starts at a wrap candidate.
+    fn wrap_rows(text: &str, wrap_width: Pixels) -> Vec<(&str, bool)> {
+        let layout = layout_with_advances(text);
+        let mut starts = vec![0];
+        starts.extend(
+            layout
+                .compute_wrap_boundaries(text, wrap_width, None)
+                .iter()
+                .map(|boundary| layout.runs[0].glyphs[boundary.glyph_ix].index),
+        );
+        let mut ends = starts[1..].to_vec();
+        ends.push(text.len());
+        starts
+            .iter()
+            .zip(ends)
+            .map(|(&start, end)| {
+                let at_candidate = text[..start].chars().next_back().is_none_or(|prev| {
+                    let ch = text[start..].chars().next().unwrap();
+                    LineWrapper::is_wrap_candidate(prev, ch, true)
+                });
+                (&text[start..end], at_candidate)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_min_content_width_is_the_widest_part_between_wrap_candidates() {
+        let min_content_width = |text| layout_with_advances(text).min_content_width(text);
+        assert_eq!(min_content_width(""), px(0.));
+        assert_eq!(min_content_width("aaa"), px(24.));
+        // Each part has the space after its word.
+        assert_eq!(min_content_width("aaa bbb cc"), px(28.));
+        assert_eq!(min_content_width("mm iiii"), px(28.));
+        // No candidate comes before the first word.
+        assert_eq!(min_content_width("  aa b"), px(28.));
+        // A line can wrap before each CJK character.
+        assert_eq!(min_content_width("你好世界"), px(8.));
+        // A line can wrap before `/`.
+        assert_eq!(min_content_width("aaaa/bb/c"), px(32.));
+    }
+
+    #[test]
+    fn test_wrap_at_min_content_width_breaks_only_at_wrap_candidates() {
+        for text in [
+            "aaa bbb cc",
+            "the quick brown fox jumps over the lazy dog",
+            "mmm iii mmm iii",
+            "minimum maximum i i i",
+            "  leading spaces",
+            "trailing spaces   ",
+            "two  spaces",
+            "path/to/some/file.mart",
+            "Hello world你好世界",
+        ] {
+            let min_content_width = layout_with_advances(text).min_content_width(text);
+            for (row, at_candidate) in wrap_rows(text, min_content_width) {
+                assert!(at_candidate, "{text:?} broke inside a word before {row:?}");
+                assert!(
+                    !row.trim().is_empty(),
+                    "{text:?} got a row of whitespace only"
+                );
+            }
+        }
+        let text = "aaa bbbbbb cc";
+        let min_content_width = layout_with_advances(text).min_content_width(text);
+        assert!(
+            wrap_rows(text, min_content_width - px(1.))
+                .iter()
+                .any(|(_, at_candidate)| !at_candidate),
+            "a narrower wrap breaks the widest part"
+        );
     }
 }

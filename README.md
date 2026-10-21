@@ -33,6 +33,9 @@ commit, then rebase the patch commits onto it.
 - Transformed image sprites: an image sprite can have a transform and a
   source rectangle of its texture, and can sample it with a filter that
   keeps thin lines when it is drawn smaller.
+- Min-content width of a text: a text measured for its min-content width
+  gives the width of its widest unbreakable part, as in CSS. A flex item
+  with text can then shrink and wrap the text.
 
 ## License
 
