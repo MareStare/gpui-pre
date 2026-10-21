@@ -9,6 +9,7 @@ change, under `crates/`. Use them in place of the crates.io versions:
 [patch.crates-io]
 gpui-pre         = { git = "https://github.com/MareStare/gpui-pre", rev = "<commit>" }
 gpui-pre-apple   = { git = "https://github.com/MareStare/gpui-pre", rev = "<commit>" }
+gpui-pre-macos   = { git = "https://github.com/MareStare/gpui-pre", rev = "<commit>" }
 gpui-pre-wgpu    = { git = "https://github.com/MareStare/gpui-pre", rev = "<commit>" }
 gpui-pre-windows = { git = "https://github.com/MareStare/gpui-pre", rev = "<commit>" }
 ```
