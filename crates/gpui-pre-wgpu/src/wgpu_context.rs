@@ -478,9 +478,17 @@ impl WgpuContext {
 
     #[cfg(not(target_family = "wasm"))]
     pub fn instance(display: Option<Box<dyn wgpu::wgt::WgpuHasDisplayHandle>>) -> wgpu::Instance {
+        // The renderer makes no indirect draws. Indirect call validation costs a compute
+        // pipeline at device creation and, on DX12, three command signatures for each
+        // pipeline layout: about 190 ms for each layout on an Intel UHD iGPU.
+        // `WGPU_VALIDATION_INDIRECT_CALL=1` turns it on for a custom surface that draws
+        // indirectly.
+        let flags = wgpu::InstanceFlags::default()
+            .difference(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL)
+            .with_env();
         wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
-            flags: wgpu::InstanceFlags::default(),
+            flags,
             backend_options: wgpu::BackendOptions::default(),
             memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
             display,
