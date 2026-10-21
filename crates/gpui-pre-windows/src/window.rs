@@ -548,7 +548,7 @@ impl WindowsWindow {
             draw_coordinator,
             parent_hwnd,
         };
-        let creation_result = unsafe {
+        let creation_result = gpui_wgpu::time_startup_stage("create-window", || unsafe {
             CreateWindowExW(
                 dwexstyle,
                 WINDOW_CLASS_NAME,
@@ -563,7 +563,7 @@ impl WindowsWindow {
                 Some(hinstance.into()),
                 Some(&context as *const _ as *const _),
             )
-        };
+        });
 
         // Failure to create a `WindowsWindowState` can cause window creation to fail,
         // so check the inner result first.

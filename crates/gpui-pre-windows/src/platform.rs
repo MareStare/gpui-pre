@@ -408,7 +408,8 @@ impl WindowsPlatform {
 
     /// Creates the DirectX devices that windows draw with, and starts vsync.
     fn attach_gpu(&self) -> Result<()> {
-        let devices = DirectXDevices::new().context("Creating DirectX devices")?;
+        let devices = gpui_wgpu::time_startup_stage("dx11-devices", DirectXDevices::new)
+            .context("Creating DirectX devices")?;
         if let Some(text_system) = &self.direct_write_text_system {
             text_system.handle_gpu_lost(&devices)?;
         }

@@ -5,7 +5,10 @@ use std::{num::NonZeroIsize, rc::Rc, sync::Arc};
 
 use anyhow::{Context as _, Result};
 use gpui::{DevicePixels, GpuSpecs, PlatformAtlas, Scene, Size, WindowBackgroundAppearance};
-use gpui_wgpu::{GpuContext, TextContrast, WgpuRenderer, WgpuSurfaceConfig, wgpu};
+use gpui_wgpu::{
+    GpuContext, StartupStage, TextContrast, WgpuRenderer, WgpuSurfaceConfig, time_startup_stage,
+    wgpu,
+};
 use raw_window_handle as rwh;
 
 use crate::{DirectXDevices, DirectXRenderer, HWND};
@@ -48,6 +51,17 @@ impl WindowRenderer {
         disable_direct_composition: bool,
         size: Size<DevicePixels>,
     ) -> Result<Self> {
+        time_startup_stage("window-renderer", || {
+            Self::new_inner(hwnd, directx_devices, disable_direct_composition, size)
+        })
+    }
+
+    fn new_inner(
+        hwnd: HWND,
+        directx_devices: &DirectXDevices,
+        disable_direct_composition: bool,
+        size: Size<DevicePixels>,
+    ) -> Result<Self> {
         if wgpu_requested() {
             // The window can be created with the default size of the system,
             // which is no real size. The first resize gives the real size.
@@ -84,6 +98,8 @@ impl WindowRenderer {
         scene: &Scene,
         background_appearance: WindowBackgroundAppearance,
     ) -> Result<()> {
+        thread_local!(static FIRST: std::cell::Cell<bool> = const { std::cell::Cell::new(true) });
+        let first_stage = FIRST.replace(false).then(StartupStage::start);
         let start = std::time::Instant::now();
         let result = match self {
             Self::DirectX(renderer) => renderer.draw(scene, background_appearance),
@@ -92,6 +108,9 @@ impl WindowRenderer {
                 Ok(())
             }
         };
+        if let Some(stage) = first_stage {
+            stage.end("first-draw");
+        }
         if frame_log() {
             thread_local!(static LAST: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) });
             if let Some(last) = LAST.replace(Some(start)) {
