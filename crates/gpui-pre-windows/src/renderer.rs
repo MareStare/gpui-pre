@@ -7,8 +7,7 @@ use std::{num::NonZeroIsize, rc::Rc, sync::Arc};
 use anyhow::{Context as _, Result};
 use gpui::{DevicePixels, GpuSpecs, PlatformAtlas, Scene, Size, WindowBackgroundAppearance};
 use gpui_wgpu::{
-    GpuContext, StartupStage, TextContrast, WgpuRenderer, WgpuSurfaceConfig, time_startup_stage,
-    wgpu,
+    GpuContext, TextContrast, WgpuRenderer, WgpuSurfaceConfig, time_frame_draw, time_startup_stage,
 };
 use raw_window_handle as rwh;
 
@@ -26,23 +25,6 @@ thread_local! {
 
 fn wgpu_requested() -> bool {
     !std::env::var("GPUI_RENDERER").is_ok_and(|value| value == "dx11")
-}
-
-/// `GPUI_FRAME_LOG=1` prints the time of each draw call to stderr.
-fn frame_log() -> bool {
-    static ON: std::sync::LazyLock<bool> =
-        std::sync::LazyLock::new(|| std::env::var_os("GPUI_FRAME_LOG").is_some());
-    *ON
-}
-
-/// `GPUI_PRESENT_MODE` picks the present mode of the wgpu surface.
-fn present_mode() -> Option<wgpu::PresentMode> {
-    match std::env::var("GPUI_PRESENT_MODE").ok()?.as_str() {
-        "mailbox" => Some(wgpu::PresentMode::Mailbox),
-        "immediate" => Some(wgpu::PresentMode::Immediate),
-        "fifo-relaxed" => Some(wgpu::PresentMode::FifoRelaxed),
-        _ => None,
-    }
 }
 
 impl WindowRenderer {
@@ -86,7 +68,7 @@ impl WindowRenderer {
         let config = WgpuSurfaceConfig {
             size,
             transparent: false,
-            preferred_present_mode: present_mode(),
+            preferred_present_mode: WgpuSurfaceConfig::present_mode_from_env(),
         };
         let context = WGPU_CONTEXT.with(Rc::clone);
         let mut renderer = WgpuRenderer::new(context, &RawWindow::new(hwnd), config, None)
@@ -111,33 +93,13 @@ impl WindowRenderer {
         scene: &Scene,
         background_appearance: WindowBackgroundAppearance,
     ) -> Result<()> {
-        thread_local!(static FIRST: std::cell::Cell<bool> = const { std::cell::Cell::new(true) });
-        let first_stage = FIRST.replace(false).then(StartupStage::start);
-        let start = std::time::Instant::now();
-        let result = match self {
+        time_frame_draw(|| match self {
             Self::DirectX(renderer) => renderer.draw(scene, background_appearance),
             Self::Wgpu(renderer) => {
                 renderer.draw(scene);
                 Ok(())
             }
-        };
-        if let Some(stage) = first_stage {
-            stage.end("first-draw");
-        }
-        if frame_log() {
-            thread_local!(static LAST: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) });
-            if let Some(last) = LAST.replace(Some(start)) {
-                eprintln!(
-                    "proto frame-gap {:.3}",
-                    (start - last).as_secs_f64() * 1000.0
-                );
-            }
-            eprintln!(
-                "proto frame-draw {:.3}",
-                start.elapsed().as_secs_f64() * 1000.0
-            );
-        }
-        result
+        })
     }
 
     #[cfg(any(test, feature = "test-support"))]

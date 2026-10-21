@@ -1347,6 +1347,12 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn set_client_inset(&self, _inset: Pixels) {}
     fn gpu_specs(&self) -> Option<GpuSpecs>;
 
+    /// Whether the renderer of the window draws custom surfaces. The Linux
+    /// windows draw with wgpu, which draws them.
+    fn draws_custom_surfaces(&self) -> bool {
+        cfg!(any(target_os = "linux", target_os = "freebsd"))
+    }
+
     fn update_ime_position(&self, _bounds: Bounds<Pixels>);
 
     // Mobile platform methods.
