@@ -942,6 +942,9 @@ impl WgpuRendererCore {
             });
         }
 
+        // Each pipeline has its own entry points. On DX12 with FXC, two threads must not
+        // create pipelines from the same shader stage at the same time:
+        // https://github.com/gfx-rs/wgpu/issues/10547
         let mut pipelines = map_in_parallel(&descs, create_pipeline);
         let subpixel_sprites = subpixel_shader_module
             .is_some()
