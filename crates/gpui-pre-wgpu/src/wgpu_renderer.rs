@@ -359,39 +359,21 @@ impl WgpuRenderer {
             .window_handle()
             .map_err(|e| anyhow::anyhow!("Failed to get window handle: {e}"))?;
 
-        let target = wgpu::SurfaceTargetUnsafe::RawHandle {
-            // Fall back to the display handle already provided via InstanceDescriptor::display.
-            raw_display_handle: None,
-            raw_window_handle: window_handle.as_raw(),
-        };
-
-        // Use the existing context's instance if available, otherwise create a new one.
-        // The surface must be created with the same instance that will be used for
-        // adapter selection, otherwise wgpu will panic.
-        let instance = gpu_context
-            .borrow()
-            .as_ref()
-            .map(|ctx| ctx.instance.clone())
-            .unwrap_or_else(|| WgpuContext::instance(Some(Box::new(window.clone()))));
-
-        // Safety: The caller guarantees that the window handle is valid for the
-        // lifetime of this renderer. In practice, the RawWindow struct is created
-        // from the native window handles and the surface is dropped before the window.
-        let surface = time_startup_stage("wgpu-create-surface", || unsafe {
-            instance
-                .create_surface_unsafe(target)
-                .map_err(|e| anyhow::anyhow!("Failed to create surface: {e}"))
-        })?;
-
+        // The surface must come from the instance of the context that draws to it,
+        // otherwise wgpu panics.
         let mut ctx_ref = gpu_context.borrow_mut();
-        let context = match ctx_ref.as_mut() {
+        let (context, surface) = match ctx_ref.as_mut() {
             Some(context) => {
+                let surface = time_startup_stage("wgpu-create-surface", || {
+                    create_surface(&context.instance, window_handle.as_raw())
+                })?;
                 context.check_compatible_with_surface(&surface)?;
-                context
+                (context, surface)
             }
-            None => ctx_ref.insert(time_startup_stage("wgpu-context", || {
-                WgpuContext::new(instance, &surface, compositor_gpu)
-            })?),
+            None => {
+                let (context, surface) = create_context_and_surface(window, compositor_gpu, false)?;
+                (ctx_ref.insert(context), surface)
+            }
         };
 
         let atlas = Arc::new(WgpuAtlas::from_context(context));
@@ -2323,10 +2305,8 @@ impl WgpuRenderer {
             // may need more time to come back (e.g. after suspend/resume).
             std::thread::sleep(std::time::Duration::from_millis(350));
 
-            let instance = WgpuContext::instance(Some(Box::new(window.clone())));
-            let surface = create_surface(&instance, window_handle.as_raw())?;
-            let new_context =
-                WgpuContext::new_rejecting_software(instance, &surface, self.compositor_gpu)?;
+            let (new_context, surface) =
+                create_context_and_surface(window, self.compositor_gpu, true)?;
             *gpu_context.borrow_mut() = Some(new_context);
             surface
         } else {
@@ -2640,6 +2620,44 @@ fn instance_range(range: Range<usize>) -> Range<u32> {
 }
 
 #[cfg(not(target_family = "wasm"))]
+/// Creates the context on the first group of backends with an adapter that can draw
+/// to the window.
+#[cfg(not(target_family = "wasm"))]
+fn create_context_and_surface<W>(
+    window: &W,
+    compositor_gpu: Option<CompositorGpuHint>,
+    reject_software: bool,
+) -> anyhow::Result<(WgpuContext, wgpu::Surface<'static>)>
+where
+    W: HasWindowHandle + HasDisplayHandle + std::fmt::Debug + Send + Sync + Clone + 'static,
+{
+    let raw_window_handle = window
+        .window_handle()
+        .map_err(|e| anyhow::anyhow!("Failed to get window handle: {e}"))?
+        .as_raw();
+    let mut last_error = None;
+    for backends in WgpuContext::backend_groups() {
+        let instance = WgpuContext::instance(Some(Box::new(window.clone())), backends);
+        let created = time_startup_stage("wgpu-create-surface", || {
+            create_surface(&instance, raw_window_handle)
+        })
+        .and_then(|surface| {
+            let context = time_startup_stage("wgpu-context", || {
+                WgpuContext::new(instance, &surface, compositor_gpu, reject_software)
+            })?;
+            Ok((context, surface))
+        });
+        match created {
+            Ok(created) => return Ok(created),
+            Err(error) => {
+                log::info!("No adapter on {backends:?} can draw to the window: {error:#}");
+                last_error = Some(error);
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No wgpu backends to try")))
+}
+
 fn create_surface(
     instance: &wgpu::Instance,
     raw_window_handle: raw_window_handle::RawWindowHandle,
@@ -2651,7 +2669,7 @@ fn create_surface(
                 raw_display_handle: None,
                 raw_window_handle,
             })
-            .map_err(|e| anyhow::anyhow!("{e}"))
+            .map_err(|e| anyhow::anyhow!("Failed to create surface: {e}"))
     }
 }
 
