@@ -5268,7 +5268,6 @@ impl Window {
 
     /// Whether the renderer of the window draws the surfaces of
     /// [`Self::paint_custom_surface`]. Other renderers skip them.
-    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     pub fn draws_custom_surfaces(&self) -> bool {
         self.platform_window.draws_custom_surfaces()
     }
