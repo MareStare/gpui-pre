@@ -464,13 +464,15 @@ impl WgpuContext {
     /// The groups of backends to try in turn. `WGPU_BACKEND` overrides them, e.g. `dx12`
     /// or `vulkan`. On Windows, DX12 comes after Vulkan: a DX12 instance takes 200 to
     /// 400 ms to enumerate its adapters on an Intel UHD iGPU, so it starts only when no
-    /// Vulkan adapter can draw to the window.
+    /// Vulkan adapter can draw to the window. Apple platforms have Metal only.
     #[cfg(not(target_family = "wasm"))]
     pub fn backend_groups() -> Vec<wgpu::Backends> {
         if let Some(backends) = wgpu::Backends::from_env() {
             vec![backends]
         } else if cfg!(windows) {
             vec![wgpu::Backends::VULKAN, wgpu::Backends::DX12]
+        } else if cfg!(target_vendor = "apple") {
+            vec![wgpu::Backends::METAL]
         } else {
             vec![wgpu::Backends::VULKAN | wgpu::Backends::GL]
         }
@@ -685,7 +687,13 @@ impl WgpuContext {
         // Test with the configuration the renderer will use, so that it doesn't need to
         // configure the surface a second time.
         let (surface_config, _, _) =
-            WgpuRenderer::surface_configuration(surface, adapter, &device, config)?;
+            WgpuRenderer::surface_configuration(
+                surface,
+                adapter,
+                &device,
+                config,
+                wgpu::SurfaceColorSpace::Auto,
+            )?;
         let configure_stage = StartupStage::start();
         let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
 

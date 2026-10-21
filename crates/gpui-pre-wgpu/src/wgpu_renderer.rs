@@ -9,7 +9,7 @@ use bytemuck::{Pod, Zeroable};
 use collections::FxHashMap;
 use gpui::{
     AtlasTextureId, Background, Bounds, DevicePixels, GpuSpecs, Path, Point, PrimitiveBatch,
-    ScaledPixels, Scene, Size, get_gamma_correction_ratios,
+    ScaledPixels, Scene, Size, SurfaceContent, get_gamma_correction_ratios,
 };
 use log::warn;
 #[cfg(not(target_family = "wasm"))]
@@ -135,6 +135,19 @@ pub struct WgpuSurfaceConfig {
     /// Mobile platforms may prefer `Mailbox` (triple-buffering) to avoid
     /// blocking in `get_current_texture()` during lifecycle transitions.
     pub preferred_present_mode: Option<wgpu::PresentMode>,
+}
+
+impl WgpuSurfaceConfig {
+    /// The present mode that `GPUI_PRESENT_MODE` asks for: `mailbox`, `immediate` or
+    /// `fifo-relaxed`.
+    pub fn present_mode_from_env() -> Option<wgpu::PresentMode> {
+        match std::env::var("GPUI_PRESENT_MODE").ok()?.as_str() {
+            "mailbox" => Some(wgpu::PresentMode::Mailbox),
+            "immediate" => Some(wgpu::PresentMode::Immediate),
+            "fifo-relaxed" => Some(wgpu::PresentMode::FifoRelaxed),
+            _ => None,
+        }
+    }
 }
 
 struct WgpuPipelines {
@@ -355,10 +368,44 @@ impl WgpuRenderer {
     where
         W: HasWindowHandle + HasDisplayHandle + std::fmt::Debug + Send + Sync + Clone + 'static,
     {
-        let window_handle = window
-            .window_handle()
-            .map_err(|e| anyhow::anyhow!("Failed to get window handle: {e}"))?;
+        Self::new_from_source(
+            gpu_context,
+            &WindowSource(window),
+            config,
+            wgpu::SurfaceColorSpace::Auto,
+            compositor_gpu,
+        )
+    }
 
+    /// Creates a renderer that draws to a `CAMetalLayer`, e.g. the backing layer of
+    /// an AppKit view.
+    ///
+    /// # Safety
+    /// `layer` must point to a `CAMetalLayer`. The surfaces of the renderer retain it.
+    #[cfg(target_vendor = "apple")]
+    pub unsafe fn new_from_metal_layer(
+        gpu_context: GpuContext,
+        layer: std::ptr::NonNull<std::ffi::c_void>,
+        config: WgpuSurfaceConfig,
+        color_space: wgpu::SurfaceColorSpace,
+    ) -> anyhow::Result<Self> {
+        Self::new_from_source(
+            gpu_context,
+            &MetalLayerSource(layer),
+            config,
+            color_space,
+            None,
+        )
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn new_from_source(
+        gpu_context: GpuContext,
+        source: &impl SurfaceSource,
+        config: WgpuSurfaceConfig,
+        color_space: wgpu::SurfaceColorSpace,
+        compositor_gpu: Option<CompositorGpuHint>,
+    ) -> anyhow::Result<Self> {
         // The surface must come from the instance of the context that draws to it,
         // otherwise wgpu panics.
         let mut ctx_ref = gpu_context.borrow_mut();
@@ -366,13 +413,14 @@ impl WgpuRenderer {
         let (context, surface) = match ctx_ref.as_mut() {
             Some(context) => {
                 let surface = time_startup_stage("wgpu-create-surface", || {
-                    create_surface(&context.instance, window_handle.as_raw())
+                    source.create_surface(&context.instance)
                 })?;
                 context.check_compatible_with_surface(&surface)?;
                 (context, surface)
             }
             None => {
-                let (context, surface) = create_context_and_surface(window, compositor_gpu, &config, false)?;
+                let (context, surface) =
+                    create_context_and_surface(source, compositor_gpu, &config, false)?;
                 (ctx_ref.insert(context), surface)
             }
         };
@@ -384,6 +432,7 @@ impl WgpuRenderer {
             context,
             surface,
             config,
+            color_space,
             surface_configured,
             compositor_gpu,
             atlas,
@@ -411,16 +460,26 @@ impl WgpuRenderer {
         config: WgpuSurfaceConfig,
     ) -> anyhow::Result<Self> {
         let atlas = Arc::new(WgpuAtlas::from_context(context));
-        Self::new_internal(None, context, surface, config, false, None, atlas)
+        Self::new_internal(
+            None,
+            context,
+            surface,
+            config,
+            wgpu::SurfaceColorSpace::Auto,
+            false,
+            None,
+            atlas,
+        )
     }
 
-    /// Returns the surface configuration for `config`, along with the transparent and
-    /// opaque alpha modes that the surface supports.
+    /// Returns the surface configuration for `config` and `color_space`, along with the
+    /// transparent and opaque alpha modes that the surface supports.
     pub(crate) fn surface_configuration(
         surface: &wgpu::Surface<'_>,
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
         config: &WgpuSurfaceConfig,
+        color_space: wgpu::SurfaceColorSpace,
     ) -> anyhow::Result<(
         wgpu::SurfaceConfiguration,
         wgpu::CompositeAlphaMode,
@@ -466,10 +525,16 @@ impl WgpuRenderer {
                     })
             };
 
-        let transparent_alpha_mode = pick_alpha_mode(&[
-            wgpu::CompositeAlphaMode::PreMultiplied,
-            wgpu::CompositeAlphaMode::Inherit,
-        ])?;
+        // Metal offers no `PreMultiplied`. A `CAMetalLayer` composites premultiplied
+        // colors, also in the `PostMultiplied` mode.
+        let transparent_alpha_mode = if adapter.get_info().backend == wgpu::Backend::Metal {
+            pick_alpha_mode(&[wgpu::CompositeAlphaMode::PostMultiplied])?
+        } else {
+            pick_alpha_mode(&[
+                wgpu::CompositeAlphaMode::PreMultiplied,
+                wgpu::CompositeAlphaMode::Inherit,
+            ])?
+        };
 
         let opaque_alpha_mode = pick_alpha_mode(&[
             wgpu::CompositeAlphaMode::Opaque,
@@ -500,7 +565,7 @@ impl WgpuRenderer {
         let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
-            color_space: wgpu::SurfaceColorSpace::Auto,
+            color_space,
             width: clamped_width.max(1),
             height: clamped_height.max(1),
             present_mode: config
@@ -520,15 +585,23 @@ impl WgpuRenderer {
         context: &WgpuContext,
         surface: wgpu::Surface<'static>,
         config: WgpuSurfaceConfig,
+        color_space: wgpu::SurfaceColorSpace,
         surface_configured: bool,
         compositor_gpu: Option<CompositorGpuHint>,
         atlas: Arc<WgpuAtlas>,
     ) -> anyhow::Result<Self> {
         let (surface_config, transparent_alpha_mode, opaque_alpha_mode) =
-            Self::surface_configuration(&surface, &context.adapter, &context.device, &config)?;
+            Self::surface_configuration(
+                &surface,
+                &context.adapter,
+                &context.device,
+                &config,
+                color_space,
+            )?;
         // Adapter selection configures the surface with this same configuration when it
-        // creates the context, so only configure it here when that did not happen.
-        if !surface_configured {
+        // creates the context, except for the default color space that it always uses.
+        // Configure it here in the other cases.
+        if !surface_configured || color_space != wgpu::SurfaceColorSpace::Auto {
             time_startup_stage("wgpu-configure", || {
                 surface.configure(&context.device, &surface_config);
             });
@@ -758,7 +831,7 @@ impl WgpuRendererCore {
         device: &wgpu::Device,
         layouts: &WgpuBindGroupLayouts,
         surface_format: wgpu::TextureFormat,
-        alpha_mode: wgpu::CompositeAlphaMode,
+        premultiplied_alpha: bool,
         path_sample_count: u32,
         dual_source_blending: bool,
         uses_webgl_instance_data: bool,
@@ -809,11 +882,10 @@ impl WgpuRendererCore {
             None
         };
 
-        let blend_mode = match alpha_mode {
-            wgpu::CompositeAlphaMode::PreMultiplied => {
-                wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING
-            }
-            _ => wgpu::BlendState::ALPHA_BLENDING,
+        let blend_mode = if premultiplied_alpha {
+            wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING
+        } else {
+            wgpu::BlendState::ALPHA_BLENDING
         };
 
         let create_pipeline = |desc: &PipelineDesc<'_>| {
@@ -1140,7 +1212,7 @@ impl WgpuRenderer {
             &resources.device,
             &resources.bind_group_layouts,
             format,
-            new_alpha_mode,
+            composites_premultiplied(new_alpha_mode, core.adapter_info.backend),
             core.rendering_params.path_sample_count,
             core.dual_source_blending,
             core.uses_webgl_instance_data,
@@ -1259,7 +1331,7 @@ impl WgpuRenderer {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         let premultiplied_alpha =
-            self.surface_config.alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied;
+            composites_premultiplied(self.surface_config.alpha_mode, core.adapter_info.backend);
         let render_start = std::time::Instant::now();
         if let Err(error) = core.render_frame(
             scene,
@@ -1312,7 +1384,7 @@ impl WgpuRendererCore {
             &device,
             &bind_group_layouts,
             target_format,
-            alpha_mode,
+            composites_premultiplied(alpha_mode, context.adapter.get_info().backend),
             rendering_params.path_sample_count,
             dual_source_blending,
             uses_webgl_instance_data,
@@ -1681,7 +1753,11 @@ impl WgpuRendererCore {
                     }
                     PrimitiveBatch::Surfaces(range) => {
                         let custom = scene.surfaces[range].iter().filter_map(|surface| {
-                            let content = as_wgpu_surface(surface.custom.as_ref()?)?;
+                            let content = match &surface.content {
+                                SurfaceContent::Custom(content) => as_wgpu_surface(content)?,
+                                #[cfg(any(target_os = "macos", target_os = "ios"))]
+                                SurfaceContent::ImageBuffer(_) => return None,
+                            };
                             Some((surface, content))
                         });
                         let mut custom = custom.peekable();
@@ -2312,10 +2388,7 @@ impl WgpuRenderer {
             .as_ref()
             .is_none_or(|ctx| ctx.device_lost());
 
-        let window_handle = window
-            .window_handle()
-            .map_err(|e| anyhow::anyhow!("Failed to get window handle: {e}"))?;
-
+        let source = WindowSource(window);
         let config = WgpuSurfaceConfig {
             size: gpui::Size {
                 width: gpui::DevicePixels(self.surface_config.width as i32),
@@ -2339,13 +2412,13 @@ impl WgpuRenderer {
             std::thread::sleep(std::time::Duration::from_millis(350));
 
             let (new_context, surface) =
-                create_context_and_surface(window, self.compositor_gpu, &config, true)?;
+                create_context_and_surface(&source, self.compositor_gpu, &config, true)?;
             *gpu_context.borrow_mut() = Some(new_context);
             surface
         } else {
             let ctx_ref = gpu_context.borrow();
             let instance = &ctx_ref.as_ref().unwrap().instance;
-            create_surface(instance, window_handle.as_raw())?
+            source.create_surface(instance)?
         };
 
         let gpu_context = Rc::clone(gpu_context);
@@ -2362,6 +2435,7 @@ impl WgpuRenderer {
             context,
             surface,
             config,
+            self.surface_config.color_space,
             needs_new_context,
             self.compositor_gpu,
             self.atlas.clone(),
@@ -2641,39 +2715,92 @@ impl gpui::PlatformHeadlessRenderer for WgpuHeadlessRenderer {
     }
 }
 
+/// Whether the compositor reads premultiplied colors from a surface with this mode.
+/// A `CAMetalLayer` always composites premultiplied colors. `PostMultiplied` on
+/// Metal only marks the layer as not opaque.
+fn composites_premultiplied(alpha_mode: wgpu::CompositeAlphaMode, backend: wgpu::Backend) -> bool {
+    match alpha_mode {
+        wgpu::CompositeAlphaMode::PreMultiplied => true,
+        wgpu::CompositeAlphaMode::PostMultiplied => backend == wgpu::Backend::Metal,
+        wgpu::CompositeAlphaMode::Auto
+        | wgpu::CompositeAlphaMode::Opaque
+        | wgpu::CompositeAlphaMode::Inherit => false,
+    }
+}
+
 fn instance_range(range: Range<usize>) -> Range<u32> {
     range.start as u32..range.end as u32
 }
 
+/// A native target that the renderer makes surfaces for.
 #[cfg(not(target_family = "wasm"))]
-/// Creates the context on the first group of backends with an adapter that can draw
-/// to the window.
+trait SurfaceSource {
+    /// The display handle for the instances that draw to the target.
+    fn display(&self) -> Option<Box<dyn wgpu::wgt::WgpuHasDisplayHandle>>;
+
+    fn create_surface(&self, instance: &wgpu::Instance) -> anyhow::Result<wgpu::Surface<'static>>;
+}
+
 #[cfg(not(target_family = "wasm"))]
-fn create_context_and_surface<W>(
-    window: &W,
-    compositor_gpu: Option<CompositorGpuHint>,
-    config: &WgpuSurfaceConfig,
-    reject_software: bool,
-) -> anyhow::Result<(WgpuContext, wgpu::Surface<'static>)>
+struct WindowSource<'a, W>(&'a W);
+
+#[cfg(not(target_family = "wasm"))]
+impl<W> SurfaceSource for WindowSource<'_, W>
 where
     W: HasWindowHandle + HasDisplayHandle + std::fmt::Debug + Send + Sync + Clone + 'static,
 {
-    let raw_window_handle = window
-        .window_handle()
-        .map_err(|e| anyhow::anyhow!("Failed to get window handle: {e}"))?
-        .as_raw();
+    fn display(&self) -> Option<Box<dyn wgpu::wgt::WgpuHasDisplayHandle>> {
+        Some(Box::new(self.0.clone()))
+    }
+
+    fn create_surface(&self, instance: &wgpu::Instance) -> anyhow::Result<wgpu::Surface<'static>> {
+        let window_handle = self
+            .0
+            .window_handle()
+            .map_err(|e| anyhow::anyhow!("Failed to get window handle: {e}"))?;
+        create_surface(instance, window_handle.as_raw())
+    }
+}
+
+/// A `CAMetalLayer`. Each surface retains it.
+#[cfg(target_vendor = "apple")]
+struct MetalLayerSource(std::ptr::NonNull<std::ffi::c_void>);
+
+#[cfg(target_vendor = "apple")]
+impl SurfaceSource for MetalLayerSource {
+    fn display(&self) -> Option<Box<dyn wgpu::wgt::WgpuHasDisplayHandle>> {
+        // A Metal surface needs no display handle.
+        None
+    }
+
+    fn create_surface(&self, instance: &wgpu::Instance) -> anyhow::Result<wgpu::Surface<'static>> {
+        let target = wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(self.0.as_ptr());
+        // SAFETY: the caller of `WgpuRenderer::new_from_metal_layer` gives a `CAMetalLayer`.
+        unsafe { instance.create_surface_unsafe(target) }
+            .map_err(|e| anyhow::anyhow!("Failed to create surface: {e}"))
+    }
+}
+
+/// Creates the context on the first group of backends with an adapter that can draw
+/// to the window.
+#[cfg(not(target_family = "wasm"))]
+fn create_context_and_surface(
+    source: &impl SurfaceSource,
+    compositor_gpu: Option<CompositorGpuHint>,
+    config: &WgpuSurfaceConfig,
+    reject_software: bool,
+) -> anyhow::Result<(WgpuContext, wgpu::Surface<'static>)> {
     let mut last_error = None;
     for backends in WgpuContext::backend_groups() {
-        let instance = WgpuContext::instance(Some(Box::new(window.clone())), backends);
-        let created = time_startup_stage("wgpu-create-surface", || {
-            create_surface(&instance, raw_window_handle)
-        })
-        .and_then(|surface| {
-            let context = time_startup_stage("wgpu-context", || {
-                WgpuContext::new(instance, &surface, config, compositor_gpu, reject_software)
-            })?;
-            Ok((context, surface))
-        });
+        let instance = WgpuContext::instance(source.display(), backends);
+        let created =
+            time_startup_stage("wgpu-create-surface", || source.create_surface(&instance))
+                .and_then(|surface| {
+                    let context = time_startup_stage("wgpu-context", || {
+                        WgpuContext::new(instance, &surface, config, compositor_gpu, reject_software)
+                    })?;
+                    Ok((context, surface))
+                });
         match created {
             Ok(created) => return Ok(created),
             Err(error) => {
