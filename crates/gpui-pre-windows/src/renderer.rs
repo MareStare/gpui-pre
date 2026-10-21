@@ -5,7 +5,7 @@ use std::{num::NonZeroIsize, rc::Rc, sync::Arc};
 
 use anyhow::{Context as _, Result};
 use gpui::{DevicePixels, GpuSpecs, PlatformAtlas, Scene, Size, WindowBackgroundAppearance};
-use gpui_wgpu::{GpuContext, WgpuRenderer, WgpuSurfaceConfig, wgpu};
+use gpui_wgpu::{GpuContext, TextContrast, WgpuRenderer, WgpuSurfaceConfig, wgpu};
 use raw_window_handle as rwh;
 
 use crate::{DirectXDevices, DirectXRenderer, HWND};
@@ -63,8 +63,15 @@ impl WindowRenderer {
                 preferred_present_mode: present_mode(),
             };
             let context = WGPU_CONTEXT.with(Rc::clone);
-            let renderer = WgpuRenderer::new(context, &RawWindow::new(hwnd), config, None)
+            let mut renderer = WgpuRenderer::new(context, &RawWindow::new(hwnd), config, None)
                 .context("Creating wgpu renderer")?;
+            let font_info = DirectXRenderer::get_font_info();
+            renderer.set_text_contrast(TextContrast {
+                gamma: font_info.gamma,
+                grayscale_enhanced_contrast: font_info.grayscale_enhanced_contrast,
+                subpixel_enhanced_contrast: font_info.subpixel_enhanced_contrast,
+            });
+            renderer.set_subpixel_layout(font_info.is_bgr);
             return Ok(Self::Wgpu(renderer));
         }
         let renderer = DirectXRenderer::new(hwnd, directx_devices, disable_direct_composition)

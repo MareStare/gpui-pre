@@ -30,6 +30,7 @@ const PATH_MULTISAMPLE_COUNT: u32 = 4;
 const MAX_INSTANCE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
 
 pub(crate) struct FontInfo {
+    pub gamma: f32,
     pub gamma_ratios: [f32; 4],
     pub grayscale_enhanced_contrast: f32,
     pub subpixel_enhanced_contrast: f32,
@@ -857,6 +858,7 @@ impl DirectXRenderer {
             let render_params: IDWriteRenderingParams1 =
                 factory.CreateRenderingParams().unwrap().cast().unwrap();
             FontInfo {
+                gamma: render_params.GetGamma(),
                 gamma_ratios: gpui::get_gamma_correction_ratios(render_params.GetGamma()),
                 grayscale_enhanced_contrast: render_params.GetGrayscaleEnhancedContrast(),
                 subpixel_enhanced_contrast: render_params.GetEnhancedContrast(),
