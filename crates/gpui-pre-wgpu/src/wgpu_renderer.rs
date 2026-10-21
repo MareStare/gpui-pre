@@ -1,6 +1,9 @@
 // Modified for gpui-pre (snapshot of zed@d2a4fb6): adapt device queues and sRGB detection to wgpu 30.0.1.
 use crate::wgpu_custom_surface::as_wgpu_surface;
-use crate::{CompositorGpuHint, DeviceErrorState, WgpuAtlas, WgpuContext, WgpuSurfaceFrame};
+use crate::{
+    CompositorGpuHint, DeviceErrorState, WgpuAtlas, WgpuContext, WgpuSurfaceFrame,
+    time_startup_stage,
+};
 use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
 use collections::FxHashMap;
@@ -345,12 +348,9 @@ impl WgpuRenderer {
                 context.check_compatible_with_surface(&surface)?;
                 context
             }
-            None => ctx_ref.insert(WgpuContext::new(
-                instance,
-                &surface,
-                &config,
-                compositor_gpu,
-            )?),
+            None => ctx_ref.insert(time_startup_stage("wgpu-context", || {
+                WgpuContext::new(instance, &surface, &config, compositor_gpu)
+            })?),
         };
 
         let atlas = Arc::new(WgpuAtlas::from_context(context));
@@ -402,7 +402,8 @@ impl WgpuRenderer {
         wgpu::CompositeAlphaMode,
         wgpu::CompositeAlphaMode,
     )> {
-        let surface_caps = surface.get_capabilities(adapter);
+        let surface_caps =
+            time_startup_stage("wgpu-surface-caps", || surface.get_capabilities(adapter));
         let preferred_formats = [
             wgpu::TextureFormat::Bgra8Unorm,
             wgpu::TextureFormat::Rgba8Unorm,
@@ -504,13 +505,17 @@ impl WgpuRenderer {
         // Adapter selection configures the surface with this same configuration when it
         // creates the context, so only configure it here when that did not happen.
         if !surface_configured {
-            surface.configure(&context.device, &surface_config);
+            time_startup_stage("wgpu-configure", || {
+                surface.configure(&context.device, &surface_config);
+            });
         }
 
         let surface_format = surface_config.format;
         let alpha_mode = surface_config.alpha_mode;
         let max_texture_size = context.device.limits().max_texture_dimension_2d;
-        let core = WgpuRendererCore::new(context, atlas.clone(), surface_format, alpha_mode);
+        let core = time_startup_stage("wgpu-renderer-core", || {
+            WgpuRendererCore::new(context, atlas.clone(), surface_format, alpha_mode)
+        });
 
         Ok(Self {
             context: gpu_context,

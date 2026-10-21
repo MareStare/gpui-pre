@@ -6,7 +6,7 @@ use std::{num::NonZeroIsize, rc::Rc, sync::Arc};
 
 use anyhow::{Context as _, Result};
 use gpui::{DevicePixels, GpuSpecs, PlatformAtlas, Scene, Size, WindowBackgroundAppearance};
-use gpui_wgpu::{GpuContext, TextContrast, WgpuRenderer, WgpuSurfaceConfig};
+use gpui_wgpu::{GpuContext, TextContrast, WgpuRenderer, WgpuSurfaceConfig, time_startup_stage};
 use raw_window_handle as rwh;
 
 use crate::{DirectXDevices, DirectXRenderer, HWND};
@@ -27,6 +27,17 @@ fn wgpu_requested() -> bool {
 
 impl WindowRenderer {
     pub(crate) fn new(
+        hwnd: HWND,
+        directx_devices: &DirectXDevices,
+        disable_direct_composition: bool,
+        size: Size<DevicePixels>,
+    ) -> Result<Self> {
+        time_startup_stage("window-renderer", || {
+            Self::new_inner(hwnd, directx_devices, disable_direct_composition, size)
+        })
+    }
+
+    fn new_inner(
         hwnd: HWND,
         directx_devices: &DirectXDevices,
         disable_direct_composition: bool,
