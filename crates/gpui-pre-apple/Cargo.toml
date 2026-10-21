@@ -108,6 +108,10 @@ version = "0.5"
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.futures]
 version = "0.3.34"
 
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.gpui_wgpu]
+version = "=0.3.10"
+package = "gpui-pre-wgpu"
+
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.gpui_util]
 version = "=0.3.10"
 package = "gpui-pre-util"

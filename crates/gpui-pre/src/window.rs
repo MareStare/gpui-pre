@@ -5262,8 +5262,7 @@ impl Window {
             order: 0,
             bounds,
             content_mask,
-            image_buffer,
-            custom: None,
+            content: crate::SurfaceContent::ImageBuffer(image_buffer),
         });
     }
 
@@ -5279,7 +5278,6 @@ impl Window {
     /// painted it, with `bounds` in device pixels.
     ///
     /// This method should only be called as part of the paint phase of element drawing.
-    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     pub fn paint_custom_surface(&mut self, bounds: Bounds<Pixels>, content: crate::CustomSurface) {
         use crate::PaintSurface;
 
@@ -5291,7 +5289,7 @@ impl Window {
             order: 0,
             bounds,
             content_mask,
-            custom: Some(content),
+            content: crate::SurfaceContent::Custom(content),
         });
     }
 

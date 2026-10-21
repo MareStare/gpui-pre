@@ -4,7 +4,7 @@ use block2::RcBlock;
 use core_graphics::geometry::CGSize;
 use gpui::{
     AtlasTextureId, Background, Bounds, ContentMask, DevicePixels, PaintSurface, Path, Point,
-    PrimitiveBatch, ScaledPixels, Scene, Size, point, size,
+    PrimitiveBatch, ScaledPixels, Scene, Size, SurfaceContent, point, size,
 };
 #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
 use image::RgbaImage;
@@ -41,18 +41,8 @@ const INSTANCE_BUFFER_ALIGNMENT: usize = 256;
 const MAX_INSTANCE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
 
 pub type Context = Arc<Mutex<InstanceBufferPool>>;
-pub type Renderer = MetalRenderer;
-
-pub unsafe fn new_renderer(
-    context: self::Context,
-    _native_window: *mut c_void,
-    _native_view: *mut c_void,
-    _bounds: gpui::Size<f32>,
-    transparent: bool,
-    use_display_p3: bool,
-) -> Renderer {
-    MetalRenderer::new(context, transparent, use_display_p3)
-}
+// The platform backends reach the window renderer through this module.
+pub use crate::window_renderer::{Renderer, WgpuWindowRenderer, new_renderer};
 
 pub struct InstanceBufferPool {
     buffer_size: usize,
@@ -140,6 +130,52 @@ pub struct MetalRenderer {
     headless_render_target: Option<metal::Texture>,
 }
 
+/// Configures the layer of a window for any renderer that draws to it.
+pub(crate) fn configure_window_layer(
+    layer: &metal::MetalLayerRef,
+    transparent: bool,
+    use_display_p3: bool,
+) {
+    // metal-rs doesn't bind these setters, so view the same object through
+    // objc2's typed CAMetalLayer binding.
+    let objc2_layer: &objc2_quartz_core::CAMetalLayer = unsafe { &*layer.as_ptr().cast() };
+    if use_display_p3 {
+        // SAFETY: The constant is extern, from Core Graphics
+        let display_p3_name = unsafe { kCGColorSpaceDisplayP3 };
+        if let Some(display_p3_color_space) = CGColorSpace::create_with_name(display_p3_name) {
+            // SAFETY: `layer` is a CAMetalLayer and the color space remains valid for the call.
+            // 'metal-rs' does not expose CAMetalLayer's typed `colorspace` setter.
+            // Could be replaced with a native binding via objc2-* in future
+            unsafe {
+                let _: () = objc2::msg_send![
+                    objc2_layer,
+                    setColorspace: display_p3_color_space.as_ptr().cast::<c_void>()
+                ];
+            }
+        } else {
+            log::error!("unable to create the Display P3 color space");
+        }
+    }
+    // Support direct-to-display rendering if the window is not transparent
+    // https://developer.apple.com/documentation/metal/managing-your-game-window-for-metal-in-macos
+    layer.set_opaque(!transparent);
+    layer.set_maximum_drawable_count(3);
+    // Allow texture reading for visual tests and UI automation screenshots
+    // (captures without ScreenCaptureKit). Only debug builds pay the
+    // presentation cost, even when `test-support` is compiled in.
+    #[cfg(all(feature = "test-support", debug_assertions))]
+    layer.set_framebuffer_only(false);
+    objc2_layer.setAllowsNextDrawableTimeout(false);
+    objc2_layer.setNeedsDisplayOnBoundsChange(true);
+    // UIKit sizes a view's backing layer itself; only AppKit-hosted
+    // layers need to track their superlayer's bounds.
+    #[cfg(target_os = "macos")]
+    objc2_layer.setAutoresizingMask(
+        objc2_quartz_core::CAAutoresizingMask::LayerWidthSizable
+            | objc2_quartz_core::CAAutoresizingMask::LayerHeightSizable,
+    );
+}
+
 #[repr(C)]
 pub struct PathRasterizationVertex {
     pub xy_position: Point<ScaledPixels>,
@@ -188,44 +224,7 @@ impl MetalRenderer {
     ) {
         layer.set_device(device);
         layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-        // metal-rs doesn't bind these setters, so view the same object through
-        // objc2's typed CAMetalLayer binding.
-        let objc2_layer: &objc2_quartz_core::CAMetalLayer = unsafe { &*layer.as_ptr().cast() };
-        if use_display_p3 {
-            // SAFETY: The constant is extern, from Core Graphics
-            let display_p3_name = unsafe { kCGColorSpaceDisplayP3 };
-            if let Some(display_p3_color_space) = CGColorSpace::create_with_name(display_p3_name) {
-                // SAFETY: `layer` is a CAMetalLayer and the color space remains valid for the call.
-                // 'metal-rs' does not expose CAMetalLayer's typed `colorspace` setter.
-                // Could be replaced with a native binding via objc2-* in future
-                unsafe {
-                    let _: () = objc2::msg_send![
-                        objc2_layer,
-                        setColorspace: display_p3_color_space.as_ptr().cast::<c_void>()
-                    ];
-                }
-            } else {
-                log::error!("unable to create the Display P3 color space");
-            }
-        }
-        // Support direct-to-display rendering if the window is not transparent
-        // https://developer.apple.com/documentation/metal/managing-your-game-window-for-metal-in-macos
-        layer.set_opaque(!transparent);
-        layer.set_maximum_drawable_count(3);
-        // Allow texture reading for visual tests and UI automation screenshots
-        // (captures without ScreenCaptureKit). Only debug builds pay the
-        // presentation cost, even when `test-support` is compiled in.
-        #[cfg(all(feature = "test-support", debug_assertions))]
-        layer.set_framebuffer_only(false);
-        objc2_layer.setAllowsNextDrawableTimeout(false);
-        objc2_layer.setNeedsDisplayOnBoundsChange(true);
-        // UIKit sizes a view's backing layer itself; only AppKit-hosted
-        // layers need to track their superlayer's bounds.
-        #[cfg(target_os = "macos")]
-        objc2_layer.setAutoresizingMask(
-            objc2_quartz_core::CAAutoresizingMask::LayerWidthSizable
-                | objc2_quartz_core::CAAutoresizingMask::LayerHeightSizable,
-        );
+        configure_window_layer(layer, transparent, use_display_p3);
     }
 
     /// Creates a new headless MetalRenderer for offscreen rendering without a window.
@@ -1238,7 +1237,10 @@ impl MetalRenderer {
         );
 
         for (index, surface) in surfaces.iter().enumerate() {
-            let image_buffer = &surface.image_buffer;
+            let image_buffer = match &surface.content {
+                SurfaceContent::ImageBuffer(image_buffer) => image_buffer,
+                SurfaceContent::Custom(_) => continue,
+            };
             let texture_size = size(
                 DevicePixels::from(CVPixelBufferGetWidth(image_buffer) as i32),
                 DevicePixels::from(CVPixelBufferGetHeight(image_buffer) as i32),
@@ -1783,8 +1785,7 @@ mod tests {
             order: 0,
             bounds,
             content_mask: ContentMask { bounds },
-            image_buffer: image_buffer.clone(),
-            custom: None,
+            content: SurfaceContent::ImageBuffer(image_buffer.clone()),
         });
         drop(image_buffer);
         scene.finish();
