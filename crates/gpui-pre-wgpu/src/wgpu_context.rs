@@ -478,10 +478,18 @@ impl WgpuContext {
         } else {
             wgpu::Backends::VULKAN | wgpu::Backends::GL
         };
+        // The renderer makes no indirect draws. Indirect call validation costs a compute
+        // pipeline at device creation and, on DX12, three command signatures for each
+        // pipeline layout: about 190 ms for each layout on an Intel UHD iGPU.
+        // `WGPU_VALIDATION_INDIRECT_CALL=1` turns it on for a custom surface that draws
+        // indirectly.
+        let flags = wgpu::InstanceFlags::default()
+            .difference(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL)
+            .with_env();
         time_startup_stage("wgpu-instance", || {
             wgpu::Instance::new(wgpu::InstanceDescriptor {
                 backends: wgpu::Backends::from_env().unwrap_or(default_backends),
-                flags: wgpu::InstanceFlags::default(),
+                flags,
                 backend_options: wgpu::BackendOptions::from_env_or_default(),
                 memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
                 display,
