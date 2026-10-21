@@ -165,18 +165,24 @@ impl DirectXRenderer {
             .context("Creating DirectX devices")?;
         let atlas = Arc::new(DirectXAtlas::new(&devices.device, &devices.device_context));
 
-        let resources = DirectXResources::new(&devices, 1, 1, hwnd, disable_direct_composition)
-            .context("Creating DirectX resources")?;
+        let resources = gpui_wgpu::time_startup_stage("dx11-resources", || {
+            DirectXResources::new(&devices, 1, 1, hwnd, disable_direct_composition)
+        })
+        .context("Creating DirectX resources")?;
         let globals = DirectXGlobalElements::new(&devices.device)
             .context("Creating DirectX global elements")?;
-        let pipelines = DirectXRenderPipelines::new(&devices.device)
-            .context("Creating DirectX render pipelines")?;
+        let pipelines = gpui_wgpu::time_startup_stage("dx11-pipelines", || {
+            DirectXRenderPipelines::new(&devices.device)
+        })
+        .context("Creating DirectX render pipelines")?;
 
         let direct_composition = if disable_direct_composition {
             None
         } else {
-            let composition = DirectComposition::new(devices.dxgi_device.as_ref().unwrap(), hwnd)
-                .context("Creating DirectComposition")?;
+            let composition = gpui_wgpu::time_startup_stage("dx11-composition", || {
+                DirectComposition::new(devices.dxgi_device.as_ref().unwrap(), hwnd)
+            })
+            .context("Creating DirectComposition")?;
             composition
                 .set_swap_chain(&resources.swap_chain)
                 .context("Setting swap chain for DirectComposition")?;
