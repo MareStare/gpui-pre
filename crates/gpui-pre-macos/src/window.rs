@@ -2134,6 +2134,10 @@ impl PlatformWindow for MacWindow {
         None
     }
 
+    fn draws_custom_surfaces(&self) -> bool {
+        self.0.lock().renderer.draws_custom_surfaces()
+    }
+
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {
         let executor = self.0.lock().foreground_executor.clone();
         executor
