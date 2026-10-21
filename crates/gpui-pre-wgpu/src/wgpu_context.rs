@@ -2,6 +2,8 @@
 #[cfg(not(target_family = "wasm"))]
 use crate::{WgpuRenderer, WgpuSurfaceConfig};
 #[cfg(not(target_family = "wasm"))]
+use crate::{StartupStage, time_startup_stage};
+#[cfg(not(target_family = "wasm"))]
 use anyhow::Context as _;
 #[cfg(not(target_family = "wasm"))]
 use gpui_util::ResultExt;
@@ -484,12 +486,14 @@ impl WgpuContext {
         } else {
             wgpu::Backends::VULKAN | wgpu::Backends::GL
         };
-        wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::from_env().unwrap_or(default_backends),
-            flags: wgpu::InstanceFlags::default(),
-            backend_options: wgpu::BackendOptions::from_env_or_default(),
-            memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
-            display,
+        time_startup_stage("wgpu-instance", || {
+            wgpu::Instance::new(wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::from_env().unwrap_or(default_backends),
+                flags: wgpu::InstanceFlags::default(),
+                backend_options: wgpu::BackendOptions::from_env_or_default(),
+                memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+                display,
+            })
         })
     }
 
@@ -528,7 +532,9 @@ impl WgpuContext {
         bool,
         TextureFormat,
     )> {
+        let enumerate_stage = StartupStage::start();
         let mut adapters: Vec<_> = instance.enumerate_adapters(wgpu::Backends::all()).await;
+        enumerate_stage.end("wgpu-enumerate-adapters");
 
         if adapters.is_empty() {
             anyhow::bail!("No GPU adapters found");
@@ -659,7 +665,9 @@ impl WgpuContext {
         surface: &wgpu::Surface<'_>,
         config: &WgpuSurfaceConfig,
     ) -> anyhow::Result<(wgpu::Device, wgpu::Queue, bool, TextureFormat)> {
-        let caps = surface.get_capabilities(adapter);
+        let caps = time_startup_stage("wgpu-probe-surface-caps", || {
+            surface.get_capabilities(adapter)
+        });
         if caps.formats.is_empty() {
             anyhow::bail!("no compatible surface formats");
         }
@@ -667,12 +675,15 @@ impl WgpuContext {
             anyhow::bail!("no compatible alpha modes");
         }
 
+        let device_stage = StartupStage::start();
         let (device, queue, dual_source_blending, color_atlas_texture_format) =
             Self::create_device(adapter).await?;
+        device_stage.end("wgpu-request-device");
         // Test with the configuration the renderer will use, so that it doesn't need to
         // configure the surface a second time.
         let (surface_config, _, _) =
             WgpuRenderer::surface_configuration(surface, adapter, &device, config)?;
+        let configure_stage = StartupStage::start();
         let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
 
         surface.configure(&device, &surface_config);
@@ -681,6 +692,7 @@ impl WgpuContext {
         if let Some(e) = error {
             anyhow::bail!("surface configuration failed: {e}");
         }
+        configure_stage.end("wgpu-probe-configure");
 
         Ok((
             device,

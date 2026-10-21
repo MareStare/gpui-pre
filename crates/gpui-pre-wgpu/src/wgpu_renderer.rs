@@ -1,6 +1,9 @@
 // Modified for gpui-pre (snapshot of zed@f816e1f): adapt device queues and sRGB detection to wgpu 30.0.1.
 use crate::wgpu_custom_surface::as_wgpu_surface;
-use crate::{CompositorGpuHint, DeviceErrorState, WgpuAtlas, WgpuContext, WgpuSurfaceFrame};
+use crate::{
+    CompositorGpuHint, DeviceErrorState, StartupStage, WgpuAtlas, WgpuContext, WgpuSurfaceFrame,
+    time_startup_stage,
+};
 use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
 use collections::FxHashMap;
@@ -332,11 +335,11 @@ impl WgpuRenderer {
         // Safety: The caller guarantees that the window handle is valid for the
         // lifetime of this renderer. In practice, the RawWindow struct is created
         // from the native window handles and the surface is dropped before the window.
-        let surface = unsafe {
+        let surface = time_startup_stage("wgpu-create-surface", || unsafe {
             instance
                 .create_surface_unsafe(target)
-                .map_err(|e| anyhow::anyhow!("Failed to create surface: {e}"))?
-        };
+                .map_err(|e| anyhow::anyhow!("Failed to create surface: {e}"))
+        })?;
 
         let mut ctx_ref = gpu_context.borrow_mut();
         let surface_configured = ctx_ref.is_none();
@@ -345,12 +348,9 @@ impl WgpuRenderer {
                 context.check_compatible_with_surface(&surface)?;
                 context
             }
-            None => ctx_ref.insert(WgpuContext::new(
-                instance,
-                &surface,
-                &config,
-                compositor_gpu,
-            )?),
+            None => ctx_ref.insert(time_startup_stage("wgpu-context", || {
+                WgpuContext::new(instance, &surface, &config, compositor_gpu)
+            })?),
         };
 
         let atlas = Arc::new(WgpuAtlas::from_context(context));
@@ -402,7 +402,8 @@ impl WgpuRenderer {
         wgpu::CompositeAlphaMode,
         wgpu::CompositeAlphaMode,
     )> {
-        let surface_caps = surface.get_capabilities(adapter);
+        let surface_caps =
+            time_startup_stage("wgpu-surface-caps", || surface.get_capabilities(adapter));
         let preferred_formats = [
             wgpu::TextureFormat::Bgra8Unorm,
             wgpu::TextureFormat::Rgba8Unorm,
@@ -504,13 +505,17 @@ impl WgpuRenderer {
         // Adapter selection configures the surface with this same configuration when it
         // creates the context, so only configure it here when that did not happen.
         if !surface_configured {
-            surface.configure(&context.device, &surface_config);
+            time_startup_stage("wgpu-configure", || {
+                surface.configure(&context.device, &surface_config);
+            });
         }
 
         let surface_format = surface_config.format;
         let alpha_mode = surface_config.alpha_mode;
         let max_texture_size = context.device.limits().max_texture_dimension_2d;
-        let core = WgpuRendererCore::new(context, atlas.clone(), surface_format, alpha_mode);
+        let core = time_startup_stage("wgpu-renderer-core", || {
+            WgpuRendererCore::new(context, atlas.clone(), surface_format, alpha_mode)
+        });
 
         Ok(Self {
             context: gpu_context,
@@ -762,15 +767,19 @@ impl WgpuRendererCore {
         } else {
             STORAGE_BUFFER_SHADERS
         };
-        let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("gpui_shaders"),
-            source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+        let shader_module = time_startup_stage("wgpu-shader-module", || {
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("gpui_shaders"),
+                source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+            })
         });
 
         let subpixel_shader_module = if dual_source_blending {
-            Some(device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("gpui_subpixel_shaders"),
-                source: wgpu::ShaderSource::Wgsl(SUBPIXEL_SHADERS.into()),
+            Some(time_startup_stage("wgpu-shader-module-subpixel", || {
+                device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("gpui_subpixel_shaders"),
+                    source: wgpu::ShaderSource::Wgsl(SUBPIXEL_SHADERS.into()),
+                })
             }))
         } else {
             None
@@ -799,6 +808,7 @@ impl WgpuRendererCore {
                                color_targets: &[Option<wgpu::ColorTargetState>],
                                sample_count: u32,
                                module: &wgpu::ShaderModule| {
+            let stage = StartupStage::start();
             let mut bind_group_layouts = vec![Some(globals_layout), Some(data_layout)];
             bind_group_layouts.extend(texture_layout.map(Some));
             let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -807,7 +817,7 @@ impl WgpuRendererCore {
                 immediate_size: 0,
             });
 
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(name),
                 layout: Some(&pipeline_layout),
                 vertex: wgpu::VertexState {
@@ -839,7 +849,9 @@ impl WgpuRendererCore {
                 },
                 multiview_mask: None,
                 cache: None,
-            })
+            });
+            stage.end(&format!("wgpu-pipeline-{name}"));
+            pipeline
         };
 
         let quads = create_pipeline(
