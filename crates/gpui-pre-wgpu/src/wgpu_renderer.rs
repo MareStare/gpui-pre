@@ -112,6 +112,15 @@ struct PathRasterizationVertex {
     bounds: Bounds<ScaledPixels>,
 }
 
+/// How text glyphs blend with the background. A platform that has system text
+/// settings passes them, so that text looks the same as in its native renderer.
+#[derive(Clone, Copy, Debug)]
+pub struct TextContrast {
+    pub gamma: f32,
+    pub grayscale_enhanced_contrast: f32,
+    pub subpixel_enhanced_contrast: f32,
+}
+
 pub struct WgpuSurfaceConfig {
     pub size: Size<DevicePixels>,
     pub transparent: bool,
@@ -258,6 +267,7 @@ pub struct WgpuRenderer {
     opaque_alpha_mode: wgpu::CompositeAlphaMode,
     max_texture_size: u32,
     is_bgr: bool,
+    text_contrast: Option<TextContrast>,
     failed_frame_count: u32,
     device_errors: Arc<DeviceErrorState>,
     observed_error_generation: u64,
@@ -474,6 +484,7 @@ impl WgpuRenderer {
             opaque_alpha_mode,
             max_texture_size,
             is_bgr: false,
+            text_contrast: None,
             failed_frame_count: 0,
             device_errors: Arc::clone(context.errors()),
             observed_error_generation: 0,
@@ -1076,6 +1087,13 @@ impl WgpuRenderer {
         self.is_bgr = is_bgr;
         if let Some(core) = self.core_mut() {
             core.is_bgr = is_bgr;
+        }
+    }
+
+    pub fn set_text_contrast(&mut self, contrast: TextContrast) {
+        self.text_contrast = Some(contrast);
+        if let Some(core) = self.core_mut() {
+            core.rendering_params.set_text_contrast(contrast);
         }
     }
 
@@ -2316,6 +2334,7 @@ impl WgpuRenderer {
         self.atlas.handle_device_lost(context);
 
         let is_bgr = self.is_bgr;
+        let text_contrast = self.text_contrast;
         *self = Self::new_internal(
             Some(gpu_context.clone()),
             context,
@@ -2325,6 +2344,9 @@ impl WgpuRenderer {
             self.atlas.clone(),
         )?;
         self.set_subpixel_layout(is_bgr);
+        if let Some(contrast) = text_contrast {
+            self.set_text_contrast(contrast);
+        }
 
         log::info!("GPU recovery complete");
         Ok(())
@@ -2658,6 +2680,12 @@ impl RenderingParameters {
             grayscale_enhanced_contrast,
             subpixel_enhanced_contrast,
         }
+    }
+
+    fn set_text_contrast(&mut self, contrast: TextContrast) {
+        self.gamma_ratios = get_gamma_correction_ratios(contrast.gamma);
+        self.grayscale_enhanced_contrast = contrast.grayscale_enhanced_contrast;
+        self.subpixel_enhanced_contrast = contrast.subpixel_enhanced_contrast;
     }
 }
 
