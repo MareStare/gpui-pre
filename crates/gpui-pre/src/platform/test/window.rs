@@ -608,4 +608,8 @@ impl PlatformWindow for TestWindow {
     fn gpu_specs(&self) -> Option<GpuSpecs> {
         None
     }
+
+    fn draws_custom_surfaces(&self) -> bool {
+        false
+    }
 }

@@ -1063,6 +1063,10 @@ impl PlatformWindow for WindowsWindow {
         self.state.renderer.borrow().gpu_specs().log_err()
     }
 
+    fn draws_custom_surfaces(&self) -> bool {
+        self.state.renderer.borrow().draws_custom_surfaces()
+    }
+
     fn update_ime_position(&self, bounds: Bounds<Pixels>) {
         let scale_factor = self.state.scale_factor.get();
         let caret_position = POINT {
