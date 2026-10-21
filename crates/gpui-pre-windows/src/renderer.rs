@@ -1,5 +1,6 @@
-//! The renderer of a window. `GPUI_RENDERER=wgpu` picks the wgpu renderer.
-//! The default is the Direct3D 11 renderer.
+//! The renderer of a window. The default is the wgpu renderer.
+//! `GPUI_RENDERER=dx11` picks the Direct3D 11 renderer. A window whose wgpu
+//! renderer fails to start uses the Direct3D 11 renderer too.
 
 use std::{num::NonZeroIsize, rc::Rc, sync::Arc};
 
@@ -23,8 +24,8 @@ thread_local! {
     static WGPU_CONTEXT: GpuContext = Rc::default();
 }
 
-pub(crate) fn wgpu_requested() -> bool {
-    std::env::var("GPUI_RENDERER").is_ok_and(|value| value == "wgpu")
+fn wgpu_requested() -> bool {
+    !std::env::var("GPUI_RENDERER").is_ok_and(|value| value == "dx11")
 }
 
 /// `GPUI_FRAME_LOG=1` prints the time of each draw call to stderr.
@@ -63,34 +64,46 @@ impl WindowRenderer {
         size: Size<DevicePixels>,
     ) -> Result<Self> {
         if wgpu_requested() {
-            // The window can be created with the default size of the system,
-            // which is no real size. The first resize gives the real size.
-            let valid = |side: DevicePixels| (1..=16384).contains(&side.0);
-            let size = if valid(size.width) && valid(size.height) {
-                size
-            } else {
-                Size::new(DevicePixels(1), DevicePixels(1))
-            };
-            let config = WgpuSurfaceConfig {
-                size,
-                transparent: false,
-                preferred_present_mode: present_mode(),
-            };
-            let context = WGPU_CONTEXT.with(Rc::clone);
-            let mut renderer = WgpuRenderer::new(context, &RawWindow::new(hwnd), config, None)
-                .context("Creating wgpu renderer")?;
-            let font_info = DirectXRenderer::get_font_info();
-            renderer.set_text_contrast(TextContrast {
-                gamma: font_info.gamma,
-                grayscale_enhanced_contrast: font_info.grayscale_enhanced_contrast,
-                subpixel_enhanced_contrast: font_info.subpixel_enhanced_contrast,
-            });
-            renderer.set_subpixel_layout(font_info.is_bgr);
-            return Ok(Self::Wgpu(renderer));
+            match Self::new_wgpu(hwnd, size) {
+                Ok(renderer) => return Ok(renderer),
+                Err(error) => log::error!("{error:#}: falling back to Direct3D 11"),
+            }
         }
         let renderer = DirectXRenderer::new(hwnd, directx_devices, disable_direct_composition)
             .context("Creating DirectX renderer")?;
         Ok(Self::DirectX(renderer))
+    }
+
+    fn new_wgpu(hwnd: HWND, size: Size<DevicePixels>) -> Result<Self> {
+        // The window can be created with the default size of the system,
+        // which is no real size. The first resize gives the real size.
+        let valid = |side: DevicePixels| (1..=16384).contains(&side.0);
+        let size = if valid(size.width) && valid(size.height) {
+            size
+        } else {
+            Size::new(DevicePixels(1), DevicePixels(1))
+        };
+        let config = WgpuSurfaceConfig {
+            size,
+            transparent: false,
+            preferred_present_mode: present_mode(),
+        };
+        let context = WGPU_CONTEXT.with(Rc::clone);
+        let mut renderer = WgpuRenderer::new(context, &RawWindow::new(hwnd), config, None)
+            .context("Creating wgpu renderer")?;
+        let font_info = DirectXRenderer::get_font_info();
+        renderer.set_text_contrast(TextContrast {
+            gamma: font_info.gamma,
+            grayscale_enhanced_contrast: font_info.grayscale_enhanced_contrast,
+            subpixel_enhanced_contrast: font_info.subpixel_enhanced_contrast,
+        });
+        renderer.set_subpixel_layout(font_info.is_bgr);
+        Ok(Self::Wgpu(renderer))
+    }
+
+    /// Whether the renderer draws the custom surfaces of the scene.
+    pub(crate) const fn draws_custom_surfaces(&self) -> bool {
+        matches!(self, Self::Wgpu(_))
     }
 
     pub(crate) fn draw(
