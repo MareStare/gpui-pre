@@ -367,27 +367,14 @@ impl WgpuRenderer {
     where
         W: HasWindowHandle + HasDisplayHandle + std::fmt::Debug + Send + Sync + Clone + 'static,
     {
-        Self::new_from_source(gpu_context, &WindowSource(window), config, compositor_gpu)
-    }
-
-    /// Creates a renderer that draws to a `CAMetalLayer`, e.g. the backing layer of
-    /// an AppKit view.
-    ///
-    /// # Safety
-    /// `layer` must point to a `CAMetalLayer`. The surfaces of the renderer retain it.
-    #[cfg(target_vendor = "apple")]
-    pub unsafe fn new_from_metal_layer(
-        gpu_context: GpuContext,
-        layer: std::ptr::NonNull<std::ffi::c_void>,
-        config: WgpuSurfaceConfig,
-    ) -> anyhow::Result<Self> {
-        Self::new_from_source(gpu_context, &MetalLayerSource(layer), config, None)
+        let source = WindowSource(window.clone());
+        Self::new_from_source(gpu_context, &source, config, compositor_gpu)
     }
 
     #[cfg(not(target_family = "wasm"))]
-    fn new_from_source(
+    pub(crate) fn new_from_source(
         gpu_context: GpuContext,
-        source: &impl SurfaceSource,
+        source: &(impl SurfaceSource + ?Sized),
         config: WgpuSurfaceConfig,
         compositor_gpu: Option<CompositorGpuHint>,
     ) -> anyhow::Result<Self> {
@@ -2314,6 +2301,14 @@ impl WgpuRenderer {
     where
         W: HasWindowHandle + HasDisplayHandle + std::fmt::Debug + Send + Sync + Clone + 'static,
     {
+        self.recover_from(&WindowSource(window.clone()))
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) fn recover_from(
+        &mut self,
+        source: &(impl SurfaceSource + ?Sized),
+    ) -> anyhow::Result<()> {
         let gpu_context = self.context.as_ref().expect("recover requires gpu_context");
 
         // Check if another window already recovered the context
@@ -2322,7 +2317,6 @@ impl WgpuRenderer {
             .as_ref()
             .is_none_or(|ctx| ctx.device_lost());
 
-        let source = WindowSource(window);
         let surface = if needs_new_context {
             log::warn!("GPU device lost, recreating context...");
 
@@ -2337,7 +2331,7 @@ impl WgpuRenderer {
             std::thread::sleep(std::time::Duration::from_millis(350));
 
             let (new_context, surface) =
-                create_context_and_surface(&source, self.compositor_gpu, true)?;
+                create_context_and_surface(source, self.compositor_gpu, true)?;
             *gpu_context.borrow_mut() = Some(new_context);
             surface
         } else {
@@ -2652,7 +2646,7 @@ fn instance_range(range: Range<usize>) -> Range<u32> {
 
 /// A native target that the renderer makes surfaces for.
 #[cfg(not(target_family = "wasm"))]
-trait SurfaceSource {
+pub(crate) trait SurfaceSource {
     /// The display handle for the instances that draw to the target.
     fn display(&self) -> Option<Box<dyn wgpu::wgt::WgpuHasDisplayHandle>>;
 
@@ -2660,10 +2654,10 @@ trait SurfaceSource {
 }
 
 #[cfg(not(target_family = "wasm"))]
-struct WindowSource<'a, W>(&'a W);
+pub(crate) struct WindowSource<W>(pub(crate) W);
 
 #[cfg(not(target_family = "wasm"))]
-impl<W> SurfaceSource for WindowSource<'_, W>
+impl<W> SurfaceSource for WindowSource<W>
 where
     W: HasWindowHandle + HasDisplayHandle + std::fmt::Debug + Send + Sync + Clone + 'static,
 {
@@ -2680,9 +2674,9 @@ where
     }
 }
 
-/// A `CAMetalLayer`. Each surface retains it.
+/// A `CAMetalLayer` that lives as long as the renderer. Each surface retains it.
 #[cfg(target_vendor = "apple")]
-struct MetalLayerSource(std::ptr::NonNull<std::ffi::c_void>);
+pub(crate) struct MetalLayerSource(pub(crate) std::ptr::NonNull<std::ffi::c_void>);
 
 #[cfg(target_vendor = "apple")]
 impl SurfaceSource for MetalLayerSource {
@@ -2693,7 +2687,7 @@ impl SurfaceSource for MetalLayerSource {
 
     fn create_surface(&self, instance: &wgpu::Instance) -> anyhow::Result<wgpu::Surface<'static>> {
         let target = wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(self.0.as_ptr());
-        // SAFETY: the caller of `WgpuRenderer::new_from_metal_layer` gives a `CAMetalLayer`.
+        // SAFETY: the field is a live `CAMetalLayer`.
         unsafe { instance.create_surface_unsafe(target) }
             .map_err(|e| anyhow::anyhow!("Failed to create surface: {e}"))
     }
@@ -2703,7 +2697,7 @@ impl SurfaceSource for MetalLayerSource {
 /// to the window.
 #[cfg(not(target_family = "wasm"))]
 fn create_context_and_surface(
-    source: &impl SurfaceSource,
+    source: &(impl SurfaceSource + ?Sized),
     compositor_gpu: Option<CompositorGpuHint>,
     reject_software: bool,
 ) -> anyhow::Result<(WgpuContext, wgpu::Surface<'static>)> {

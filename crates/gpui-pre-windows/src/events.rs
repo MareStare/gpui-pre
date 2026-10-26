@@ -1363,6 +1363,9 @@ impl WindowsWindowInner {
             signal_at,
             signal_source,
         });
+        if self.state.renderer.borrow_mut().take_force_render() {
+            self.state.force_render_pending.set(true);
+        }
 
         self.state.callbacks.request_frame.set(Some(request_frame));
         self.update_ime_enabled(handle);
