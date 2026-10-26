@@ -1102,8 +1102,6 @@ impl MacWindow {
                 frame_source: None,
                 renderer: renderer::new_renderer(
                     renderer_context,
-                    native_window as *mut _,
-                    native_view as *mut _,
                     bounds.size.map(|pixels| pixels.as_f32()),
                     false,
                 ),

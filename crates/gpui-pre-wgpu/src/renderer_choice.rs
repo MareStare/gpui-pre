@@ -7,7 +7,16 @@ pub fn wgpu_requested(native: &str) -> bool {
 }
 
 fn wgpu_requested_by(value: Option<&str>, native: &str) -> bool {
-    value != Some(native)
+    match value {
+        None | Some("wgpu") => true,
+        Some(value) if value == native => false,
+        Some(value) => {
+            log::warn!(
+                "Unknown GPUI_RENDERER {value:?}, using wgpu. The values are wgpu and {native}."
+            );
+            true
+        }
+    }
 }
 
 #[cfg(test)]
@@ -18,7 +27,7 @@ mod tests {
     fn wgpu_is_the_default() {
         assert!(wgpu_requested_by(None, "metal"));
         assert!(wgpu_requested_by(Some("wgpu"), "metal"));
-        assert!(wgpu_requested_by(Some("dx11"), "metal"));
+        assert!(wgpu_requested_by(Some("vulkan"), "metal"));
         assert!(!wgpu_requested_by(Some("metal"), "metal"));
         assert!(!wgpu_requested_by(Some("dx11"), "dx11"));
     }

@@ -31,16 +31,7 @@ pub struct WgpuLayerRenderer {
 
 /// Creates the renderer of a window. The view of the window takes the layer of the
 /// renderer as its backing layer.
-///
-/// # Safety
-/// The renderer reads none of the pointers.
-pub unsafe fn new_renderer(
-    context: Context,
-    _native_window: *mut c_void,
-    _native_view: *mut c_void,
-    bounds: Size<f32>,
-    transparent: bool,
-) -> Renderer {
+pub fn new_renderer(context: Context, bounds: Size<f32>, transparent: bool) -> Renderer {
     time_startup_stage("window-renderer", || {
         if wgpu_requested("metal") {
             match WgpuLayerRenderer::new(bounds, transparent) {
