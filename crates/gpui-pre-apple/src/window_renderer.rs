@@ -1,5 +1,6 @@
-//! The renderer of a window. `GPUI_RENDERER=wgpu` picks the wgpu renderer.
-//! The default is the Metal renderer.
+//! The renderer of a window. The default is the wgpu renderer.
+//! `GPUI_RENDERER=metal` picks the Metal renderer. A window whose wgpu
+//! renderer fails to start uses the Metal renderer too.
 
 use std::{ffi::c_void, ptr::NonNull, rc::Rc, sync::Arc};
 
@@ -10,6 +11,7 @@ use foreign_types::ForeignType;
 use gpui::{DevicePixels, PlatformAtlas, Scene, Size};
 use gpui_wgpu::{
     GpuContext, TextContrast, WgpuRenderer, WgpuSurfaceConfig, time_frame_draw, time_startup_stage,
+    wgpu_requested,
 };
 #[cfg(any(test, feature = "test-support"))]
 use image::RgbaImage;
@@ -33,10 +35,6 @@ thread_local! {
     static WGPU_CONTEXT: GpuContext = Rc::default();
 }
 
-fn wgpu_requested() -> bool {
-    std::env::var("GPUI_RENDERER").is_ok_and(|value| value == "wgpu")
-}
-
 /// Creates the renderer of a window. The view of the window takes the layer of the
 /// renderer as its backing layer.
 ///
@@ -50,7 +48,7 @@ pub unsafe fn new_renderer(
     transparent: bool,
 ) -> Renderer {
     time_startup_stage("window-renderer", || {
-        if wgpu_requested() {
+        if wgpu_requested("metal") {
             match WgpuWindowRenderer::new(bounds, transparent) {
                 Ok(renderer) => return Renderer::Wgpu(renderer),
                 Err(error) => log::error!("Using the Metal renderer: {error:#}"),
