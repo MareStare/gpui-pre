@@ -1118,15 +1118,8 @@ impl WgpuRenderer {
         };
         let resources = &mut core.resources;
 
-        // Wait for any in-flight GPU work to complete before destroying textures
-        if let Err(e) = resources.device.poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: None,
-        }) {
-            warn!("Failed to poll device during resize: {e:?}");
-        }
-
-        // Destroy old textures before allocating new ones to avoid GPU memory spikes
+        // Destroy old textures before allocating new ones to avoid GPU memory spikes.
+        // wgpu frees a texture that GPU work in flight uses after that work ends.
         if let Some(ref texture) = resources.path_intermediate_texture {
             texture.destroy();
         }
