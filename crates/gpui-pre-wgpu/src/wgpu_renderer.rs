@@ -249,6 +249,7 @@ enum InstanceData {
 /// GPU resources that must be dropped together during device recovery.
 struct WgpuResources {
     device: Arc<wgpu::Device>,
+    device_generation: u64,
     queue: Arc<wgpu::Queue>,
     pipelines: WgpuPipelines,
     bind_group_layouts: WgpuBindGroupLayouts,
@@ -1420,6 +1421,7 @@ impl WgpuRendererCore {
         Self {
             resources: WgpuResources {
                 device,
+                device_generation: context.device_generation(),
                 queue,
                 pipelines,
                 bind_group_layouts,
@@ -1695,6 +1697,7 @@ impl WgpuRendererCore {
                             let resources = self.resources();
                             content.draw(WgpuSurfaceFrame {
                                 device: &resources.device,
+                                device_generation: resources.device_generation,
                                 queue: &resources.queue,
                                 encoder: &mut encoder,
                                 target: frame_view,
@@ -2327,7 +2330,10 @@ impl WgpuRenderer {
 
             // Drop old resources to release Arc<Device>/Arc<Queue> and GPU resources
             self.state = RendererState::Released;
-            *gpu_context.borrow_mut() = None;
+            let instance = gpu_context
+                .borrow_mut()
+                .take()
+                .map(|context| context.instance);
 
             // Wait briefly for the GPU driver to stabilize, then try to
             // recreate the context without software renderers. If this fails
@@ -2336,7 +2342,7 @@ impl WgpuRenderer {
             std::thread::sleep(std::time::Duration::from_millis(350));
 
             let (new_context, surface) =
-                create_context_and_surface(source, self.compositor_gpu, true)?;
+                recreate_context_and_surface(source, instance, self.compositor_gpu)?;
             *gpu_context.borrow_mut() = Some(new_context);
             surface
         } else {
@@ -2739,6 +2745,29 @@ fn create_context_and_surface(
         }
     }
     Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No wgpu backends to try")))
+}
+
+/// Creates the context after a lost device. It tries the instance of the lost device
+/// first: there, the new device gets an id that differs from the id of the lost one.
+#[cfg(not(target_family = "wasm"))]
+fn recreate_context_and_surface(
+    source: &(impl SurfaceSource + ?Sized),
+    instance: Option<wgpu::Instance>,
+    compositor_gpu: Option<CompositorGpuHint>,
+) -> anyhow::Result<(WgpuContext, wgpu::Surface<'static>)> {
+    if let Some(instance) = instance {
+        let created = source.create_surface(&instance).and_then(|surface| {
+            let context = WgpuContext::new(instance, &surface, compositor_gpu, true)?;
+            Ok((context, surface))
+        });
+        match created {
+            Ok(created) => return Ok(created),
+            Err(error) => {
+                log::info!("The instance of the lost device has no adapter: {error:#}")
+            }
+        }
+    }
+    create_context_and_surface(source, compositor_gpu, true)
 }
 
 fn create_surface(
