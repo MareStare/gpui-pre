@@ -124,13 +124,11 @@ impl Renderer {
     pub fn update_transparency(&mut self, transparent: bool) {
         match self {
             Self::Metal(renderer) => renderer.update_transparency(transparent),
-            Self::Wgpu(renderer) => {
-                renderer.layer.set_opaque(!transparent);
-                renderer
-                    .renderer
-                    .renderer_mut()
-                    .update_transparency(transparent);
-            }
+            // The surface configuration sets the opacity of the layer.
+            Self::Wgpu(renderer) => renderer
+                .renderer
+                .renderer_mut()
+                .update_transparency(transparent),
         }
     }
 

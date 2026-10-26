@@ -474,10 +474,16 @@ impl WgpuRenderer {
                     })
             };
 
-        let transparent_alpha_mode = pick_alpha_mode(&[
-            wgpu::CompositeAlphaMode::PreMultiplied,
-            wgpu::CompositeAlphaMode::Inherit,
-        ])?;
+        // Metal offers no `PreMultiplied`. A `CAMetalLayer` composites premultiplied
+        // colors, also in the `PostMultiplied` mode.
+        let transparent_alpha_mode = if context.adapter.get_info().backend == wgpu::Backend::Metal {
+            pick_alpha_mode(&[wgpu::CompositeAlphaMode::PostMultiplied])?
+        } else {
+            pick_alpha_mode(&[
+                wgpu::CompositeAlphaMode::PreMultiplied,
+                wgpu::CompositeAlphaMode::Inherit,
+            ])?
+        };
 
         let opaque_alpha_mode = pick_alpha_mode(&[
             wgpu::CompositeAlphaMode::Opaque,
@@ -746,7 +752,7 @@ impl WgpuRendererCore {
         device: &wgpu::Device,
         layouts: &WgpuBindGroupLayouts,
         surface_format: wgpu::TextureFormat,
-        alpha_mode: wgpu::CompositeAlphaMode,
+        premultiplied_alpha: bool,
         path_sample_count: u32,
         dual_source_blending: bool,
         uses_webgl_instance_data: bool,
@@ -797,11 +803,10 @@ impl WgpuRendererCore {
             None
         };
 
-        let blend_mode = match alpha_mode {
-            wgpu::CompositeAlphaMode::PreMultiplied => {
-                wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING
-            }
-            _ => wgpu::BlendState::ALPHA_BLENDING,
+        let blend_mode = if premultiplied_alpha {
+            wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING
+        } else {
+            wgpu::BlendState::ALPHA_BLENDING
         };
 
         let create_pipeline = |desc: &PipelineDesc<'_>| {
@@ -1133,7 +1138,7 @@ impl WgpuRenderer {
             &resources.device,
             &resources.bind_group_layouts,
             format,
-            new_alpha_mode,
+            composites_premultiplied(new_alpha_mode, core.adapter_info.backend),
             core.rendering_params.path_sample_count,
             core.dual_source_blending,
             core.uses_webgl_instance_data,
@@ -1252,7 +1257,7 @@ impl WgpuRenderer {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         let premultiplied_alpha =
-            self.surface_config.alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied;
+            composites_premultiplied(self.surface_config.alpha_mode, core.adapter_info.backend);
         let render_start = std::time::Instant::now();
         if let Err(error) = core.render_frame(
             scene,
@@ -1305,7 +1310,7 @@ impl WgpuRendererCore {
             &device,
             &bind_group_layouts,
             target_format,
-            alpha_mode,
+            composites_premultiplied(alpha_mode, context.adapter.get_info().backend),
             rendering_params.path_sample_count,
             dual_source_blending,
             uses_webgl_instance_data,
@@ -2637,6 +2642,19 @@ impl gpui::PlatformHeadlessRenderer for WgpuHeadlessRenderer {
 
     fn sprite_atlas(&self) -> Arc<dyn gpui::PlatformAtlas> {
         self.core.atlas.clone()
+    }
+}
+
+/// Whether the compositor reads premultiplied colors from a surface with this mode.
+/// A `CAMetalLayer` always composites premultiplied colors. `PostMultiplied` on
+/// Metal only marks the layer as not opaque.
+fn composites_premultiplied(alpha_mode: wgpu::CompositeAlphaMode, backend: wgpu::Backend) -> bool {
+    match alpha_mode {
+        wgpu::CompositeAlphaMode::PreMultiplied => true,
+        wgpu::CompositeAlphaMode::PostMultiplied => backend == wgpu::Backend::Metal,
+        wgpu::CompositeAlphaMode::Auto
+        | wgpu::CompositeAlphaMode::Opaque
+        | wgpu::CompositeAlphaMode::Inherit => false,
     }
 }
 
