@@ -2180,6 +2180,10 @@ impl PlatformWindow for MacWindow {
         None
     }
 
+    fn gpu_failure(&self) -> Option<gpui::GpuFailure> {
+        self.0.lock().renderer.gpu_failure()
+    }
+
     fn draws_custom_surfaces(&self) -> bool {
         self.0.lock().renderer.draws_custom_surfaces()
     }
@@ -3279,8 +3283,10 @@ extern "C" fn window_did_change_key_status(this: &AnyObject, selector: Sel, _: *
             if let Some(mut callback) = lock.request_frame_callback.take() {
                 lock.renderer.set_presents_with_transaction(true);
                 lock.stop_display_link();
+                let force_render = lock.renderer.take_force_render();
                 drop(lock);
                 callback(RequestFrameOptions {
+                    force_render,
                     signal_at,
                     signal_source: FrameRequestSource::NativeCallback,
                     ..Default::default()
@@ -3405,8 +3411,10 @@ extern "C" fn display_layer(this: &AnyObject, _: Sel, _: *mut AnyObject) {
     if let Some(mut callback) = lock.request_frame_callback.take() {
         lock.renderer.set_presents_with_transaction(true);
         lock.stop_display_link();
+        let force_render = lock.renderer.take_force_render();
         drop(lock);
         callback(RequestFrameOptions {
+            force_render,
             signal_at,
             signal_source: FrameRequestSource::NativeCallback,
             ..Default::default()
@@ -3433,8 +3441,10 @@ extern "C" fn step(view: *mut c_void) {
             (None, FrameRequestSource::NativeCallback),
             |(at, source)| (Some(at), source),
         );
+        let force_render = lock.renderer.take_force_render();
         drop(lock);
         callback(RequestFrameOptions {
+            force_render,
             signal_at,
             signal_source,
             ..Default::default()

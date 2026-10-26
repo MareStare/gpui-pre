@@ -2,25 +2,20 @@
 //! `GPUI_RENDERER=dx11` picks the Direct3D 11 renderer. A window whose wgpu
 //! renderer fails to start uses the Direct3D 11 renderer too.
 
-use std::{num::NonZeroIsize, rc::Rc, sync::Arc};
+use std::{num::NonZeroIsize, sync::Arc};
 
 use anyhow::{Context as _, Result};
-use gpui::{DevicePixels, GpuSpecs, PlatformAtlas, Scene, Size, WindowBackgroundAppearance};
-use gpui_wgpu::{
-    GpuContext, TextContrast, WgpuRenderer, WgpuSurfaceConfig, time_startup_stage, wgpu_requested,
+use gpui::{
+    DevicePixels, GpuFailure, GpuSpecs, PlatformAtlas, Scene, Size, WindowBackgroundAppearance,
 };
+use gpui_wgpu::{TextContrast, WgpuWindowRenderer, time_startup_stage, wgpu_requested};
 use raw_window_handle as rwh;
 
 use crate::{DirectXDevices, DirectXRenderer, HWND};
 
 pub(crate) enum WindowRenderer {
     DirectX(DirectXRenderer),
-    Wgpu(WgpuRenderer),
-}
-
-thread_local! {
-    /// The windows of the thread share one wgpu device.
-    static WGPU_CONTEXT: GpuContext = Rc::default();
+    Wgpu(WgpuWindowRenderer),
 }
 
 impl WindowRenderer {
@@ -55,20 +50,8 @@ impl WindowRenderer {
     fn new_wgpu(hwnd: HWND, size: Size<DevicePixels>) -> Result<Self> {
         // The window can be created with the default size of the system,
         // which is no real size. The first resize gives the real size.
-        let valid = |side: DevicePixels| (1..=16384).contains(&side.0);
-        let size = if valid(size.width) && valid(size.height) {
-            size
-        } else {
-            Size::new(DevicePixels(1), DevicePixels(1))
-        };
-        let config = WgpuSurfaceConfig {
-            size,
-            transparent: false,
-            preferred_present_mode: None,
-        };
-        let context = WGPU_CONTEXT.with(Rc::clone);
-        let mut renderer = WgpuRenderer::new(context, &RawWindow::new(hwnd), config, None)
-            .context("Creating wgpu renderer")?;
+        let mut window = WgpuWindowRenderer::new(RawWindow::new(hwnd), size, false)?;
+        let renderer = window.renderer_mut();
         let font_info = DirectXRenderer::get_font_info();
         renderer.set_text_contrast(TextContrast {
             gamma: font_info.gamma,
@@ -76,7 +59,7 @@ impl WindowRenderer {
             subpixel_enhanced_contrast: font_info.subpixel_enhanced_contrast,
         });
         renderer.set_subpixel_layout(font_info.is_bgr);
-        Ok(Self::Wgpu(renderer))
+        Ok(Self::Wgpu(window))
     }
 
     /// Whether the renderer draws the custom surfaces of the scene.
@@ -98,6 +81,14 @@ impl WindowRenderer {
         }
     }
 
+    /// Tells whether the next frame must build the scene again, and clears the flag.
+    pub(crate) fn take_force_render(&mut self) -> bool {
+        match self {
+            Self::DirectX(_) => false,
+            Self::Wgpu(renderer) => renderer.take_force_render(),
+        }
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn render_to_image(
         &mut self,
@@ -106,21 +97,31 @@ impl WindowRenderer {
     ) -> Result<image::RgbaImage> {
         match self {
             Self::DirectX(renderer) => renderer.render_to_image(scene, background_appearance),
-            Self::Wgpu(_) => anyhow::bail!("The wgpu renderer renders to no image"),
+            Self::Wgpu(renderer) => renderer.render_to_image(),
         }
     }
 
     pub(crate) fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
         match self {
             Self::DirectX(renderer) => renderer.sprite_atlas(),
-            Self::Wgpu(renderer) => renderer.sprite_atlas().clone(),
+            Self::Wgpu(renderer) => renderer.renderer().sprite_atlas().clone(),
         }
     }
 
     pub(crate) fn gpu_specs(&self) -> Result<GpuSpecs> {
         match self {
             Self::DirectX(renderer) => renderer.gpu_specs(),
-            Self::Wgpu(renderer) => renderer.gpu_specs().context("GPU resources released"),
+            Self::Wgpu(renderer) => renderer
+                .renderer()
+                .gpu_specs()
+                .context("GPU resources released"),
+        }
+    }
+
+    pub(crate) fn gpu_failure(&self) -> Option<GpuFailure> {
+        match self {
+            Self::DirectX(_) => None,
+            Self::Wgpu(renderer) => renderer.renderer().gpu_failure(),
         }
     }
 
@@ -128,7 +129,7 @@ impl WindowRenderer {
         match self {
             Self::DirectX(renderer) => renderer.resize(size),
             Self::Wgpu(renderer) => {
-                renderer.update_drawable_size(size);
+                renderer.renderer_mut().update_drawable_size(size);
                 Ok(())
             }
         }
@@ -137,7 +138,7 @@ impl WindowRenderer {
     pub(crate) fn handle_device_lost(&mut self, directx_devices: &DirectXDevices) -> Result<()> {
         match self {
             Self::DirectX(renderer) => renderer.handle_device_lost(directx_devices),
-            // The wgpu renderer has its own device.
+            // The wgpu renderer has its own device and recovers it in `draw`.
             Self::Wgpu(_) => Ok(()),
         }
     }

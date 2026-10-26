@@ -15,6 +15,12 @@ pub trait WgpuSurface: Send + Sync + 'static {
 /// The frame that a custom surface draws into.
 pub struct WgpuSurfaceFrame<'a> {
     pub device: &'a wgpu::Device,
+
+    /// Changes when the renderer makes a new device, e.g. after a lost device.
+    /// Compare it in place of `device`: wgpu can compare a new device as equal
+    /// to the lost one.
+    pub device_generation: u64,
+
     pub queue: &'a wgpu::Queue,
     pub encoder: &'a mut wgpu::CommandEncoder,
     pub target: &'a wgpu::TextureView,

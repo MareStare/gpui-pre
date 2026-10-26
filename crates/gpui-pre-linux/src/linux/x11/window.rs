@@ -1980,6 +1980,10 @@ impl PlatformWindow for X11Window {
         self.0.state.borrow().renderer.as_ref()?.gpu_specs()
     }
 
+    fn gpu_failure(&self) -> Option<gpui::GpuFailure> {
+        self.0.state.borrow().renderer.as_ref()?.gpu_failure()
+    }
+
     fn play_system_bell(&self) {
         // Volume 0% means don't increase or decrease from system volume
         let _ = self.0.xcb.bell(0);
