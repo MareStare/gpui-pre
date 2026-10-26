@@ -42,7 +42,7 @@ const MAX_INSTANCE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
 
 pub type Context = Arc<Mutex<InstanceBufferPool>>;
 // The platform backends reach the window renderer through this module.
-pub use crate::window_renderer::{Renderer, WgpuWindowRenderer, new_renderer};
+pub use crate::window_renderer::{Renderer, WgpuLayerRenderer, new_renderer};
 
 pub struct InstanceBufferPool {
     buffer_size: usize,

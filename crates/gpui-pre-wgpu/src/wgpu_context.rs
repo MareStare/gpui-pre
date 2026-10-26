@@ -7,7 +7,7 @@ use anyhow::Context as _;
 use gpui_util::ResultExt;
 use parking_lot::Mutex;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use wgpu::TextureFormat;
 
 #[derive(Clone)]
@@ -20,6 +20,15 @@ pub struct WgpuContext {
     dual_source_blending: bool,
     color_texture_format: wgpu::TextureFormat,
     errors: Arc<DeviceErrorState>,
+    device_generation: u64,
+}
+
+/// A number that no other device of the process has. wgpu compares devices by an id
+/// that each instance counts from the start, so a device of a new instance can be
+/// equal to a lost device of an earlier instance.
+fn next_device_generation() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Errors reported by wgpu's device-wide callbacks.
@@ -301,6 +310,7 @@ impl WgpuContext {
             dual_source_blending,
             color_texture_format,
             errors,
+            device_generation: next_device_generation(),
         }
     }
 
@@ -400,6 +410,7 @@ impl WgpuContext {
             dual_source_blending,
             color_texture_format,
             errors,
+            device_generation: next_device_generation(),
         };
         Ok(PreparedWebGraphics { context, surface })
     }
@@ -761,6 +772,12 @@ impl WgpuContext {
     /// When this returns true, the context should be recreated.
     pub fn device_lost(&self) -> bool {
         self.errors.device_lost()
+    }
+
+    /// Tells the device apart from each other device of the process. Compare it in
+    /// place of the device: see `next_device_generation`.
+    pub fn device_generation(&self) -> u64 {
+        self.device_generation
     }
 
     /// The device-wide error state, shared with renderers on this device.

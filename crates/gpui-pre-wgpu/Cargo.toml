@@ -53,6 +53,10 @@ name = "layout_line"
 path = "benches/layout_line.rs"
 harness = false
 
+[[test]]
+name = "device_identity"
+path = "tests/device_identity.rs"
+
 [dependencies.anyhow]
 version = "1.0.86"
 

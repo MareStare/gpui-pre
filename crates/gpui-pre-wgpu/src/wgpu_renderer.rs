@@ -250,6 +250,7 @@ enum InstanceData {
 /// GPU resources that must be dropped together during device recovery.
 struct WgpuResources {
     device: Arc<wgpu::Device>,
+    device_generation: u64,
     queue: Arc<wgpu::Queue>,
     pipelines: WgpuPipelines,
     bind_group_layouts: WgpuBindGroupLayouts,
@@ -368,40 +369,20 @@ impl WgpuRenderer {
     where
         W: HasWindowHandle + HasDisplayHandle + std::fmt::Debug + Send + Sync + Clone + 'static,
     {
+        let source = WindowSource(window.clone());
         Self::new_from_source(
             gpu_context,
-            &WindowSource(window),
+            &source,
             config,
             wgpu::SurfaceColorSpace::Auto,
             compositor_gpu,
         )
     }
 
-    /// Creates a renderer that draws to a `CAMetalLayer`, e.g. the backing layer of
-    /// an AppKit view.
-    ///
-    /// # Safety
-    /// `layer` must point to a `CAMetalLayer`. The surfaces of the renderer retain it.
-    #[cfg(target_vendor = "apple")]
-    pub unsafe fn new_from_metal_layer(
-        gpu_context: GpuContext,
-        layer: std::ptr::NonNull<std::ffi::c_void>,
-        config: WgpuSurfaceConfig,
-        color_space: wgpu::SurfaceColorSpace,
-    ) -> anyhow::Result<Self> {
-        Self::new_from_source(
-            gpu_context,
-            &MetalLayerSource(layer),
-            config,
-            color_space,
-            None,
-        )
-    }
-
     #[cfg(not(target_family = "wasm"))]
-    fn new_from_source(
+    pub(crate) fn new_from_source(
         gpu_context: GpuContext,
-        source: &impl SurfaceSource,
+        source: &(impl SurfaceSource + ?Sized),
         config: WgpuSurfaceConfig,
         color_space: wgpu::SurfaceColorSpace,
         compositor_gpu: Option<CompositorGpuHint>,
@@ -1453,6 +1434,7 @@ impl WgpuRendererCore {
         Self {
             resources: WgpuResources {
                 device,
+                device_generation: context.device_generation(),
                 queue,
                 pipelines,
                 bind_group_layouts,
@@ -1728,6 +1710,7 @@ impl WgpuRendererCore {
                             let resources = self.resources();
                             content.draw(WgpuSurfaceFrame {
                                 device: &resources.device,
+                                device_generation: resources.device_generation,
                                 queue: &resources.queue,
                                 encoder: &mut encoder,
                                 target: frame_view,
@@ -2339,6 +2322,14 @@ impl WgpuRenderer {
     where
         W: HasWindowHandle + HasDisplayHandle + std::fmt::Debug + Send + Sync + Clone + 'static,
     {
+        self.recover_from(&WindowSource(window.clone()))
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) fn recover_from(
+        &mut self,
+        source: &(impl SurfaceSource + ?Sized),
+    ) -> anyhow::Result<()> {
         let gpu_context = self.context.as_ref().expect("recover requires gpu_context");
 
         // Check if another window already recovered the context
@@ -2347,13 +2338,15 @@ impl WgpuRenderer {
             .as_ref()
             .is_none_or(|ctx| ctx.device_lost());
 
-        let source = WindowSource(window);
         let surface = if needs_new_context {
             log::warn!("GPU device lost, recreating context...");
 
             // Drop old resources to release Arc<Device>/Arc<Queue> and GPU resources
             self.state = RendererState::Released;
-            *gpu_context.borrow_mut() = None;
+            let instance = gpu_context
+                .borrow_mut()
+                .take()
+                .map(|context| context.instance);
 
             // Wait briefly for the GPU driver to stabilize, then try to
             // recreate the context without software renderers. If this fails
@@ -2362,7 +2355,7 @@ impl WgpuRenderer {
             std::thread::sleep(std::time::Duration::from_millis(350));
 
             let (new_context, surface) =
-                create_context_and_surface(&source, self.compositor_gpu, true)?;
+                recreate_context_and_surface(source, instance, self.compositor_gpu)?;
             *gpu_context.borrow_mut() = Some(new_context);
             surface
         } else {
@@ -2691,7 +2684,7 @@ fn instance_range(range: Range<usize>) -> Range<u32> {
 
 /// A native target that the renderer makes surfaces for.
 #[cfg(not(target_family = "wasm"))]
-trait SurfaceSource {
+pub(crate) trait SurfaceSource {
     /// The display handle for the instances that draw to the target.
     fn display(&self) -> Option<Box<dyn wgpu::wgt::WgpuHasDisplayHandle>>;
 
@@ -2699,10 +2692,10 @@ trait SurfaceSource {
 }
 
 #[cfg(not(target_family = "wasm"))]
-struct WindowSource<'a, W>(&'a W);
+pub(crate) struct WindowSource<W>(pub(crate) W);
 
 #[cfg(not(target_family = "wasm"))]
-impl<W> SurfaceSource for WindowSource<'_, W>
+impl<W> SurfaceSource for WindowSource<W>
 where
     W: HasWindowHandle + HasDisplayHandle + std::fmt::Debug + Send + Sync + Clone + 'static,
 {
@@ -2719,9 +2712,9 @@ where
     }
 }
 
-/// A `CAMetalLayer`. Each surface retains it.
+/// A `CAMetalLayer` that lives as long as the renderer. Each surface retains it.
 #[cfg(target_vendor = "apple")]
-struct MetalLayerSource(std::ptr::NonNull<std::ffi::c_void>);
+pub(crate) struct MetalLayerSource(pub(crate) std::ptr::NonNull<std::ffi::c_void>);
 
 #[cfg(target_vendor = "apple")]
 impl SurfaceSource for MetalLayerSource {
@@ -2732,7 +2725,7 @@ impl SurfaceSource for MetalLayerSource {
 
     fn create_surface(&self, instance: &wgpu::Instance) -> anyhow::Result<wgpu::Surface<'static>> {
         let target = wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(self.0.as_ptr());
-        // SAFETY: the caller of `WgpuRenderer::new_from_metal_layer` gives a `CAMetalLayer`.
+        // SAFETY: the field is a live `CAMetalLayer`.
         unsafe { instance.create_surface_unsafe(target) }
             .map_err(|e| anyhow::anyhow!("Failed to create surface: {e}"))
     }
@@ -2742,7 +2735,7 @@ impl SurfaceSource for MetalLayerSource {
 /// to the window.
 #[cfg(not(target_family = "wasm"))]
 fn create_context_and_surface(
-    source: &impl SurfaceSource,
+    source: &(impl SurfaceSource + ?Sized),
     compositor_gpu: Option<CompositorGpuHint>,
     reject_software: bool,
 ) -> anyhow::Result<(WgpuContext, wgpu::Surface<'static>)> {
@@ -2766,6 +2759,29 @@ fn create_context_and_surface(
         }
     }
     Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No wgpu backends to try")))
+}
+
+/// Creates the context after a lost device. It tries the instance of the lost device
+/// first: there, the new device gets an id that differs from the id of the lost one.
+#[cfg(not(target_family = "wasm"))]
+fn recreate_context_and_surface(
+    source: &(impl SurfaceSource + ?Sized),
+    instance: Option<wgpu::Instance>,
+    compositor_gpu: Option<CompositorGpuHint>,
+) -> anyhow::Result<(WgpuContext, wgpu::Surface<'static>)> {
+    if let Some(instance) = instance {
+        let created = source.create_surface(&instance).and_then(|surface| {
+            let context = WgpuContext::new(instance, &surface, compositor_gpu, true)?;
+            Ok((context, surface))
+        });
+        match created {
+            Ok(created) => return Ok(created),
+            Err(error) => {
+                log::info!("The instance of the lost device has no adapter: {error:#}")
+            }
+        }
+    }
+    create_context_and_surface(source, compositor_gpu, true)
 }
 
 fn create_surface(
