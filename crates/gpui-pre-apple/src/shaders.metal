@@ -675,8 +675,9 @@ fragment float4 monochrome_sprite_fragment(
 // Averages four bilinear samples that together cover the pixel. Where a
 // pixel spans r texels, each sample is (r - 1) / 2 texels from the center,
 // toward one corner of the pixel. Where r is 1 or less, the samples are at
-// the center. The average weighs the color by alpha. No sample reads past
-// the texels next to the tile, as one bilinear sample at its edge does.
+// the center. The average weighs the color by alpha. Each sample stays
+// between the centers of the edge texels of the tile, so no sample reads
+// the texels next to the tile.
 float4 sample_pixel_footprint(texture2d<float> atlas_texture,
                               float2 tile_position, Bounds_DevicePixels tile) {
   constexpr sampler atlas_texture_sampler(mag_filter::linear,
@@ -685,8 +686,8 @@ float4 sample_pixel_footprint(texture2d<float> atlas_texture,
       float2(atlas_texture.get_width(), atlas_texture.get_height());
   float2 tile_origin = float2(tile.origin.x, tile.origin.y);
   float2 tile_size = float2(tile.size.width, tile.size.height);
-  float2 lo = (tile_origin - 0.5) / atlas_size;
-  float2 hi = (tile_origin + tile_size + 0.5) / atlas_size;
+  float2 lo = (tile_origin + 0.5) / atlas_size;
+  float2 hi = (tile_origin + tile_size - 0.5) / atlas_size;
   float2 dx = dfdx(tile_position);
   float2 dy = dfdy(tile_position);
   float texels = max(length(dx * atlas_size), length(dy * atlas_size));
