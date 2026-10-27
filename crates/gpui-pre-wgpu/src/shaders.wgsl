@@ -1274,12 +1274,13 @@ struct PolychromeSprite {
 // Averages four bilinear samples that together cover the pixel. Where a
 // pixel spans r texels, each sample is (r - 1) / 2 texels from the center,
 // toward one corner of the pixel. Where r is 1 or less, the samples are at
-// the center. The average weighs the color by alpha. No sample reads past
-// the texels next to the tile, as one bilinear sample at its edge does.
+// the center. The average weighs the color by alpha. Each sample stays
+// between the centers of the edge texels of the tile, so no sample reads
+// the texels next to the tile.
 fn sample_pixel_footprint(tile_position: vec2<f32>, tile: AtlasBounds) -> vec4<f32> {
     let atlas_size = vec2<f32>(textureDimensions(t_sprite, 0));
-    let lo = (vec2<f32>(tile.origin) - 0.5) / atlas_size;
-    let hi = (vec2<f32>(tile.origin + tile.size) + 0.5) / atlas_size;
+    let lo = (vec2<f32>(tile.origin) + 0.5) / atlas_size;
+    let hi = (vec2<f32>(tile.origin + tile.size) - 0.5) / atlas_size;
     let dx = dpdx(tile_position);
     let dy = dpdy(tile_position);
     let texels = max(length(dx * atlas_size), length(dy * atlas_size));

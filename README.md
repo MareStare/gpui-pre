@@ -33,7 +33,8 @@ commit, then rebase the patch commits onto it.
 
 - Transformed image sprites: an image sprite can have a transform and a
   source rectangle of its texture, and can sample it with a filter that
-  keeps thin lines when it is drawn smaller.
+  keeps thin lines when it is drawn smaller. The filter reads no texels
+  of the images next to the sprite in the atlas.
 - wgpu by default on Windows and macOS: `GPUI_RENDERER=dx11` or
   `GPUI_RENDERER=metal` picks the native renderer. A window whose wgpu
   renderer fails to start uses the native renderer. On macOS the wgpu
