@@ -57,6 +57,11 @@ harness = false
 name = "device_identity"
 path = "tests/device_identity.rs"
 
+[[test]]
+name = "sprite_tile"
+path = "tests/sprite_tile.rs"
+required-features = ["test-support"]
+
 [dependencies.anyhow]
 version = "1.0.86"
 
