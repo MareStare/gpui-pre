@@ -237,6 +237,15 @@ impl TestWindow {
         self.0.lock().resize_callback = Some(callback);
     }
 
+    /// Returns the window control area under the mouse, as the platform asks
+    /// for it in its hit test.
+    pub fn hit_test_window_control(&self) -> Option<WindowControlArea> {
+        let mut callback = self.0.lock().hit_test_window_control_callback.take()?;
+        let area = callback();
+        self.0.lock().hit_test_window_control_callback = Some(callback);
+        area
+    }
+
     /// Simulates a display scale change through the resize callback, preserving logical bounds.
     pub fn simulate_scale_factor_change(&mut self, scale_factor: f32) {
         let size = {

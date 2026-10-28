@@ -1085,6 +1085,7 @@ pub(crate) struct PaintIndex {
     mouse_listeners_index: usize,
     input_handlers_index: usize,
     cursor_styles_index: usize,
+    window_control_hitboxes_index: usize,
     accessed_element_states_index: usize,
     tab_handle_index: usize,
     line_layout_index: LineLayoutIndex,
@@ -4070,6 +4071,7 @@ impl Window {
             mouse_listeners_index: self.next_frame.mouse_listeners.len(),
             input_handlers_index: self.next_frame.input_handlers.len(),
             cursor_styles_index: self.next_frame.cursor_styles.len(),
+            window_control_hitboxes_index: self.next_frame.window_control_hitboxes.len(),
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
             tab_handle_index: self.next_frame.tab_stops.paint_index(),
             line_layout_index: self.text_system.layout_index(),
@@ -4088,6 +4090,12 @@ impl Window {
         self.next_frame.cursor_styles.extend(
             self.rendered_frame.cursor_styles
                 [range.start.cursor_styles_index..range.end.cursor_styles_index]
+                .iter()
+                .cloned(),
+        );
+        self.next_frame.window_control_hitboxes.extend(
+            self.rendered_frame.window_control_hitboxes[range.start.window_control_hitboxes_index
+                ..range.end.window_control_hitboxes_index]
                 .iter()
                 .cloned(),
         );
@@ -8027,13 +8035,13 @@ mod tests {
 
     use crate::{
         AnyWindowHandle, AppContext as _, BackGestureEvent, BackGesturePhase, Bounds, ContentMask,
-        Context, DispatchPhase, DragMoveEvent, Empty, ExternalDragPayload, ExternalPaths,
+        Context, DispatchPhase, DragMoveEvent, Empty, Entity, ExternalDragPayload, ExternalPaths,
         FileDragPaths, FileDropEvent, FocusHandle, InputEvent as _, InteractiveElement as _,
         IntoElement, KeyDownEvent, Keystroke, LongPressEvent, MouseButton, MouseDownEvent,
         MouseMoveEvent, ParentElement, Pixels, PlatformInput, Point, Render, RequestFrameOptions,
-        ScaledPixels, StatefulInteractiveElement as _, Styled, TestAppContext, TouchDragEvent,
-        TouchEvent, TouchId, TouchPhase, Underline, UnderlineStyle, Window, WindowAppearance,
-        WindowOptions, canvas, div, hsla, point, px, size,
+        ScaledPixels, StatefulInteractiveElement as _, StyleRefinement, Styled, TestAppContext,
+        TouchDragEvent, TouchEvent, TouchId, TouchPhase, Underline, UnderlineStyle, Window,
+        WindowAppearance, WindowControlArea, WindowOptions, canvas, div, hsla, point, px, size,
     };
 
     #[gpui::test]
@@ -8526,6 +8534,53 @@ mod tests {
                 assert_eq!(window.insets(), crate::WindowInsets::default());
             })
             .unwrap();
+    }
+
+    struct TitleBarView;
+
+    impl Render for TitleBarView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .id("title-bar")
+                .size_full()
+                .window_control_area(WindowControlArea::Drag)
+        }
+    }
+
+    struct CachedTitleBarRoot {
+        title_bar: Entity<TitleBarView>,
+    }
+
+    impl Render for CachedTitleBarRoot {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(
+                self.title_bar
+                    .clone()
+                    .cached(StyleRefinement::default().w_full().h(px(30.))),
+            )
+        }
+    }
+
+    /// A cached view keeps its window control areas in the frames that reuse
+    /// its paint.
+    #[gpui::test]
+    fn test_reused_view_keeps_window_control_areas(cx: &mut TestAppContext) {
+        let window = cx.open_window(size(px(800.), px(600.)), |_, cx| CachedTitleBarRoot {
+            title_bar: cx.new(|_| TitleBarView),
+        });
+        cx.run_until_parked();
+        for _ in 0..2 {
+            window.update(cx, |_, _, cx| cx.notify()).unwrap();
+            cx.run_until_parked();
+            window
+                .update(cx, |_, window, _| {
+                    let areas = &window.rendered_frame.window_control_hitboxes;
+                    assert_eq!(areas.len(), 1);
+                    assert_eq!(areas[0].0, WindowControlArea::Drag);
+                    assert_eq!(areas[0].1.bounds.size, size(px(800.), px(30.)));
+                })
+                .unwrap();
+        }
     }
 
     struct EmptyView;
