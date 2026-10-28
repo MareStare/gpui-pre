@@ -56,6 +56,10 @@ commit, then rebase the patch commits onto it.
   does not wait for the GPU.
 - Windows text: the wgpu renderer takes the DirectWrite text contrast and
   ClearType glyphs as BGRA. `ZED_DEVICE_ID` picks the Direct3D 11 adapter.
+- Cached views: a cached view keeps its window control areas, such as
+  the drag area of a title bar, in the frames that reuse its paint. Tests
+  run the hit test of the window control areas with
+  `VisualTestContext::hit_test_window_control_area`.
 - Logs: `GPUI_FRAME_LOG` logs the stages of each frame, and
   `GPUI_STARTUP_LOG` the startup stages of the renderers.
 
