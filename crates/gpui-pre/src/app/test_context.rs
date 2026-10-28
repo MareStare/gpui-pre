@@ -6,7 +6,8 @@ use crate::{
     MouseUpEvent, Pixels, Platform, PlatformTextSystem, Point, Render, Result, SharedString, Size,
     SystemNotification, SystemNotificationResponse, Task, TestDispatcher, TestPlatform,
     TestScreenCaptureSource, TestWindow, TextSystem, VisualContext, Window, WindowBounds,
-    WindowHandle, WindowOptions, WindowVisibility, app::GpuiMode, window::ElementArenaScope,
+    WindowControlArea, WindowHandle, WindowOptions, WindowVisibility, app::GpuiMode,
+    window::ElementArenaScope,
 };
 use anyhow::{anyhow, bail};
 use futures::{Stream, StreamExt, channel::oneshot};
@@ -465,6 +466,15 @@ impl TestAppContext {
     /// Simulates the user resizing the window to the new size.
     pub fn simulate_window_resize(&self, window_handle: AnyWindowHandle, size: Size<Pixels>) {
         self.test_window(window_handle).simulate_resize(size);
+    }
+
+    /// Returns the window control area under the mouse in the given window,
+    /// as the platform asks for it in its hit test.
+    pub fn hit_test_window_control(
+        &self,
+        window_handle: AnyWindowHandle,
+    ) -> Option<WindowControlArea> {
+        self.test_window(window_handle).hit_test_window_control()
     }
 
     /// Simulates a change in whether the platform is presenting the window.
@@ -1012,6 +1022,12 @@ impl VisualTestContext {
     /// Simulates the user resizing the window to the new size.
     pub fn simulate_resize(&self, size: Size<Pixels>) {
         self.simulate_window_resize(self.window, size)
+    }
+
+    /// Returns the window control area under the mouse in this window, as
+    /// the platform asks for it in its hit test.
+    pub fn hit_test_window_control_area(&self) -> Option<WindowControlArea> {
+        self.hit_test_window_control(self.window)
     }
 
     /// Simulates a change in whether the platform is presenting this window.
