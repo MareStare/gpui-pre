@@ -1063,6 +1063,10 @@ impl PlatformWindow for WindowsWindow {
         self.state.renderer.borrow().gpu_specs().log_err()
     }
 
+    fn gpu_failure(&self) -> Option<GpuFailure> {
+        self.state.renderer.borrow().gpu_failure()
+    }
+
     fn draws_custom_surfaces(&self) -> bool {
         self.state.renderer.borrow().draws_custom_surfaces()
     }

@@ -2219,6 +2219,10 @@ impl PlatformWindow for WaylandWindow {
         self.borrow().renderer.as_ref()?.gpu_specs()
     }
 
+    fn gpu_failure(&self) -> Option<gpui::GpuFailure> {
+        self.borrow().renderer.as_ref()?.gpu_failure()
+    }
+
     fn play_system_bell(&self) {
         let state = self.borrow();
         let surface = if state.surface_state.toplevel().is_some() {

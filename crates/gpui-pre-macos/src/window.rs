@@ -2107,6 +2107,10 @@ impl PlatformWindow for MacWindow {
         None
     }
 
+    fn gpu_failure(&self) -> Option<gpui::GpuFailure> {
+        self.0.lock().renderer.gpu_failure()
+    }
+
     fn draws_custom_surfaces(&self) -> bool {
         self.0.lock().renderer.draws_custom_surfaces()
     }

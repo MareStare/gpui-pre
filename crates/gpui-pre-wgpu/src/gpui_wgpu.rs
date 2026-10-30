@@ -1,4 +1,5 @@
 mod cosmic_text_system;
+mod frame_failures;
 mod frame_log;
 mod renderer_choice;
 mod startup_log;

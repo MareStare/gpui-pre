@@ -83,6 +83,13 @@ impl Renderer {
         matches!(self, Self::Wgpu(_))
     }
 
+    pub fn gpu_failure(&self) -> Option<gpui::GpuFailure> {
+        match self {
+            Self::Metal(_) => None,
+            Self::Wgpu(renderer) => renderer.renderer.renderer().gpu_failure(),
+        }
+    }
+
     pub fn layer(&self) -> Option<&metal::MetalLayerRef> {
         match self {
             Self::Metal(renderer) => renderer.layer(),
