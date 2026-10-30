@@ -1624,6 +1624,12 @@ pub(super) fn capslock_from_xkb(keymap_state: &State) -> gpui::Capslock {
 /// prioritize the compositor's rendering device.
 #[cfg(any(feature = "wayland", feature = "x11"))]
 pub(super) fn compositor_gpu_hint_from_dev_t(dev: u64) -> Option<gpui_wgpu::CompositorGpuHint> {
+    compositor_gpu_hint_from_sysfs(Path::new("/sys"), dev)
+}
+
+/// As `compositor_gpu_hint_from_dev_t`, with sysfs at `sysfs`.
+#[cfg(any(feature = "wayland", feature = "x11"))]
+fn compositor_gpu_hint_from_sysfs(sysfs: &Path, dev: u64) -> Option<gpui_wgpu::CompositorGpuHint> {
     fn dev_major(dev: u64) -> u32 {
         ((dev >> 8) & 0xfff) as u32 | (((dev >> 32) & !0xfff) as u32)
     }
@@ -1632,7 +1638,7 @@ pub(super) fn compositor_gpu_hint_from_dev_t(dev: u64) -> Option<gpui_wgpu::Comp
         (dev & 0xff) as u32 | (((dev >> 12) & !0xff) as u32)
     }
 
-    fn read_sysfs_hex_id(path: &str) -> Option<u32> {
+    fn read_sysfs_hex_id(path: &Path) -> Option<u32> {
         let content = std::fs::read_to_string(path).ok()?;
         let trimmed = content.trim().strip_prefix("0x").unwrap_or(content.trim());
         u32::from_str_radix(trimmed, 16).ok()
@@ -1641,8 +1647,9 @@ pub(super) fn compositor_gpu_hint_from_dev_t(dev: u64) -> Option<gpui_wgpu::Comp
     let major = dev_major(dev);
     let minor = dev_minor(dev);
 
-    let vendor_path = format!("/sys/dev/char/{major}:{minor}/device/vendor");
-    let device_path = format!("/sys/dev/char/{major}:{minor}/device/device");
+    let device_dir = sysfs.join(format!("dev/char/{major}:{minor}/device"));
+    let vendor_path = device_dir.join("vendor");
+    let device_path = device_dir.join("device");
 
     let vendor_id = read_sysfs_hex_id(&vendor_path)?;
     let device_id = read_sysfs_hex_id(&device_path)?;
@@ -1729,6 +1736,30 @@ mod tests {
             error.to_string(),
             "libxkbcommon failed to create an XKB context"
         );
+    }
+
+    /// The display server gives the device number of a DRM node. Its sysfs entry
+    /// holds the PCI ids of the GPU.
+    #[cfg(any(feature = "wayland", feature = "x11"))]
+    #[test]
+    fn maps_a_drm_device_number_to_its_pci_ids() {
+        let sysfs = std::env::temp_dir().join(format!("gpui-sysfs-{}", std::process::id()));
+        // `/dev/dri/card1`, 226:1, and a minor of more than 8 bits, 226:300.
+        for (dev, node, vendor, device) in [
+            (0xe201, "226:1", "0x8086\n", "0xa7a0\n"),
+            (0x10_e22c, "226:300", "0x10de\n", "0x28e0\n"),
+        ] {
+            let dir = sysfs.join("dev/char").join(node).join("device");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("vendor"), vendor).unwrap();
+            std::fs::write(dir.join("device"), device).unwrap();
+
+            let hint = compositor_gpu_hint_from_sysfs(&sysfs, dev).unwrap();
+            let id = |text: &str| u32::from_str_radix(&text.trim()[2..], 16).unwrap();
+            assert_eq!((hint.vendor_id, hint.device_id), (id(vendor), id(device)));
+        }
+        assert!(compositor_gpu_hint_from_sysfs(&sysfs, 0xe202).is_none());
+        std::fs::remove_dir_all(&sysfs).unwrap();
     }
 
     #[test]
