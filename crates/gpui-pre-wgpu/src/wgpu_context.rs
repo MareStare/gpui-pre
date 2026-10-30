@@ -628,36 +628,11 @@ impl WgpuContext {
         compositor_gpu: Option<&CompositorGpuHint>,
     ) {
         adapters.sort_by_key(|adapter| {
-            let info = adapter.get_info();
-            // Backends like OpenGL report device=0 for all adapters, so
-            // device-based matching is only meaningful when non-zero.
-            let device_known = info.device != 0;
-            let user_override: u8 = match device_id_filter {
-                Some(id) if device_known && info.device == id => 0,
-                _ => 1,
-            };
-            let compositor_match: u8 = match compositor_gpu {
-                Some(hint)
-                    if device_known
-                        && info.vendor == hint.vendor_id
-                        && info.device == hint.device_id =>
-                {
-                    0
-                }
-                _ => 1,
-            };
-            let type_priority =
-                device_type_priority(info.device_type, cfg!(target_vendor = "apple"));
-            let backend_priority: u8 = match info.backend {
-                wgpu::Backend::Vulkan | wgpu::Backend::Metal | wgpu::Backend::Dx12 => 0,
-                _ => 1,
-            };
-
-            (
-                user_override,
-                compositor_match,
-                type_priority,
-                backend_priority,
+            adapter_rank(
+                &adapter.get_info(),
+                device_id_filter,
+                compositor_gpu,
+                cfg!(target_vendor = "apple"),
             )
         });
     }
@@ -795,6 +770,43 @@ impl WgpuContext {
 /// less power, and it cannot be unplugged. Elsewhere the discrete GPU comes
 /// first. "Other" ranks above "Virtual" because OpenGL seems to count as "Other".
 #[cfg(not(target_family = "wasm"))]
+/// The sort key of an adapter: a lower key goes first.
+#[cfg(not(target_family = "wasm"))]
+fn adapter_rank(
+    info: &wgpu::AdapterInfo,
+    device_id_filter: Option<u32>,
+    compositor_gpu: Option<&CompositorGpuHint>,
+    prefer_integrated: bool,
+) -> (u8, u8, u8, u8) {
+    // Backends like OpenGL report device=0 for all adapters, so
+    // device-based matching is only meaningful when non-zero.
+    let device_known = info.device != 0;
+    let user_override: u8 = match device_id_filter {
+        Some(id) if device_known && info.device == id => 0,
+        _ => 1,
+    };
+    let compositor_match: u8 = match compositor_gpu {
+        Some(hint)
+            if device_known && info.vendor == hint.vendor_id && info.device == hint.device_id =>
+        {
+            0
+        }
+        _ => 1,
+    };
+    let type_priority = device_type_priority(info.device_type, prefer_integrated);
+    let backend_priority: u8 = match info.backend {
+        wgpu::Backend::Vulkan | wgpu::Backend::Metal | wgpu::Backend::Dx12 => 0,
+        _ => 1,
+    };
+
+    (
+        user_override,
+        compositor_match,
+        type_priority,
+        backend_priority,
+    )
+}
+
 fn device_type_priority(device_type: wgpu::DeviceType, prefer_integrated: bool) -> u8 {
     match device_type {
         wgpu::DeviceType::DiscreteGpu => u8::from(prefer_integrated),
@@ -823,7 +835,37 @@ fn parse_pci_id(id: &str) -> anyhow::Result<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DeviceErrorState, device_type_priority, parse_pci_id};
+    use super::{
+        CompositorGpuHint, DeviceErrorState, adapter_rank, device_type_priority, parse_pci_id,
+    };
+
+    /// A hybrid laptop: the integrated GPU drives the display, the discrete GPU
+    /// is idle.
+    #[test]
+    fn the_gpu_of_the_display_goes_before_the_discrete_gpu() {
+        let adapter = |vendor, device, device_type| wgpu::AdapterInfo {
+            vendor,
+            device,
+            ..wgpu::AdapterInfo::new(device_type, wgpu::Backend::Vulkan)
+        };
+        let intel = adapter(0x8086, 0xa7a0, wgpu::DeviceType::IntegratedGpu);
+        let nvidia = adapter(0x10de, 0x28e0, wgpu::DeviceType::DiscreteGpu);
+        let first = |device_id_filter, hint: Option<&CompositorGpuHint>| {
+            [&intel, &nvidia]
+                .into_iter()
+                .min_by_key(|info| adapter_rank(info, device_id_filter, hint, false))
+                .unwrap()
+                .device
+        };
+        let display = CompositorGpuHint {
+            vendor_id: 0x8086,
+            device_id: 0xa7a0,
+        };
+
+        assert_eq!(first(None, None), nvidia.device);
+        assert_eq!(first(None, Some(&display)), intel.device);
+        assert_eq!(first(Some(0x28e0), Some(&display)), nvidia.device);
+    }
 
     #[test]
     fn apple_tries_the_integrated_gpu_first() {
