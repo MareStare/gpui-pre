@@ -5,7 +5,9 @@
 use std::{num::NonZeroIsize, sync::Arc};
 
 use anyhow::{Context as _, Result};
-use gpui::{DevicePixels, GpuSpecs, PlatformAtlas, Scene, Size, WindowBackgroundAppearance};
+use gpui::{
+    DevicePixels, GpuFailure, GpuSpecs, PlatformAtlas, Scene, Size, WindowBackgroundAppearance,
+};
 use gpui_wgpu::{
     TextContrast, WgpuWindowRenderer, time_frame_draw, time_startup_stage, wgpu_requested,
 };
@@ -115,6 +117,13 @@ impl WindowRenderer {
                 .renderer()
                 .gpu_specs()
                 .context("GPU resources released"),
+        }
+    }
+
+    pub(crate) fn gpu_failure(&self) -> Option<GpuFailure> {
+        match self {
+            Self::DirectX(_) => None,
+            Self::Wgpu(renderer) => renderer.renderer().gpu_failure(),
         }
     }
 

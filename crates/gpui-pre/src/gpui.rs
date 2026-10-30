@@ -413,3 +413,14 @@ pub struct GpuSpecs {
     /// Further information about the driver, as reported by Vulkan.
     pub driver_info: String,
 }
+
+/// A GPU error that stays after the renderer of a window dropped its GPU caches
+/// to recover. The renderer keeps trying to recover. The failure ends at the first
+/// frame with no error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GpuFailure {
+    /// The last error.
+    pub error: String,
+    /// The consecutive frames that failed.
+    pub failed_frames: u32,
+}

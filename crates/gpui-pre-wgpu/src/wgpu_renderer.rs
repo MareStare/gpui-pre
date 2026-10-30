@@ -1,4 +1,5 @@
 // Modified for gpui-pre (snapshot of zed@08cbb88): adapt device queues and sRGB detection to wgpu 30.0.1.
+use crate::frame_failures::{FrameCheck, FrameFailures};
 use crate::wgpu_custom_surface::as_wgpu_surface;
 use crate::{
     CompositorGpuHint, DeviceErrorState, StartupStage, WgpuAtlas, WgpuContext, WgpuSurfaceFrame,
@@ -8,8 +9,8 @@ use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
 use collections::FxHashMap;
 use gpui::{
-    AtlasTextureId, Background, Bounds, DevicePixels, GpuSpecs, Path, Point, PrimitiveBatch,
-    ScaledPixels, Scene, Size, SurfaceContent, get_gamma_correction_ratios,
+    AtlasTextureId, Background, Bounds, DevicePixels, GpuFailure, GpuSpecs, Path, Point,
+    PrimitiveBatch, ScaledPixels, Scene, Size, SurfaceContent, get_gamma_correction_ratios,
 };
 use log::warn;
 #[cfg(not(target_family = "wasm"))]
@@ -328,10 +329,10 @@ pub struct WgpuRenderer {
     max_texture_size: u32,
     is_bgr: bool,
     text_contrast: Option<TextContrast>,
-    failed_frame_count: u32,
+    frame_failures: FrameFailures,
     device_errors: Arc<DeviceErrorState>,
     observed_error_generation: u64,
-    last_surface_error: Option<String>,
+    last_frame_error: Option<String>,
     needs_redraw: bool,
 }
 
@@ -572,10 +573,10 @@ impl WgpuRenderer {
             max_texture_size,
             is_bgr: false,
             text_contrast: None,
-            failed_frame_count: 0,
+            frame_failures: FrameFailures::default(),
             device_errors: Arc::clone(context.errors()),
             observed_error_generation: 0,
-            last_surface_error: None,
+            last_frame_error: None,
             needs_redraw: false,
         })
     }
@@ -1215,28 +1216,15 @@ impl WgpuRenderer {
             return false;
         };
 
-        if let Some(error) = self.last_surface_error.take().or_else(|| {
+        let error = self.last_frame_error.take().or_else(|| {
             self.device_errors
                 .observe_error(&mut self.observed_error_generation)
-        }) {
-            self.failed_frame_count += 1;
-            log::error!(
-                "GPU error during frame (failure {} of 10): {error}",
-                self.failed_frame_count
-            );
-
-            // TBD. Does retrying more actually help?
-            if self.failed_frame_count > 10 {
-                panic!("Too many consecutive GPU errors. Last error: {error}");
-            } else if self.failed_frame_count > 5 {
-                core.resources.invalidate_intermediate_textures();
-                self.atlas.clear();
-                self.needs_redraw = true;
-                self.failed_frame_count = 0;
-                return false;
-            }
-        } else {
-            self.failed_frame_count = 0;
+        });
+        if self.frame_failures.check(error) == FrameCheck::Recover {
+            core.resources.invalidate_intermediate_textures();
+            self.atlas.clear();
+            self.needs_redraw = true;
+            return false;
         }
 
         let acquire_start = std::time::Instant::now();
@@ -1256,7 +1244,7 @@ impl WgpuRenderer {
                 return false;
             }
             wgpu::CurrentSurfaceTexture::Validation => {
-                self.last_surface_error = Some("Surface texture validation error".to_string());
+                self.last_frame_error = Some("Surface texture validation error".to_string());
                 return false;
             }
         };
@@ -1280,9 +1268,10 @@ impl WgpuRenderer {
             premultiplied_alpha,
             wgpu::Color::TRANSPARENT,
         ) {
-            log::error!("{error:#}");
+            self.last_frame_error = Some(format!("{error:#}"));
             return false;
         }
+        self.frame_failures.submit();
 
         let present_start = std::time::Instant::now();
         core.resources.queue.present(frame);
@@ -2304,6 +2293,12 @@ impl WgpuRenderer {
         self.device_errors.device_lost()
     }
 
+    /// The GPU error that stays after the renderer dropped its GPU caches to recover.
+    /// The errors of the device that the renderer shares with other windows count.
+    pub fn gpu_failure(&self) -> Option<GpuFailure> {
+        self.frame_failures.failure()
+    }
+
     /// Returns true if a redraw is needed because GPU state was cleared.
     /// Calling this method clears the flag.
     pub fn needs_redraw(&mut self) -> bool {
@@ -2325,11 +2320,22 @@ impl WgpuRenderer {
         self.recover_from(&WindowSource(window.clone()))
     }
 
+    /// A recovery that fails counts as a failed frame.
     #[cfg(not(target_family = "wasm"))]
     pub(crate) fn recover_from(
         &mut self,
         source: &(impl SurfaceSource + ?Sized),
     ) -> anyhow::Result<()> {
+        let result = self.recreate_from(source);
+        if let Err(error) = &result {
+            let error = format!("GPU recovery failed: {error:#}");
+            self.frame_failures.check(Some(error));
+        }
+        result
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn recreate_from(&mut self, source: &(impl SurfaceSource + ?Sized)) -> anyhow::Result<()> {
         let gpu_context = self.context.as_ref().expect("recover requires gpu_context");
 
         // Check if another window already recovered the context

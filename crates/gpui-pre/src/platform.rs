@@ -39,11 +39,11 @@ pub(crate) type PlatformScreenCaptureFrame =
 use crate::{
     Action, AnyWindowHandle, App, AsyncWindowContext, BackgroundExecutor, Bounds, Corners,
     DEFAULT_WINDOW_SIZE, DevicePixels, DispatchEventResult, Edges, ExternalDragPayload, Font,
-    FontId, FontMetrics, FontRun, ForegroundExecutor, GlyphId, GpuSpecs, Hsla, ImageSource, Keymap,
-    LineLayout, MissingGlyphSink, Pixels, PlatformGestures, PlatformInput, Point, Priority,
-    RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Scene, ShapedGlyph,
-    ShapedRun, SharedString, Size, SvgRenderer, SystemWindowTab, Task, Window, WindowControlArea,
-    hash, point, px, size,
+    FontId, FontMetrics, FontRun, ForegroundExecutor, GlyphId, GpuFailure, GpuSpecs, Hsla,
+    ImageSource, Keymap, LineLayout, MissingGlyphSink, Pixels, PlatformGestures, PlatformInput,
+    Point, Priority, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Scene,
+    ShapedGlyph, ShapedRun, SharedString, Size, SvgRenderer, SystemWindowTab, Task, Window,
+    WindowControlArea, hash, point, px, size,
 };
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use anyhow::bail;
@@ -1377,6 +1377,11 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     }
     fn set_client_inset(&self, _inset: Pixels) {}
     fn gpu_specs(&self) -> Option<GpuSpecs>;
+
+    /// The GPU error that the renderer of the window could not recover from.
+    fn gpu_failure(&self) -> Option<GpuFailure> {
+        None
+    }
 
     /// Whether the renderer of the window draws custom surfaces. The Linux
     /// windows draw with wgpu, which draws them.
