@@ -9,6 +9,7 @@ change, under `crates/`. Use them in place of the crates.io versions:
 [patch.crates-io]
 gpui-pre         = { git = "https://github.com/MareStare/gpui-pre", rev = "<commit>" }
 gpui-pre-apple   = { git = "https://github.com/MareStare/gpui-pre", rev = "<commit>" }
+gpui-pre-linux   = { git = "https://github.com/MareStare/gpui-pre", rev = "<commit>" }
 gpui-pre-macos   = { git = "https://github.com/MareStare/gpui-pre", rev = "<commit>" }
 gpui-pre-wgpu    = { git = "https://github.com/MareStare/gpui-pre", rev = "<commit>" }
 gpui-pre-windows = { git = "https://github.com/MareStare/gpui-pre", rev = "<commit>" }
@@ -54,6 +55,9 @@ commit, then rebase the patch commits onto it.
 - Device loss recovery: the wgpu window renderer of macOS and Windows makes
   a new device after a lost one, with a new identity, and asks the next
   frame to build the scene again.
+- Persistent GPU errors: `Window::gpu_failure` gives the GPU error of a
+  wgpu window that stays after the renderer dropped its GPU caches to
+  recover. The renderer keeps trying to recover and does not panic.
 - Startup speed: the render pipelines build in parallel, wgpu does not
   validate indirect calls, DX12 starts only when no Vulkan adapter can
   draw to the window, Apple tries the integrated GPU first, and a resize
