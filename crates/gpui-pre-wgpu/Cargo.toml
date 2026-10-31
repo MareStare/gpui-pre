@@ -150,6 +150,14 @@ default-features = false
 [dependencies.unicode-segmentation]
 version = "1.10"
 
+[dev-dependencies.criterion]
+version = "0.8.2"
+features = ["html_reports"]
+
+[dev-dependencies.naga]
+version = "30.0.1"
+features = ["wgsl-in"]
+
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.wgpu]
 version = "30.0.1"
 features = [
