@@ -2739,14 +2739,20 @@ impl SurfaceSource for MetalLayerSource {
 
 /// Creates the context on the first group of backends with an adapter that can draw
 /// to the window.
+///
+/// Panics when no group has the adapter that `WGPU_ADAPTER_NAME` names. An error
+/// lets the window use a native renderer, and the wrong GPU must fail loudly.
 #[cfg(not(target_family = "wasm"))]
 fn create_context_and_surface(
     source: &(impl SurfaceSource + ?Sized),
     compositor_gpu: Option<CompositorGpuHint>,
     reject_software: bool,
 ) -> anyhow::Result<(WgpuContext, wgpu::Surface<'static>)> {
+    let backend_groups = WgpuContext::backend_groups();
+    let group_count = backend_groups.len();
+    let mut groups_without_named_adapter = 0;
     let mut last_error = None;
-    for backends in WgpuContext::backend_groups() {
+    for backends in backend_groups {
         let instance = WgpuContext::instance(source.display(), backends);
         let created =
             time_startup_stage("wgpu-create-surface", || source.create_surface(&instance))
@@ -2760,11 +2766,18 @@ fn create_context_and_surface(
             Ok(created) => return Ok(created),
             Err(error) => {
                 log::info!("No adapter on {backends:?} can draw to the window: {error:#}");
+                if error.is::<crate::NoAdapterNamed>() {
+                    groups_without_named_adapter += 1;
+                }
                 last_error = Some(error);
             }
         }
     }
-    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No wgpu backends to try")))
+    let error = last_error.unwrap_or_else(|| anyhow::anyhow!("No wgpu backends to try"));
+    if group_count > 0 && groups_without_named_adapter == group_count {
+        panic!("{error:#}");
+    }
+    Err(error)
 }
 
 /// Creates the context after a lost device. It tries the instance of the lost device
