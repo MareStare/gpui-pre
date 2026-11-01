@@ -58,6 +58,9 @@ commit, then rebase the patch commits onto it.
 - Persistent GPU errors: `Window::gpu_failure` gives the GPU error of a
   wgpu window that stays after the renderer dropped its GPU caches to
   recover. The renderer keeps trying to recover and does not panic.
+- Adapter by name: the wgpu renderer tries first the adapter whose name
+  contains `WGPU_ADAPTER_NAME`, case-insensitive. It ranks above the
+  adapter of `ZED_DEVICE_ID`. A window panics when no adapter has the name.
 - Startup speed: the render pipelines build in parallel, wgpu does not
   validate indirect calls, DX12 starts only when no Vulkan adapter can
   draw to the window, Apple tries the integrated GPU first, and a resize

@@ -150,12 +150,14 @@ impl WgpuContext {
         reject_software: bool,
     ) -> anyhow::Result<Self> {
         let device_id_filter = Self::device_id_filter();
+        let adapter_name = Self::adapter_name_filter();
 
         // Select an adapter by actually testing surface configuration with the real device.
         // This is the only reliable way to determine compatibility on hybrid GPU systems.
         let (adapter, device, queue, dual_source_blending, color_texture_format) =
             gpui::block_on(Self::select_adapter_and_device(
                 &instance,
+                adapter_name.as_deref(),
                 device_id_filter,
                 surface,
                 config,
@@ -205,10 +207,16 @@ impl WgpuContext {
             .fold(wgpu::Backends::empty(), |all, group| all | group);
         let instance = Self::instance(None, backends);
         let device_id_filter = Self::device_id_filter();
+        let adapter_name = Self::adapter_name_filter();
         let (adapter, device, queue, dual_source_blending, color_texture_format, target_format) =
             gpui::block_on(async {
                 let mut adapters = instance.enumerate_adapters(wgpu::Backends::all()).await;
-                Self::sort_adapters(&mut adapters, device_id_filter, None);
+                Self::sort_adapters(
+                    &mut adapters,
+                    adapter_name.as_deref(),
+                    device_id_filter,
+                    None,
+                )?;
 
                 for adapter in adapters {
                     let adapter_info = adapter.get_info();
@@ -332,6 +340,11 @@ impl WgpuContext {
                 None
             }
         }
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn adapter_name_filter() -> Option<String> {
+        std::env::var("WGPU_ADAPTER_NAME").ok()
     }
 
     #[cfg(target_family = "wasm")]
@@ -536,6 +549,7 @@ impl WgpuContext {
     #[cfg(not(target_family = "wasm"))]
     async fn select_adapter_and_device(
         instance: &wgpu::Instance,
+        adapter_name: Option<&str>,
         device_id_filter: Option<u32>,
         surface: &wgpu::Surface<'_>,
         config: &WgpuSurfaceConfig,
@@ -560,7 +574,12 @@ impl WgpuContext {
             log::info!("ZED_DEVICE_ID filter: {:#06x}", device_id);
         }
 
-        Self::sort_adapters(&mut adapters, device_id_filter, compositor_gpu);
+        Self::sort_adapters(
+            &mut adapters,
+            adapter_name,
+            device_id_filter,
+            compositor_gpu,
+        )?;
 
         // Log all available adapters (in sorted order)
         log::info!("Found {} GPU adapter(s):", adapters.len());
@@ -580,7 +599,8 @@ impl WgpuContext {
         for adapter in adapters {
             let info = adapter.get_info();
 
-            if reject_software && info.device_type == wgpu::DeviceType::Cpu {
+            let named = adapter_name.is_some_and(|name| adapter_name_matches(&info.name, name));
+            if reject_software && info.device_type == wgpu::DeviceType::Cpu && !named {
                 log::info!(
                     "Skipping software renderer: {} ({:?})",
                     info.name,
@@ -622,24 +642,39 @@ impl WgpuContext {
 
     /// Sort adapters into a single priority order. Tiers (from highest to lowest):
     ///
-    /// 1. ZED_DEVICE_ID match — explicit user override
-    /// 2. Compositor GPU match — the GPU the display server is rendering on
-    /// 3. Device type: see `device_type_priority`.
-    /// 4. Backend — prefer Vulkan/Metal/Dx12 over GL/etc.
+    /// 1. WGPU_ADAPTER_NAME match: the name contains the value, case-insensitive
+    /// 2. ZED_DEVICE_ID match — explicit user override
+    /// 3. Compositor GPU match — the GPU the display server is rendering on
+    /// 4. Device type: see `device_type_priority`.
+    /// 5. Backend — prefer Vulkan/Metal/Dx12 over GL/etc.
+    ///
+    /// Fails when `adapter_name` matches no adapter.
     #[cfg(not(target_family = "wasm"))]
     fn sort_adapters(
         adapters: &mut [wgpu::Adapter],
+        adapter_name: Option<&str>,
         device_id_filter: Option<u32>,
         compositor_gpu: Option<&CompositorGpuHint>,
-    ) {
+    ) -> anyhow::Result<()> {
+        if let Some(name) = adapter_name {
+            log::info!("WGPU_ADAPTER_NAME filter: {name:?}");
+            if !adapters
+                .iter()
+                .any(|adapter| adapter_name_matches(&adapter.get_info().name, name))
+            {
+                return Err(NoAdapterNamed(name.to_owned()).into());
+            }
+        }
         adapters.sort_by_key(|adapter| {
             adapter_rank(
                 &adapter.get_info(),
+                adapter_name,
                 device_id_filter,
                 compositor_gpu,
                 cfg!(target_vendor = "apple"),
             )
         });
+        Ok(())
     }
 
     /// Try to use an adapter with a surface by creating a device and testing configuration.
@@ -778,10 +813,13 @@ impl WgpuContext {
 #[cfg(not(target_family = "wasm"))]
 fn adapter_rank(
     info: &wgpu::AdapterInfo,
+    adapter_name: Option<&str>,
     device_id_filter: Option<u32>,
     compositor_gpu: Option<&CompositorGpuHint>,
     prefer_integrated: bool,
-) -> (u8, u8, u8, u8) {
+) -> (u8, u8, u8, u8, u8) {
+    let name_match =
+        u8::from(!adapter_name.is_some_and(|name| adapter_name_matches(&info.name, name)));
     // Backends like OpenGL report device=0 for all adapters, so
     // device-based matching is only meaningful when non-zero.
     let device_known = info.device != 0;
@@ -804,11 +842,37 @@ fn adapter_rank(
     };
 
     (
+        name_match,
         user_override,
         compositor_match,
         type_priority,
         backend_priority,
     )
+}
+
+/// The error of a `WGPU_ADAPTER_NAME` that matches no adapter.
+#[cfg(not(target_family = "wasm"))]
+#[derive(Debug)]
+pub(crate) struct NoAdapterNamed(String);
+
+#[cfg(not(target_family = "wasm"))]
+impl std::fmt::Display for NoAdapterNamed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "No GPU adapter has a name that contains WGPU_ADAPTER_NAME={:?}",
+            self.0
+        )
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl std::error::Error for NoAdapterNamed {}
+
+/// Tells whether `adapter` contains `name`, case-insensitive.
+#[cfg(not(target_family = "wasm"))]
+fn adapter_name_matches(adapter: &str, name: &str) -> bool {
+    adapter.to_lowercase().contains(&name.to_lowercase())
 }
 
 fn device_type_priority(device_type: wgpu::DeviceType, prefer_integrated: bool) -> u8 {
@@ -840,24 +904,36 @@ fn parse_pci_id(id: &str) -> anyhow::Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CompositorGpuHint, DeviceErrorState, adapter_rank, device_type_priority, parse_pci_id,
+        CompositorGpuHint, DeviceErrorState, adapter_name_matches, adapter_rank,
+        device_type_priority, parse_pci_id,
     };
 
     /// A hybrid laptop: the integrated GPU drives the display, the discrete GPU
     /// is idle.
     #[test]
-    fn the_gpu_of_the_display_goes_before_the_discrete_gpu() {
-        let adapter = |vendor, device, device_type| wgpu::AdapterInfo {
+    fn a_hybrid_laptop_ranks_its_gpus() {
+        let adapter = |name: &str, vendor, device, device_type| wgpu::AdapterInfo {
+            name: name.to_owned(),
             vendor,
             device,
             ..wgpu::AdapterInfo::new(device_type, wgpu::Backend::Vulkan)
         };
-        let intel = adapter(0x8086, 0xa7a0, wgpu::DeviceType::IntegratedGpu);
-        let nvidia = adapter(0x10de, 0x28e0, wgpu::DeviceType::DiscreteGpu);
-        let first = |device_id_filter, hint: Option<&CompositorGpuHint>| {
+        let intel = adapter(
+            "Intel(R) UHD Graphics",
+            0x8086,
+            0xa7a0,
+            wgpu::DeviceType::IntegratedGpu,
+        );
+        let nvidia = adapter(
+            "NVIDIA GeForce RTX 4070 Laptop GPU",
+            0x10de,
+            0x28e0,
+            wgpu::DeviceType::DiscreteGpu,
+        );
+        let first = |name, device_id_filter, hint: Option<&CompositorGpuHint>| {
             [&intel, &nvidia]
                 .into_iter()
-                .min_by_key(|info| adapter_rank(info, device_id_filter, hint, false))
+                .min_by_key(|info| adapter_rank(info, name, device_id_filter, hint, false))
                 .unwrap()
                 .device
         };
@@ -866,9 +942,14 @@ mod tests {
             device_id: 0xa7a0,
         };
 
-        assert_eq!(first(None, None), nvidia.device);
-        assert_eq!(first(None, Some(&display)), intel.device);
-        assert_eq!(first(Some(0x28e0), Some(&display)), nvidia.device);
+        assert_eq!(first(None, None, None), nvidia.device);
+        assert_eq!(first(None, None, Some(&display)), intel.device);
+        assert_eq!(first(None, Some(0x28e0), Some(&display)), nvidia.device);
+        assert_eq!(first(Some("rtx"), None, Some(&display)), nvidia.device);
+        assert_eq!(first(Some("uhd"), Some(0x28e0), None), intel.device);
+        assert_eq!(first(Some("radeon"), None, None), nvidia.device);
+        assert!(adapter_name_matches(&intel.name, "intel(r) uhd"));
+        assert!(!adapter_name_matches(&intel.name, "radeon"));
     }
 
     #[test]
