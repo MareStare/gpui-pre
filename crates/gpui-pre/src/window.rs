@@ -1052,10 +1052,10 @@ pub(crate) struct Frame {
     pub(crate) input_handlers: Vec<Option<PlatformInputHandler>>,
     pub(crate) tooltip_requests: Vec<Option<TooltipRequest>>,
     pub(crate) cursor_styles: Vec<CursorStyleRequest>,
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless"))]
     pub(crate) debug_bounds: FxHashMap<String, Bounds<Pixels>>,
-    #[cfg(any(test, feature = "test-support"))]
-    debug_bounds_records: Vec<(String, Bounds<Pixels>)>,
+    #[cfg(any(test, feature = "headless"))]
+    debug_bounds_records: Vec<DebugBoundsRecord>,
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) next_inspector_instance_ids: FxHashMap<Rc<crate::InspectorElementPath>, usize>,
     #[cfg(any(feature = "inspector", debug_assertions))]
@@ -1073,10 +1073,20 @@ pub(crate) struct PrepaintStateIndex {
     line_layout_index: LineLayoutIndex,
 }
 
+/// A named element of a frame.
+#[cfg(any(test, feature = "headless"))]
+pub(crate) struct DebugBoundsRecord {
+    selector: String,
+    bounds: Bounds<Pixels>,
+
+    /// The part of `bounds` inside the content masks of the ancestors of the element.
+    visible: Bounds<Pixels>,
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct PaintIndex {
     scene_index: usize,
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless"))]
     debug_bounds_index: usize,
     mouse_listeners_index: usize,
     input_handlers_index: usize,
@@ -1088,10 +1098,19 @@ pub(crate) struct PaintIndex {
 }
 
 impl Frame {
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn record_debug_bounds(&mut self, selector: String, bounds: Bounds<Pixels>) {
+    #[cfg(any(test, feature = "headless"))]
+    pub(crate) fn record_debug_bounds(
+        &mut self,
+        selector: String,
+        bounds: Bounds<Pixels>,
+        visible: Bounds<Pixels>,
+    ) {
         self.debug_bounds.insert(selector.clone(), bounds);
-        self.debug_bounds_records.push((selector, bounds));
+        self.debug_bounds_records.push(DebugBoundsRecord {
+            selector,
+            bounds,
+            visible,
+        });
     }
 
     pub(crate) fn new(dispatch_tree: DispatchTree) -> Self {
@@ -1110,9 +1129,9 @@ impl Frame {
             tooltip_requests: Vec::new(),
             cursor_styles: Vec::new(),
 
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(any(test, feature = "headless"))]
             debug_bounds: FxHashMap::default(),
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(any(test, feature = "headless"))]
             debug_bounds_records: Vec::new(),
 
             #[cfg(any(feature = "inspector", debug_assertions))]
@@ -1139,7 +1158,7 @@ impl Frame {
         self.tab_stops.clear();
         self.focus = None;
 
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(any(test, feature = "headless"))]
         {
             self.debug_bounds.clear();
             self.debug_bounds_records.clear();
@@ -3092,7 +3111,6 @@ impl Window {
     /// Renders the current frame's scene to a texture and returns the pixel data as an RGBA image.
     /// This does not present the frame to screen - useful for visual testing where we want
     /// to capture what would be rendered without displaying it or requiring the window to be visible.
-    #[cfg(any(test, feature = "test-support"))]
     pub fn render_to_image(&self) -> anyhow::Result<image::RgbaImage> {
         self.platform_window
             .render_to_image(&self.rendered_frame.scene)
@@ -3103,6 +3121,18 @@ impl Window {
     #[cfg(feature = "bench-support")]
     pub fn rendered_scene(&self) -> &Scene {
         &self.rendered_frame.scene
+    }
+
+    /// The selector and the visible part of the bounds of each element with a name in the most
+    /// recently rendered frame, in paint order. An element with no visible part is left out. One
+    /// selector can show several times.
+    #[cfg(any(test, feature = "headless"))]
+    pub fn named_element_bounds(&self) -> impl Iterator<Item = (&str, Bounds<Pixels>)> {
+        self.rendered_frame
+            .debug_bounds_records
+            .iter()
+            .filter(|record| !record.visible.is_empty())
+            .map(|record| (record.selector.as_str(), record.visible))
     }
 
     /// Returns the quads in the most recently rendered frame's scene, so tests can assert on
@@ -4297,7 +4327,7 @@ impl Window {
     pub(crate) fn paint_index(&self) -> PaintIndex {
         PaintIndex {
             scene_index: self.next_frame.scene.len(),
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(any(test, feature = "headless"))]
             debug_bounds_index: self.next_frame.debug_bounds_records.len(),
             mouse_listeners_index: self.next_frame.mouse_listeners.len(),
             input_handlers_index: self.next_frame.input_handlers.len(),
@@ -4311,12 +4341,15 @@ impl Window {
 
     pub(crate) fn reuse_paint(&mut self, range: Range<PaintIndex>) {
         // Cached elements still exist in the frame even when their paint methods don't run.
-        #[cfg(any(test, feature = "test-support"))]
-        for (selector, bounds) in &self.rendered_frame.debug_bounds_records
+        #[cfg(any(test, feature = "headless"))]
+        for record in &self.rendered_frame.debug_bounds_records
             [range.start.debug_bounds_index..range.end.debug_bounds_index]
         {
-            self.next_frame
-                .record_debug_bounds(selector.clone(), *bounds);
+            self.next_frame.record_debug_bounds(
+                record.selector.clone(),
+                record.bounds,
+                record.visible,
+            );
         }
         self.next_frame.cursor_styles.extend(
             self.rendered_frame.cursor_styles

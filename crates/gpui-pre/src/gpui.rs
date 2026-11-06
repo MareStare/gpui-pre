@@ -72,7 +72,7 @@ mod hot_reload;
     target_os = "windows",
     target_os = "linux",
     target_family = "wasm",
-    feature = "test-support",
+    feature = "headless",
     feature = "bench-support"
 ))]
 pub mod queue;
@@ -82,9 +82,9 @@ pub mod randomized_element_tree;
 
 #[cfg(any(test, feature = "test-support", feature = "bench-support"))]
 mod bench;
-#[cfg(any(test, feature = "test-support", feature = "bench-support"))]
+#[cfg(any(test, feature = "headless", feature = "bench-support"))]
 mod seeds;
-#[cfg(any(test, feature = "test-support", feature = "bench-support"))]
+#[cfg(any(test, feature = "headless", feature = "bench-support"))]
 pub use seeds::calculate_seeds;
 
 #[cfg(any(test, feature = "test-support"))]

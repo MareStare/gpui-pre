@@ -89,7 +89,6 @@ impl WindowRenderer {
         }
     }
 
-    #[cfg(feature = "test-support")]
     pub(crate) fn render_to_image(
         &mut self,
         scene: &Scene,
@@ -97,7 +96,7 @@ impl WindowRenderer {
     ) -> Result<image::RgbaImage> {
         match self {
             Self::DirectX(renderer) => renderer.render_to_image(scene, background_appearance),
-            Self::Wgpu(renderer) => renderer.render_to_image(),
+            Self::Wgpu(renderer) => renderer.render_to_image(scene),
         }
     }
 

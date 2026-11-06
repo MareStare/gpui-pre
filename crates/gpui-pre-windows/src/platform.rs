@@ -58,7 +58,7 @@ pub struct WindowsPlatform {
     /// Set to stop the current `VSyncProvider` thread, which runs while windowed.
     vsync_stop: RefCell<Option<Arc<AtomicBool>>>,
     // The below members will never change throughout the entire lifecycle of the app.
-    /// Created with `headless()`: never windowed, and without a real text system.
+    /// Created with `headless()`: never windowed.
     headless: bool,
     icon: HICON,
     background_executor: BackgroundExecutor,
@@ -185,13 +185,9 @@ impl WindowsPlatform {
         unsafe {
             OleInitialize(None).context("unable to initialize Windows OLE")?;
         }
-        // A platform that can become windowed needs the real text system from the start: the app
-        // keeps the one it's created with.
-        let text_system: Arc<dyn PlatformTextSystem> = if !headless {
-            Arc::new(DirectWriteTextSystem::new().context("Error creating DirectWriteTextSystem")?)
-        } else {
-            Arc::new(gpui::NoopTextSystem::new())
-        };
+        // The app keeps the text system it's created with.
+        let text_system: Arc<dyn PlatformTextSystem> =
+            Arc::new(DirectWriteTextSystem::new().context("Error creating DirectWriteTextSystem")?);
 
         let (main_sender, main_receiver) = PriorityQueueReceiver::new();
         let validation_number = if usize::BITS == 64 {
