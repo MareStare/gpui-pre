@@ -7,7 +7,7 @@ use crate::{
     WindowVisibility,
 };
 use gpui_util::ResultExt as _;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "headless"))]
 use image::RgbaImage;
 use parking_lot::Mutex;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -29,6 +29,9 @@ pub(crate) struct TestWindowState {
     // TODO: Replace with `Rc`
     sprite_atlas: Arc<dyn PlatformAtlas>,
     renderer: Option<Box<dyn PlatformHeadlessRenderer>>,
+
+    /// Whether a run loop in real time delivers the frames of the window.
+    real_time: bool,
     pub(crate) should_close_handler: Option<Box<dyn FnMut() -> bool>>,
     close_callback: Option<Box<dyn FnOnce()>>,
     hit_test_window_control_callback: Option<Box<dyn FnMut() -> Option<WindowControlArea>>>,
@@ -89,6 +92,8 @@ impl TestWindow {
         platform: Weak<TestPlatform>,
         display: Rc<dyn PlatformDisplay>,
         renderer: Option<Box<dyn PlatformHeadlessRenderer>>,
+        scale_factor: f32,
+        real_time: bool,
     ) -> Self {
         let sprite_atlas: Arc<dyn PlatformAtlas> = match &renderer {
             Some(r) => r.sprite_atlas(),
@@ -101,6 +106,7 @@ impl TestWindow {
             handle,
             sprite_atlas,
             renderer,
+            real_time,
             title: Default::default(),
             edited: false,
             document_path: None,
@@ -130,8 +136,7 @@ impl TestWindow {
             text_input_configurations: Vec::new(),
             text_input_state_changes: Vec::new(),
             is_fullscreen: false,
-            // Preserve the test platform's historical 2x default.
-            scale_factor: 2.0,
+            scale_factor,
             appearance: WindowAppearance::Light,
             external_drag_files: Vec::new(),
             start_external_drag_result: false,
@@ -498,12 +503,10 @@ impl PlatformWindow for TestWindow {
     fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
         // Tests can inspect wakes without delivering a frame synchronously.
         let frame_wake_count = self.0.lock().frame_wake_count.clone();
-        #[cfg(feature = "bench-support")]
-        let window = Rc::downgrade(&self.0);
+        let window = self.0.lock().real_time.then(|| Rc::downgrade(&self.0));
         Some(Rc::new(move || {
             frame_wake_count.set(frame_wake_count.get() + 1);
-            #[cfg(feature = "bench-support")]
-            if let Some(window) = window.upgrade() {
+            if let Some(window) = window.as_ref().and_then(Weak::upgrade) {
                 TestWindow(window).schedule_frame();
             }
         }))
@@ -579,7 +582,7 @@ impl PlatformWindow for TestWindow {
         self.0.lock().sprite_atlas.clone()
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless"))]
     fn render_to_image(&self, scene: &Scene) -> anyhow::Result<RgbaImage> {
         let scale_factor = self.scale_factor();
         let mut state = self.0.lock();
@@ -630,6 +633,10 @@ impl PlatformWindow for TestWindow {
     }
 
     fn draws_custom_surfaces(&self) -> bool {
-        false
+        self.0
+            .lock()
+            .renderer
+            .as_ref()
+            .is_some_and(|renderer| renderer.draws_custom_surfaces())
     }
 }

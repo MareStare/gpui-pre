@@ -277,6 +277,14 @@ impl ThreadedDispatcher {
         self.run_until_with_frames(ready, || false)
     }
 
+    /// Waits until main-thread work is queued or the time passes.
+    pub fn wait_for_main_work(&self, timeout: Duration) {
+        let mut inflight = self.idle.inflight.lock();
+        if !self.main_queue_has_work() {
+            self.idle.condvar.wait_for(&mut inflight, timeout);
+        }
+    }
+
     /// Runs at most one queued main-thread task, returning whether one ran.
     ///
     /// Stepping tasks individually lets callers check completion between polls
