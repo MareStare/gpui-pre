@@ -184,7 +184,9 @@ impl WgpuContext {
         // renderer for every window they open, so the process shares one device until it
         // is lost. A static rather than a thread-local: the cached device is never dropped,
         // because wgpu's queue reads its own thread-locals on drop and would panic if
-        // dropped while a thread's thread-locals are being destroyed.
+        // dropped while a thread's thread-locals are being destroyed. The lock also lets
+        // only one thread at a time list the adapters of the instance: the GL backend of
+        // wgpu fails otherwise.
         static HEADLESS: Mutex<Option<(WgpuContext, wgpu::TextureFormat)>> = Mutex::new(None);
         let mut headless = HEADLESS.lock();
         if let Some((context, format)) = headless.as_ref()
@@ -197,15 +199,34 @@ impl WgpuContext {
         Ok(created)
     }
 
+    /// The instance of all headless devices of the process.
+    ///
+    /// A second instance can crash the Vulkan loader. The loader changes the driver
+    /// list of an instance as it creates the instance and as it first lists its
+    /// physical devices. It does this without the lock under which a call on any
+    /// device reads the driver lists of all instances.
+    /// <https://github.com/KhronosGroup/Vulkan-Loader/blob/32fcb949e253cbeb40cda7ea76122b492db579ae/loader/loader.c#L7022-L7088>
+    /// <https://github.com/KhronosGroup/Vulkan-Loader/blob/32fcb949e253cbeb40cda7ea76122b492db579ae/loader/loader.c#L1628-L1650>
+    #[cfg(all(
+        not(target_family = "wasm"),
+        any(test, feature = "bench-support", feature = "test-support")
+    ))]
+    fn headless_instance() -> wgpu::Instance {
+        static INSTANCE: std::sync::LazyLock<wgpu::Instance> = std::sync::LazyLock::new(|| {
+            let backends = WgpuContext::backend_groups()
+                .into_iter()
+                .fold(wgpu::Backends::empty(), |all, group| all | group);
+            WgpuContext::instance(None, backends)
+        });
+        INSTANCE.clone()
+    }
+
     #[cfg(all(
         not(target_family = "wasm"),
         any(test, feature = "bench-support", feature = "test-support")
     ))]
     fn create_headless() -> anyhow::Result<(Self, wgpu::TextureFormat)> {
-        let backends = Self::backend_groups()
-            .into_iter()
-            .fold(wgpu::Backends::empty(), |all, group| all | group);
-        let instance = Self::instance(None, backends);
+        let instance = Self::headless_instance();
         let device_id_filter = Self::device_id_filter();
         let adapter_name = Self::adapter_name_filter();
         let (adapter, device, queue, dual_source_blending, color_texture_format, target_format) =
