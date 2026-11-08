@@ -699,9 +699,7 @@ impl Platform for TestPlatform {
         *self.opened_url.borrow_mut() = Some(url.to_string())
     }
 
-    fn on_open_urls(&self, _callback: Box<dyn FnMut(Vec<String>)>) {
-        unimplemented!()
-    }
+    fn on_open_urls(&self, _callback: Box<dyn FnMut(Vec<String>)>) {}
 
     /// Queues the prompt so a test can later answer it through
     /// [`Self::simulate_path_prompt_response`].
@@ -760,9 +758,7 @@ impl Platform for TestPlatform {
         true
     }
 
-    fn reveal_path(&self, _path: &std::path::Path) {
-        unimplemented!()
-    }
+    fn reveal_path(&self, _path: &std::path::Path) {}
 
     fn on_quit(&self, callback: Box<dyn FnMut() -> bool>) {
         *self.quit_callback.borrow_mut() = Some(callback);
@@ -908,9 +904,7 @@ impl Platform for TestPlatform {
         unimplemented!()
     }
 
-    fn open_with_system(&self, _path: &Path) {
-        unimplemented!()
-    }
+    fn open_with_system(&self, _path: &Path) {}
 }
 
 impl TestScreenCaptureSource {

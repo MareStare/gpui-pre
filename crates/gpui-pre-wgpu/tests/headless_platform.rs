@@ -35,7 +35,9 @@ fn a_headless_app_draws_a_frame_and_runs_its_quit_callbacks() {
     let names = Rc::new(Cell::new(Vec::<(String, Bounds<Pixels>)>::new()));
     let platform = headless_platform(Box::new(|| Ok(None)), Arc::new(NoopTextSystem::new()), 1.5);
     let (on_quit, seen_scale, seen_names) = (quit.clone(), scale.clone(), names.clone());
-    Application::with_platform(platform).run(move |cx| {
+    let app = Application::with_platform(platform);
+    app.on_open_urls(|_| {});
+    app.run(move |cx| {
         cx.on_app_quit(move |_| {
             on_quit.set(true);
             async {}
