@@ -90,6 +90,20 @@ impl<T: 'static> DragMoveEvent<T> {
 }
 
 impl Interactivity {
+    /// The name of the element in the records of the frame: its debug selector, or the id of an
+    /// element that takes presses.
+    #[cfg(any(test, feature = "headless"))]
+    fn element_name(&self) -> Option<String> {
+        let takes_presses = !self.click_listeners.is_empty()
+            || !self.aux_click_listeners.is_empty()
+            || !self.mouse_down_listeners.is_empty()
+            || self.drag_listener.is_some();
+        self.debug_selector.clone().or_else(|| {
+            let id = self.element_id.as_ref().filter(|_| takes_presses)?;
+            Some(id.to_string())
+        })
+    }
+
     /// Create an `Interactivity`, capturing the caller location in debug mode.
     #[cfg(any(feature = "inspector", debug_assertions))]
     #[track_caller]
@@ -902,10 +916,9 @@ pub trait InteractiveElement: Sized {
     /// Set a key that can be used to look up this element's bounds
     /// in the [`crate::VisualTestContext::debug_bounds`] map.
     ///
-    /// Selectors are only recorded in debug builds with the `test-support`
-    /// feature. Elsewhere this is a no-op, so `test-support` can stay enabled
-    /// in release builds without the per-frame cost.
-    #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
+    /// Selectors are recorded with the `headless` feature. Elsewhere this
+    /// is a no-op.
+    #[cfg(any(test, feature = "headless"))]
     fn debug_selector(mut self, f: impl FnOnce() -> String) -> Self {
         self.interactivity().debug_selector = Some(f());
         self
@@ -914,10 +927,9 @@ pub trait InteractiveElement: Sized {
     /// Set a key that can be used to look up this element's bounds
     /// in the [`crate::VisualTestContext::debug_bounds`] map.
     ///
-    /// Selectors are only recorded in debug builds with the `test-support`
-    /// feature. Elsewhere this is a no-op, so `test-support` can stay enabled
-    /// in release builds without the per-frame cost.
-    #[cfg(not(any(test, all(debug_assertions, feature = "test-support"))))]
+    /// Selectors are recorded with the `headless` feature. Elsewhere this
+    /// is a no-op.
+    #[cfg(not(any(test, feature = "headless")))]
     #[inline]
     fn debug_selector(self, _: impl FnOnce() -> String) -> Self {
         self
@@ -2251,7 +2263,7 @@ pub struct Interactivity {
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) source_location: Option<&'static core::panic::Location<'static>>,
 
-    #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
+    #[cfg(any(test, feature = "headless"))]
     pub(crate) debug_selector: Option<String>,
 }
 
@@ -2575,11 +2587,9 @@ impl Interactivity {
 
                 let style = self.compute_style_internal(hitbox, element_state.as_mut(), window, cx);
 
-                #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
-                if let Some(debug_selector) = &self.debug_selector {
-                    window
-                        .next_frame
-                        .record_debug_bounds(debug_selector.clone(), bounds);
+                #[cfg(any(test, feature = "headless"))]
+                if let Some(name) = self.element_name() {
+                    window.next_frame.record_debug_bounds(name, bounds);
                 }
 
                 self.paint_hover_group_handler(window, cx);
