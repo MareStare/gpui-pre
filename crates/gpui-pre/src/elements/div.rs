@@ -2589,7 +2589,8 @@ impl Interactivity {
 
                 #[cfg(any(test, feature = "headless"))]
                 if let Some(name) = self.element_name() {
-                    window.next_frame.record_debug_bounds(name, bounds);
+                    let visible = bounds.intersect(&window.content_mask().bounds);
+                    window.next_frame.record_debug_bounds(name, bounds, visible);
                 }
 
                 self.paint_hover_group_handler(window, cx);

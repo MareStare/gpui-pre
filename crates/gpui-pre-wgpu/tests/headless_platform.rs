@@ -12,19 +12,39 @@ use gpui::{
 };
 use gpui_wgpu::WgpuHeadlessRenderer;
 
+fn named_child(name: &'static str, left: f32, width: f32) -> impl IntoElement {
+    div()
+        .absolute()
+        .left(px(left))
+        .size(px(width))
+        .debug_selector(|| name.to_owned())
+}
+
 struct NamedBox;
 
 impl Render for NamedBox {
     fn render(&mut self, _: &mut Window, _: &mut Context<'_, Self>) -> impl IntoElement {
-        div().size_full().child(
-            div()
-                .absolute()
-                .left(px(10.0))
-                .top(px(20.0))
-                .size(px(30.0))
-                .debug_selector(|| "box".to_owned())
-                .child(div().id("press-me").size(px(6.0)).on_click(|_, _, _| {})),
-        )
+        div()
+            .size_full()
+            .child(
+                div()
+                    .absolute()
+                    .left(px(10.0))
+                    .top(px(20.0))
+                    .size(px(30.0))
+                    .debug_selector(|| "box".to_owned())
+                    .child(div().id("press-me").size(px(6.0)).on_click(|_, _, _| {})),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(60.0))
+                    .top(px(60.0))
+                    .size(px(30.0))
+                    .overflow_hidden()
+                    .child(named_child("cut", 24.0, 12.0))
+                    .child(named_child("hidden", 36.0, 6.0)),
+            )
     }
 }
 
@@ -46,7 +66,12 @@ fn a_headless_app_draws_a_frame_and_runs_its_quit_callbacks() {
         cx.open_window(WindowOptions::default(), |window, cx| {
             seen_scale.set(window.scale_factor());
             window.on_next_frame(move |window, cx| {
-                seen_names.set(window.named_element_bounds().to_vec());
+                let names = window.named_element_bounds();
+                seen_names.set(
+                    names
+                        .map(|(name, bounds)| (name.to_owned(), bounds))
+                        .collect(),
+                );
                 cx.quit();
             });
             cx.new(|_| NamedBox)
@@ -60,6 +85,9 @@ fn a_headless_app_draws_a_frame_and_runs_its_quit_callbacks() {
     let names = names.take();
     assert_eq!(names[0], ("box".to_owned(), expected));
     assert_eq!(names[1], ("press-me".to_owned(), press));
+    let cut = Bounds::new(point(px(84.0), px(60.0)), size(px(6.0), px(12.0)));
+    assert_eq!(names[2], ("cut".to_owned(), cut));
+    assert_eq!(names.len(), 3);
 }
 
 #[test]

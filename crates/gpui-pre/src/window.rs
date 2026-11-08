@@ -1060,7 +1060,7 @@ pub(crate) struct Frame {
     #[cfg(any(test, feature = "headless"))]
     pub(crate) debug_bounds: FxHashMap<String, Bounds<Pixels>>,
     #[cfg(any(test, feature = "headless"))]
-    debug_bounds_records: Vec<(String, Bounds<Pixels>)>,
+    debug_bounds_records: Vec<DebugBoundsRecord>,
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) next_inspector_instance_ids: FxHashMap<Rc<crate::InspectorElementPath>, usize>,
     #[cfg(any(feature = "inspector", debug_assertions))]
@@ -1076,6 +1076,16 @@ pub(crate) struct PrepaintStateIndex {
     dispatch_tree_index: usize,
     accessed_element_states_index: usize,
     line_layout_index: LineLayoutIndex,
+}
+
+/// A named element of a frame.
+#[cfg(any(test, feature = "headless"))]
+pub(crate) struct DebugBoundsRecord {
+    selector: String,
+    bounds: Bounds<Pixels>,
+
+    /// The part of `bounds` inside the content masks of the ancestors of the element.
+    visible: Bounds<Pixels>,
 }
 
 #[derive(Clone, Default)]
@@ -1094,9 +1104,18 @@ pub(crate) struct PaintIndex {
 
 impl Frame {
     #[cfg(any(test, feature = "headless"))]
-    pub(crate) fn record_debug_bounds(&mut self, selector: String, bounds: Bounds<Pixels>) {
+    pub(crate) fn record_debug_bounds(
+        &mut self,
+        selector: String,
+        bounds: Bounds<Pixels>,
+        visible: Bounds<Pixels>,
+    ) {
         self.debug_bounds.insert(selector.clone(), bounds);
-        self.debug_bounds_records.push((selector, bounds));
+        self.debug_bounds_records.push(DebugBoundsRecord {
+            selector,
+            bounds,
+            visible,
+        });
     }
 
     pub(crate) fn new(dispatch_tree: DispatchTree) -> Self {
@@ -2892,11 +2911,16 @@ impl Window {
             .render_to_image(&self.rendered_frame.scene)
     }
 
-    /// The selector and the bounds of each element with a `debug_selector` in the most recently
-    /// rendered frame, in paint order. One selector can show several times.
+    /// The selector and the visible part of the bounds of each element with a name in the most
+    /// recently rendered frame, in paint order. An element with no visible part is left out. One
+    /// selector can show several times.
     #[cfg(any(test, feature = "headless"))]
-    pub fn named_element_bounds(&self) -> &[(String, Bounds<Pixels>)] {
-        &self.rendered_frame.debug_bounds_records
+    pub fn named_element_bounds(&self) -> impl Iterator<Item = (&str, Bounds<Pixels>)> {
+        self.rendered_frame
+            .debug_bounds_records
+            .iter()
+            .filter(|record| !record.visible.is_empty())
+            .map(|record| (record.selector.as_str(), record.visible))
     }
 
     /// Returns the quads in the most recently rendered frame's scene, so tests can assert on
@@ -4089,11 +4113,14 @@ impl Window {
     pub(crate) fn reuse_paint(&mut self, range: Range<PaintIndex>) {
         // Cached elements still exist in the frame even when their paint methods don't run.
         #[cfg(any(test, feature = "headless"))]
-        for (selector, bounds) in &self.rendered_frame.debug_bounds_records
+        for record in &self.rendered_frame.debug_bounds_records
             [range.start.debug_bounds_index..range.end.debug_bounds_index]
         {
-            self.next_frame
-                .record_debug_bounds(selector.clone(), *bounds);
+            self.next_frame.record_debug_bounds(
+                record.selector.clone(),
+                record.bounds,
+                record.visible,
+            );
         }
         self.next_frame.cursor_styles.extend(
             self.rendered_frame.cursor_styles
