@@ -171,10 +171,7 @@ impl WgpuContext {
         ))
     }
 
-    #[cfg(all(
-        not(target_family = "wasm"),
-        any(test, feature = "bench-support", feature = "test-support")
-    ))]
+    #[cfg(all(not(target_family = "wasm"), any(test, feature = "headless")))]
     pub(crate) fn new_headless() -> anyhow::Result<(Self, wgpu::TextureFormat)> {
         // Creating a device takes tens of milliseconds, and benchmarks create a headless
         // renderer for every window they open, so the process shares one device until it
@@ -203,10 +200,7 @@ impl WgpuContext {
     /// device reads the driver lists of all instances.
     /// <https://github.com/KhronosGroup/Vulkan-Loader/blob/32fcb949e253cbeb40cda7ea76122b492db579ae/loader/loader.c#L7022-L7088>
     /// <https://github.com/KhronosGroup/Vulkan-Loader/blob/32fcb949e253cbeb40cda7ea76122b492db579ae/loader/loader.c#L1628-L1650>
-    #[cfg(all(
-        not(target_family = "wasm"),
-        any(test, feature = "bench-support", feature = "test-support")
-    ))]
+    #[cfg(all(not(target_family = "wasm"), any(test, feature = "headless")))]
     fn headless_instance() -> wgpu::Instance {
         static INSTANCE: std::sync::LazyLock<wgpu::Instance> = std::sync::LazyLock::new(|| {
             let backends = WgpuContext::backend_groups()
@@ -217,10 +211,7 @@ impl WgpuContext {
         INSTANCE.clone()
     }
 
-    #[cfg(all(
-        not(target_family = "wasm"),
-        any(test, feature = "bench-support", feature = "test-support")
-    ))]
+    #[cfg(all(not(target_family = "wasm"), any(test, feature = "headless")))]
     fn create_headless() -> anyhow::Result<(Self, wgpu::TextureFormat)> {
         let instance = Self::headless_instance();
         let device_id_filter = Self::device_id_filter();
@@ -289,10 +280,7 @@ impl WgpuContext {
         ))
     }
 
-    #[cfg(all(
-        not(target_family = "wasm"),
-        any(test, feature = "bench-support", feature = "test-support")
-    ))]
+    #[cfg(all(not(target_family = "wasm"), any(test, feature = "headless")))]
     /// Both candidates are 8-bit RGBA-ordered or BGRA-ordered formats: headless readback
     /// copies rows as 4 bytes per pixel and only swizzles, so no other formats may be added
     /// here without updating it.

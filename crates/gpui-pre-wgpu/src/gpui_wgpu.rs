@@ -18,10 +18,7 @@ pub use wgpu;
 pub use wgpu_atlas::*;
 pub use wgpu_context::*;
 pub use wgpu_custom_surface::{WgpuSurface, WgpuSurfaceFrame, wgpu_custom_surface};
-#[cfg(all(
-    not(target_family = "wasm"),
-    any(test, feature = "bench-support", feature = "test-support")
-))]
+#[cfg(all(not(target_family = "wasm"), any(test, feature = "headless")))]
 pub use wgpu_renderer::WgpuHeadlessRenderer;
 pub use wgpu_renderer::{GpuContext, TextContrast, WgpuRenderer, WgpuSurfaceConfig};
 #[cfg(not(target_family = "wasm"))]

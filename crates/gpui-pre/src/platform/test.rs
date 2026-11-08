@@ -5,6 +5,8 @@ mod window;
 
 pub use dispatcher::*;
 pub(crate) use display::*;
+#[cfg(any(test, feature = "headless"))]
+pub use platform::headless_platform;
 pub(crate) use platform::*;
 pub(crate) use window::*;
 

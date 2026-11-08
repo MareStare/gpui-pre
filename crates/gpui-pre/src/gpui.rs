@@ -52,7 +52,7 @@ pub mod queue;
 #[cfg(any(test, feature = "bench-support"))]
 pub mod randomized_element_tree;
 mod scene;
-#[cfg(any(test, feature = "test-support", feature = "bench-support"))]
+#[cfg(any(test, feature = "headless"))]
 mod seeds;
 mod shared_uri;
 mod spring;
@@ -71,7 +71,7 @@ mod window;
 
 #[cfg(any(test, feature = "test-support"))]
 pub use proptest;
-#[cfg(any(test, feature = "test-support", feature = "bench-support"))]
+#[cfg(any(test, feature = "headless"))]
 pub use seeds::calculate_seeds;
 
 #[cfg(doc)]
