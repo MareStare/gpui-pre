@@ -1,15 +1,17 @@
 #[cfg(any(test, feature = "test-support"))]
+use crate::DisplayId;
+#[cfg(any(test, feature = "test-support"))]
 use crate::NoopTextSystem;
 #[cfg(any(test, feature = "test-support"))]
 use crate::PathPromptOptions;
 use crate::{
     ActivityGuard, AnyWindowHandle, AppLifecyclePhase, BackgroundExecutor, ClipboardItem,
-    CursorStyle, DevicePixels, DisplayId, DummyKeyboardMapper, ForegroundExecutor, Keymap,
-    OwnedMenu, Platform, PlatformDisplay, PlatformHeadlessRenderer, PlatformKeyboardLayout,
+    CursorStyle, DevicePixels, DummyKeyboardMapper, ForegroundExecutor, Keymap, OwnedMenu,
+    Platform, PlatformDisplay, PlatformHeadlessRenderer, PlatformKeyboardLayout,
     PlatformKeyboardMapper, PlatformTextSystem, PromptButton, ScreenCaptureFrame,
     ScreenCaptureSource, ScreenCaptureStream, SharedString, SourceMetadata, SystemNotification,
-    SystemNotificationResponse, Task, TestDisplay, TestWindow, ThermalState, WindowAppearance,
-    WindowParams, size,
+    SystemNotificationResponse, Task, TestDisplay, TestWindow, TestWindowState, ThermalState,
+    WindowAppearance, WindowParams, size,
 };
 use anyhow::Result;
 #[cfg(any(test, feature = "test-support"))]
@@ -24,8 +26,35 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
+
+/// The time between the frames of the run loop of a headless platform.
+const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+
+/// The scale of the windows of the tests.
+const TEST_SCALE_FACTOR: f32 = 2.0;
+
+/// A platform with no OS windows, for an app that runs in real time.
+///
+/// Background work runs on a pool of threads and timers fire in real time. The windows
+/// draw with `renderer_factory`. Text uses `text_system`, so it has the metrics of the OS.
+/// [`crate::Application::run`] blocks on this platform until the app quits.
+pub fn headless_platform(
+    renderer_factory: Box<dyn Fn() -> Result<Option<Box<dyn PlatformHeadlessRenderer>>>>,
+    text_system: Arc<dyn PlatformTextSystem>,
+    scale_factor: f32,
+) -> Rc<dyn Platform> {
+    let dispatcher = Arc::new(crate::ThreadedDispatcher::new());
+    let platform = TestPlatform::with_platform(
+        BackgroundExecutor::new(dispatcher.clone()),
+        ForegroundExecutor::new(dispatcher),
+        text_system,
+        Some(renderer_factory),
+    );
+    platform.window_scale_factor.set(scale_factor);
+    platform
+}
 
 /// TestPlatform implements the Platform trait for use in tests.
 pub(crate) struct TestPlatform {
@@ -56,6 +85,12 @@ pub(crate) struct TestPlatform {
     headless_renderer_factory:
         Option<Box<dyn Fn() -> anyhow::Result<Option<Box<dyn PlatformHeadlessRenderer>>>>>,
     weak: Weak<Self>,
+
+    /// The windows, for the frames of the run loop.
+    windows: RefCell<Vec<Weak<Mutex<TestWindowState>>>>,
+    window_scale_factor: Cell<f32>,
+    quitting: Cell<bool>,
+    quit_callback: RefCell<Option<Box<dyn FnMut() -> bool>>>,
     menus: RefCell<Vec<OwnedMenu>>,
     pub(crate) app_lifecycle_callback: RefCell<Option<Box<dyn FnMut(AppLifecyclePhase)>>>,
     pub(crate) memory_warning_callback: RefCell<Option<Box<dyn FnMut()>>>,
@@ -190,6 +225,18 @@ impl TestPlatform {
         self.report_displays_changed();
     }
 
+    /// Draws each window that has a scheduled frame.
+    fn deliver_frames(&self) {
+        let windows = {
+            let mut windows = self.windows.borrow_mut();
+            windows.retain(|window| window.strong_count() > 0);
+            windows.iter().filter_map(Weak::upgrade).collect::<Vec<_>>()
+        };
+        for window in windows {
+            TestWindow(window).simulate_scheduled_frame();
+        }
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     fn report_displays_changed(&self) {
         let callback = self.displays_changed_callback.borrow_mut().take();
@@ -256,6 +303,10 @@ impl TestPlatform {
             idle_sleep_prevention_delay: Cell::new(Duration::ZERO),
             idle_sleep_prevention_fails: Cell::new(false),
             weak: weak.clone(),
+            windows: RefCell::default(),
+            window_scale_factor: Cell::new(TEST_SCALE_FACTOR),
+            quitting: Cell::new(false),
+            quit_callback: RefCell::default(),
             opened_url: Default::default(),
             system_notifications: Default::default(),
             text_system,
@@ -524,11 +575,29 @@ impl Platform for TestPlatform {
         }
     }
 
-    fn run(&self, _on_finish_launching: Box<dyn FnOnce()>) {
-        unimplemented!()
+    fn run(&self, on_finish_launching: Box<dyn FnOnce()>) {
+        let dispatcher = self.foreground_executor.dispatcher().clone();
+        let dispatcher = dispatcher
+            .as_threaded()
+            .expect("the run loop needs a threaded dispatcher");
+        on_finish_launching();
+        let mut last_frames = None::<Instant>;
+        while !self.quitting.get() {
+            dispatcher.run_ready_main_tasks();
+            if last_frames.is_none_or(|time| time.elapsed() >= FRAME_INTERVAL) {
+                self.deliver_frames();
+                last_frames = Some(Instant::now());
+            }
+            dispatcher.wait_for_main_work(FRAME_INTERVAL);
+        }
+        if let Some(mut callback) = self.quit_callback.borrow_mut().take() {
+            callback();
+        }
     }
 
-    fn quit(&self) {}
+    fn quit(&self) {
+        self.quitting.set(true);
+    }
 
     fn restart(&self, path: Option<PathBuf>, arguments: Vec<std::ffi::OsString>) {
         if let Some(tx) = self.expect_restart.take() {
@@ -612,7 +681,13 @@ impl Platform for TestPlatform {
             self.primary_display()
                 .unwrap_or_else(|| Rc::new(TestDisplay::new())),
             renderer,
+            self.window_scale_factor.get(),
+            self.foreground_executor
+                .dispatcher()
+                .as_threaded()
+                .is_some(),
         );
+        self.windows.borrow_mut().push(Rc::downgrade(&window.0));
         Ok(Box::new(window))
     }
 
@@ -689,7 +764,9 @@ impl Platform for TestPlatform {
         unimplemented!()
     }
 
-    fn on_quit(&self, _callback: Box<dyn FnMut() -> bool>) {}
+    fn on_quit(&self, callback: Box<dyn FnMut() -> bool>) {
+        *self.quit_callback.borrow_mut() = Some(callback);
+    }
 
     fn on_reopen(&self, _callback: Box<dyn FnMut()>) {
         unimplemented!()

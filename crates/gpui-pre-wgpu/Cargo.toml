@@ -33,14 +33,18 @@ zed-rev = "f816e1f9263e3a8ef63c4baaa02e1441ce1c6038"
 
 [features]
 bench-support = [
+    "headless",
     "gpui/bench-support",
-    "dep:image",
 ]
 default = []
 font-kit = ["dep:font-kit"]
-test-support = [
-    "gpui/test-support",
+headless = [
+    "gpui/headless",
     "dep:image",
+]
+test-support = [
+    "headless",
+    "gpui/test-support",
 ]
 
 [lib]
@@ -56,6 +60,11 @@ harness = false
 [[test]]
 name = "device_identity"
 path = "tests/device_identity.rs"
+
+[[test]]
+name = "headless_platform"
+path = "tests/headless_platform.rs"
+required-features = ["test-support"]
 
 [[test]]
 name = "sprite_tile"

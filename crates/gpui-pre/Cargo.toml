@@ -53,6 +53,7 @@ zed-rev = "f816e1f9263e3a8ef63c4baaa02e1441ce1c6038"
 [features]
 bench = ["bench-support"]
 bench-support = [
+    "headless",
     "profiler",
     "dep:criterion",
     "dep:bench_metrics",
@@ -64,6 +65,7 @@ default = [
     "windows-manifest",
 ]
 font-kit = []
+headless = []
 hot-reload = [
     "dep:async-tungstenite",
     "dep:dioxus-cli-config",
@@ -78,6 +80,7 @@ screen-capture = ["scap"]
 stacker = ["dep:stacksafe"]
 test-support = [
     "bench_metrics?/test-support",
+    "headless",
     "collections/test-support",
     "http_client/test-support",
     "wayland",
