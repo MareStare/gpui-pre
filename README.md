@@ -71,6 +71,13 @@ commit, then rebase the patch commits onto it.
   the drag area of a title bar, in the frames that reuse its paint. Tests
   run the hit test of the window control areas with
   `VisualTestContext::hit_test_window_control_area`.
+- Pen input on macOS and Linux: `Window::on_pen` gets each pen sample
+  with its pressure and the proximity changes of the pen, before the
+  mouse event of the same sample. macOS reads the tablet events of
+  AppKit and turns off mouse coalescing for a window that reads the pen.
+  Wayland reads the tablet protocol and makes the mouse events of each
+  tool. X11 reads the pressure valuator of XInput 2 and converts event
+  positions from 16.16 fixed point by 65536.
 - Logs: `GPUI_FRAME_LOG` logs the stages of each frame, and
   `GPUI_STARTUP_LOG` the startup stages of the renderers.
 
