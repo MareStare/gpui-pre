@@ -188,6 +188,12 @@ features = [
 ]
 default-features = false
 
+# The unit tests lock the base address of a pixel buffer.
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dev-dependencies.objc2-core-video]
+version = "0.3.2"
+features = ["CVBase"]
+default-features = false
+
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.objc2-foundation]
 version = "0.3.2"
 features = [
