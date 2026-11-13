@@ -47,11 +47,6 @@ name = "gpui_windows"
 path = "src/gpui_windows.rs"
 doctest = false
 
-[dependencies.gpui]
-version = "=0.3.12"
-default-features = false
-package = "gpui-pre"
-
 [target.'cfg(target_os = "windows")'.dependencies.accesskit]
 version = "0.24.0"
 features = ["enumn"]
@@ -74,6 +69,11 @@ version = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies.futures]
 version = "0.3.34"
+
+[target.'cfg(target_os = "windows")'.dependencies.gpui]
+version = "=0.3.12"
+default-features = false
+package = "gpui-pre"
 
 [target.'cfg(target_os = "windows")'.dependencies.gpui_wgpu]
 version = "=0.3.12"
