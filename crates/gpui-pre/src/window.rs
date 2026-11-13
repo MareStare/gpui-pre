@@ -9,22 +9,23 @@ use crate::taffy::TaffyLayoutEngine;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
     AsyncWindowContext, AtlasTile, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow,
-    Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
-    DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
-    EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuFailure,
-    GpuSpecs, Hsla, InputHandler, InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent,
-    KeyEvent, Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers,
-    ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent,
-    Path, PenEvent, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
-    PlatformWindow, Point, PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render,
-    RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge,
-    SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow,
-    SharedString, Size, StrikethroughStyle, Style, SubpixelSprite, Subscription, SystemWindowTab,
-    SystemWindowTabController, TabStopMap, Task, TextInputConfiguration, TextInputStateChange,
-    TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState, TransformationMatrix,
-    Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
-    WindowControls, WindowDecorations, WindowInsets, WindowOptions, WindowParams, WindowTextSystem,
-    WindowVisibility, point, prelude::*, px, rems, size, transparent_black,
+    Capslock, Context, Corners, CursorHideMode, CursorImage, CursorRequest, CursorStyle,
+    Decorations, DevicePixels, DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId,
+    Edges, Effect, Entity, EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId,
+    GlyphId, GpuFailure, GpuSpecs, Hsla, InputHandler, InputPreference, IsZero, KeyBinding,
+    KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex,
+    Modifiers, ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent,
+    MouseUpEvent, Path, PenEvent, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
+    PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, Priority, PromptButton,
+    PromptLevel, Quad, Render, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams,
+    Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y,
+    ScaledPixels, Scene, Shadow, SharedString, Size, StrikethroughStyle, Style, SubpixelSprite,
+    Subscription, SystemWindowTab, SystemWindowTabController, TabStopMap, Task,
+    TextInputConfiguration, TextInputStateChange, TextRenderingMode, TextStyle,
+    TextStyleRefinement, ThermalState, TransformationMatrix, Underline, UnderlineStyle,
+    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations,
+    WindowInsets, WindowOptions, WindowParams, WindowTextSystem, WindowVisibility, point,
+    prelude::*, px, rems, size, transparent_black,
 };
 
 use crate::gestures::{GestureTuning, RecognizedTouchGesture, TouchGestureRecognizer};
@@ -738,7 +739,7 @@ pub(crate) type AnyMouseListener =
 #[derive(Clone)]
 pub(crate) struct CursorStyleRequest {
     pub(crate) hitbox_id: Option<HitboxId>,
-    pub(crate) style: CursorStyle,
+    pub(crate) cursor: CursorRequest,
 }
 
 #[derive(Default, Eq, PartialEq)]
@@ -1171,16 +1172,16 @@ impl Frame {
         }
     }
 
-    pub(crate) fn cursor_style(&self, window: &Window) -> Option<CursorStyle> {
+    pub(crate) fn cursor(&self, window: &Window) -> Option<&CursorRequest> {
         self.cursor_styles
             .iter()
             .rev()
-            .fold_while(None, |style, request| match request.hitbox_id {
-                None => Done(Some(request.style)),
-                Some(hitbox_id) => Continue(style.or_else(|| {
+            .fold_while(None, |cursor, request| match request.hitbox_id {
+                None => Done(Some(&request.cursor)),
+                Some(hitbox_id) => Continue(cursor.or_else(|| {
                     hitbox_id
                         .is_hovered_ignoring_last_input(window)
-                        .then_some(request.style)
+                        .then_some(&request.cursor)
                 })),
             })
             .into_inner()
@@ -4428,7 +4429,26 @@ impl Window {
         self.invalidator.debug_assert_paint();
         self.next_frame.cursor_styles.push(CursorStyleRequest {
             hitbox_id: Some(hitbox.id),
-            style,
+            cursor: style.into(),
+        });
+    }
+
+    /// Shows `image` as the cursor over the hitbox, like `set_cursor_style`.
+    /// A platform with no image cursors shows `fallback`. This method should
+    /// only be called during the paint phase of element drawing.
+    pub fn set_cursor_image(
+        &mut self,
+        image: Arc<CursorImage>,
+        fallback: CursorStyle,
+        hitbox: &Hitbox,
+    ) {
+        self.invalidator.debug_assert_paint();
+        self.next_frame.cursor_styles.push(CursorStyleRequest {
+            hitbox_id: Some(hitbox.id),
+            cursor: CursorRequest {
+                style: fallback,
+                image: Some(image),
+            },
         });
     }
 
@@ -4440,7 +4460,7 @@ impl Window {
         self.invalidator.debug_assert_paint();
         self.next_frame.cursor_styles.push(CursorStyleRequest {
             hitbox_id: None,
-            style,
+            cursor: style.into(),
         })
     }
 
@@ -5888,11 +5908,15 @@ impl Window {
         // Set the cursor only if we're the active window.
         if self.is_window_hovered() {
             // A drag can start before the next paint records its cursor in the frame.
-            let style = cx
-                .active_drag_cursor_style()
-                .or_else(|| self.rendered_frame.cursor_style(self))
-                .unwrap_or(CursorStyle::Arrow);
-            cx.platform.set_cursor_style(style);
+            let cursor = match cx.active_drag_cursor_style() {
+                Some(style) => CursorRequest::from(style),
+                None => self
+                    .rendered_frame
+                    .cursor(self)
+                    .cloned()
+                    .unwrap_or_default(),
+            };
+            cx.platform.set_cursor(cursor);
         }
     }
 
