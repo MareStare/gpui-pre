@@ -1,4 +1,5 @@
 mod app_menu;
+mod cursor_image;
 mod keyboard;
 mod keystroke;
 mod platform_info;
@@ -79,6 +80,7 @@ use strum::EnumIter;
 use uuid::Uuid;
 
 pub use app_menu::*;
+pub use cursor_image::*;
 pub use keyboard::*;
 pub use keystroke::*;
 
@@ -576,6 +578,13 @@ pub trait Platform: 'static {
     fn path_for_auxiliary_executable(&self, name: &str) -> Result<PathBuf>;
 
     fn set_cursor_style(&self, style: CursorStyle);
+
+    /// Shows `image` as the cursor. A platform with no image cursors shows
+    /// `fallback`.
+    fn set_cursor_image(&self, image: Arc<CursorImage>, fallback: CursorStyle) {
+        let _ = image;
+        self.set_cursor_style(fallback);
+    }
 
     /// Hides the mouse cursor until the user moves the mouse over one of
     /// this application's windows.

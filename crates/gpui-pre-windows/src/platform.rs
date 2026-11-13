@@ -293,6 +293,17 @@ impl WindowsPlatform {
         self.inner.window_from_hwnd(hwnd)
     }
 
+    fn set_cursor(&self, hcursor: Option<HCURSOR>) {
+        if self.inner.state.current_cursor.get().map(|c| c.0) != hcursor.map(|c| c.0) {
+            self.post_message(
+                WM_GPUI_CURSOR_STYLE_CHANGED,
+                WPARAM(self.inner.validation_number),
+                LPARAM(hcursor.map_or(0, |c| c.0 as isize)),
+            );
+            self.inner.state.current_cursor.set(hcursor);
+        }
+    }
+
     #[inline]
     fn post_message(&self, message: u32, wparam: WPARAM, lparam: LPARAM) {
         self.raw_window_handles
@@ -991,15 +1002,11 @@ impl Platform for WindowsPlatform {
     }
 
     fn set_cursor_style(&self, style: CursorStyle) {
-        let hcursor = load_cursor(style);
-        if self.inner.state.current_cursor.get().map(|c| c.0) != hcursor.map(|c| c.0) {
-            self.post_message(
-                WM_GPUI_CURSOR_STYLE_CHANGED,
-                WPARAM(self.inner.validation_number),
-                LPARAM(hcursor.map_or(0, |c| c.0 as isize)),
-            );
-            self.inner.state.current_cursor.set(hcursor);
-        }
+        self.set_cursor(load_cursor(style));
+    }
+
+    fn set_cursor_image(&self, image: Arc<CursorImage>, fallback: CursorStyle) {
+        self.set_cursor(image_cursor::cursor(&image).or_else(|| load_cursor(fallback)));
     }
 
     fn hide_cursor_until_mouse_moves(&self) {

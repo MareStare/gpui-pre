@@ -11,20 +11,24 @@
 //! The events of a tool come in groups that end with a `frame` event. The
 //! tool applies each group at its frame.
 
-use super::{WaylandClientStatePtr, serial::SerialKind, to_shape, window::WaylandWindowStatePtr};
+use super::{
+    WaylandClientStatePtr,
+    image_cursor::{ImageCursorSurface, ImageCursors},
+    serial::SerialKind,
+    to_shape,
+    window::WaylandWindowStatePtr,
+};
+use crate::linux::Globals;
 use collections::HashMap;
 use gpui::{
-    CursorStyle, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent,
-    PenEvent, Pixels, PlatformInput, Point, point, px,
+    CursorImage, CursorStyle, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
+    MouseUpEvent, PenEvent, Pixels, PlatformInput, Point, point, px,
 };
 use wayland_backend::{client::ObjectId, protocol::WEnum};
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle, event_created_child, protocol::wl_seat::WlSeat,
 };
-use wayland_protocols::wp::cursor_shape::v1::client::{
-    wp_cursor_shape_device_v1::WpCursorShapeDeviceV1,
-    wp_cursor_shape_manager_v1::WpCursorShapeManagerV1,
-};
+use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::WpCursorShapeDeviceV1;
 use wayland_protocols::wp::tablet::zv2::client::{
     zwp_tablet_manager_v2::ZwpTabletManagerV2,
     zwp_tablet_pad_group_v2::{self, ZwpTabletPadGroupV2},
@@ -88,10 +92,17 @@ impl Tablets {
         }
     }
 
-    /// Shows `style` as the cursor of each tool near a window.
-    pub(crate) fn set_cursor_style(&self, style: CursorStyle) {
+    /// Shows `image`, or `style` when there is none, as the cursor of each
+    /// tool near a window.
+    pub(crate) fn set_cursor(
+        &self,
+        style: CursorStyle,
+        image: Option<&CursorImage>,
+        cursors: &mut ImageCursors,
+        globals: &Globals,
+    ) {
         for tool in self.tools.values() {
-            tool.set_cursor_style(style);
+            tool.set_cursor(style, image, cursors, globals);
         }
     }
 }
@@ -100,6 +111,10 @@ impl Tablets {
 struct TabletTool {
     tool: ZwpTabletToolV2,
     cursor_shape_device: Option<WpCursorShapeDeviceV1>,
+
+    /// The surface of an image cursor. A surface takes the cursor role of
+    /// one device only.
+    image_surface: ImageCursorSurface,
     window: Option<WaylandWindowStatePtr>,
 
     /// The serial of the last `proximity_in`. The cursor requests need it.
@@ -110,12 +125,15 @@ struct TabletTool {
 impl TabletTool {
     fn new(
         tool: ZwpTabletToolV2,
-        cursor_shape_manager: Option<&WpCursorShapeManagerV1>,
+        globals: &Globals,
         qh: &QueueHandle<WaylandClientStatePtr>,
     ) -> Self {
         Self {
-            cursor_shape_device: cursor_shape_manager
+            cursor_shape_device: globals
+                .cursor_shape_manager
+                .as_ref()
                 .map(|manager| manager.get_tablet_tool_v2(&tool, qh, ())),
+            image_surface: ImageCursorSurface::new(globals),
             tool,
             window: None,
             enter_serial: 0,
@@ -123,10 +141,27 @@ impl TabletTool {
         }
     }
 
-    fn set_cursor_style(&self, style: CursorStyle) {
-        if self.window.is_some()
-            && let Some(device) = &self.cursor_shape_device
-        {
+    fn set_cursor(
+        &self,
+        style: CursorStyle,
+        image: Option<&CursorImage>,
+        cursors: &mut ImageCursors,
+        globals: &Globals,
+    ) {
+        if self.window.is_none() {
+            return;
+        }
+        if let Some(image) = image {
+            match self.image_surface.show(cursors, globals, image) {
+                Ok((x, y)) => {
+                    let surface = self.image_surface.surface();
+                    self.tool.set_cursor(self.enter_serial, Some(surface), x, y);
+                    return;
+                }
+                Err(error) => log::error!("{error:#}"),
+            }
+        }
+        if let Some(device) = &self.cursor_shape_device {
             device.set_shape(self.enter_serial, to_shape(style));
         }
     }
@@ -301,7 +336,7 @@ impl Dispatch<ZwpTabletSeatV2, ()> for WaylandClientStatePtr {
         };
         let client = this.get_client();
         let mut state = client.borrow_mut();
-        let tool = TabletTool::new(tool, state.globals.cursor_shape_manager.as_ref(), qh);
+        let tool = TabletTool::new(tool, &state.globals, qh);
         state.tablets.tools.insert(tool.tool.id(), tool);
     }
 
@@ -338,7 +373,12 @@ impl Dispatch<ZwpTabletToolV2, ()> for WaylandClientStatePtr {
                 entry.window = Some(window);
                 entry.enter_serial = serial;
                 pending.proximity_in = true;
-                entry.set_cursor_style(state.cursor_style.unwrap_or(CursorStyle::Arrow));
+                entry.set_cursor(
+                    state.cursor_style.unwrap_or(CursorStyle::Arrow),
+                    state.cursor_image.as_deref(),
+                    &mut state.image_cursors,
+                    &state.globals,
+                );
                 None
             }
             zwp_tablet_tool_v2::Event::ProximityOut => {
