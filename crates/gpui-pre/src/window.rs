@@ -3631,6 +3631,13 @@ impl Window {
         self.mouse_position
     }
 
+    /// Moves the mouse cursor of the system to `position` in the window.
+    /// The system may refuse it, e.g. while the pointer is over another
+    /// window. The move gives no mouse event on some platforms.
+    pub fn set_mouse_position(&self, position: Point<Pixels>) {
+        self.platform_window.set_mouse_position(position);
+    }
+
     /// Captures the pointer for the given hitbox. While captured, all mouse move and mouse up
     /// events will be routed to listeners that check this hitbox's `is_hovered` status,
     /// regardless of actual hit testing. This enables drag operations that continue
