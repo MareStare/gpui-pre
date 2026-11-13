@@ -142,6 +142,10 @@ features = ["font-kit"]
 optional = true
 package = "gpui-pre-wgpu"
 
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.image]
+version = "0.25.1"
+default-features = false
+
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.http_client]
 version = "=0.3.11"
 package = "gpui-pre-http-client"

@@ -71,6 +71,9 @@ commit, then rebase the patch commits onto it.
   the drag area of a title bar, in the frames that reuse its paint. Tests
   run the hit test of the window control areas with
   `VisualTestContext::hit_test_window_control_area`.
+- Window screenshots: `Window::render_to_image` works in every build, not
+  only with `test-support`. The wgpu renderer draws the scene to an
+  offscreen texture and reads it back, also for X11 and Wayland windows.
 - Logs: `GPUI_FRAME_LOG` logs the stages of each frame, and
   `GPUI_STARTUP_LOG` the startup stages of the renderers.
 
