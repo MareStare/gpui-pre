@@ -1,27 +1,28 @@
 use crate::{
     BoolExt, MacDisplay, MetalFrames, NSRange, NSStringExt, TISCopyCurrentKeyboardInputSource,
-    TISGetInputSourceProperty, WindowFrameSource, events::platform_input_from_native,
+    TISGetInputSourceProperty, WindowFrameSource, events::platform_input_from_native, image_cursor,
     kTISPropertyInputSourceIsASCIICapable, kTISPropertyInputSourceType, kTISTypeKeyboardInputMode,
-    ns_string, renderer,
+    ns_string, pen::pen_event, renderer,
 };
 use anyhow::Result;
 use block2::RcBlock;
 use dispatch2::DispatchQueue;
 use gpui::{
-    AnyWindowHandle, BackgroundExecutor, Bounds, Capslock, CursorStyle, ExternalDragPayload,
-    ExternalPaths, FileDropEvent, ForegroundExecutor, FrameRequestSource, KeyDownEvent, Keystroke,
-    Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, PlatformAtlas, PlatformDisplay, PlatformFrameSignal, PlatformInput,
-    PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
-    SharedString, Size, SystemWindowTab, WindowAppearance, WindowBackgroundAppearance,
-    WindowBounds, WindowControlArea, WindowKind, WindowParams, WindowVisibility, point, px, size,
+    AnyWindowHandle, BackgroundExecutor, Bounds, Capslock, CursorRequest, CursorStyle,
+    ExternalDragPayload, ExternalPaths, FileDropEvent, ForegroundExecutor, FrameRequestSource,
+    KeyDownEvent, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PenEvent, Pixels, PlatformAtlas, PlatformDisplay,
+    PlatformFrameSignal, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton,
+    PromptLevel, RequestFrameOptions, SharedString, Size, SystemWindowTab, WindowAppearance,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind, WindowParams,
+    WindowVisibility, point, px, size,
 };
 use image::RgbaImage;
 
 use core_foundation::base::{CFRelease, CFTypeRef};
 use core_foundation_sys::base::CFEqual;
 use core_foundation_sys::number::{CFBooleanGetValue, CFBooleanRef};
-use core_graphics::display::CGDirectDisplayID;
+use core_graphics::display::{CGDirectDisplayID, CGDisplay, CGPoint};
 use ctor::ctor;
 use futures::channel::oneshot;
 use gpui_apple::display_link::MetalFrameSource;
@@ -40,7 +41,7 @@ use objc2_app_kit::NSFilenamesPboardType;
 use objc2_app_kit::{
     NSAlert, NSAlertStyle, NSAppearance, NSAutoresizingMaskOptions, NSBackingStoreType, NSBeep,
     NSButton, NSColor, NSDragOperation, NSDraggingContext, NSDraggingImageComponent,
-    NSDraggingImageComponentIconKey, NSDraggingItem, NSEventModifierFlags, NSEventType,
+    NSDraggingImageComponentIconKey, NSDraggingItem, NSEvent, NSEventModifierFlags, NSEventType,
     NSPasteboardWriting, NSRequestUserAttentionType, NSScreen, NSTrackingArea,
     NSTrackingAreaOptions, NSView, NSViewLayerContentsRedrawPolicy, NSVisualEffectBlendingMode,
     NSVisualEffectMaterial, NSVisualEffectState, NSWindow, NSWindowAnimationBehavior,
@@ -157,6 +158,14 @@ unsafe fn build_classes() {
             );
             decl.add_method(
                 sel!(mouseExited:),
+                handle_view_event as extern "C" fn(_, Sel, *mut AnyObject),
+            );
+            decl.add_method(
+                sel!(tabletPoint:),
+                handle_view_event as extern "C" fn(_, Sel, *mut AnyObject),
+            );
+            decl.add_method(
+                sel!(tabletProximity:),
                 handle_view_event as extern "C" fn(_, Sel, *mut AnyObject),
             );
             decl.add_method(
@@ -369,14 +378,14 @@ pub(crate) fn convert_mouse_position(position: NSPoint, window_height: Pixels) -
     )
 }
 
-/// Stores the cursor style on the active GPUI window and invalidates its cursor rects.
+/// Stores the cursor on the active GPUI window and invalidates its cursor rects.
 ///
 /// # Safety
 ///
 /// This function is not thread safe. Callers must ensure this is called on the AppKit main
 /// thread because it reads the active AppKit window and updates GPUI window state associated
 /// with Objective-C objects.
-pub(crate) unsafe fn set_active_window_cursor_style(style: CursorStyle) {
+pub(crate) unsafe fn set_active_window_cursor(cursor: CursorRequest) {
     // SAFETY: The caller guarantees AppKit main-thread access. `is_gpui_window` ensures the
     // window has our WINDOW_STATE_IVAR before reading it.
     unsafe {
@@ -397,8 +406,8 @@ pub(crate) unsafe fn set_active_window_cursor_style(style: CursorStyle) {
 
         let window_state = get_window_state(&*active_window);
         let mut window_state = window_state.lock();
-        if window_state.cursor_style != style {
-            window_state.cursor_style = style;
+        if window_state.cursor != cursor {
+            window_state.cursor = cursor;
             let _: () = msg_send![
                 window_state.native_window,
                 invalidateCursorRectsForView: window_state.native_view.as_ptr()
@@ -654,12 +663,13 @@ struct MacWindowState {
     native_view: NonNull<AnyObject>,
     blurred_view: Option<*mut AnyObject>,
     background_appearance: WindowBackgroundAppearance,
-    cursor_style: CursorStyle,
+    cursor: CursorRequest,
     cursor_visible: Arc<AtomicBool>,
     frame_source: FrameSource,
     renderer: renderer::Renderer,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
+    pen_callback: Option<Box<dyn FnMut(PenEvent)>>,
     activate_callback: Option<Box<dyn FnMut(bool)>>,
     visibility_callback: Option<Box<dyn FnMut(WindowVisibility)>>,
     // `None` until a callback is registered, so notifications during
@@ -1123,7 +1133,7 @@ impl MacWindow {
                 native_view: NonNull::new_unchecked(native_view),
                 blurred_view: None,
                 background_appearance: WindowBackgroundAppearance::Opaque,
-                cursor_style: CursorStyle::Arrow,
+                cursor: CursorRequest::default(),
                 cursor_visible,
                 frame_source: match &metal_frames {
                     Some(metal_frames) => FrameSource::Metal(metal_frames.clone()),
@@ -1132,6 +1142,7 @@ impl MacWindow {
                 renderer,
                 request_frame_callback: None,
                 event_callback: None,
+                pen_callback: None,
                 activate_callback: None,
                 visibility_callback: None,
                 last_visibility: None,
@@ -1698,6 +1709,27 @@ impl PlatformWindow for MacWindow {
         convert_mouse_position(position, self.content_size().height)
     }
 
+    fn set_mouse_position(&self, position: Point<Pixels>) {
+        let height = self.content_size().height;
+        let on_screen = self
+            .0
+            .lock()
+            .native_window()
+            .convertPointToScreen(NSPoint::new(
+                f64::from(position.x.as_f32()),
+                f64::from((height - position.y).as_f32()),
+            ));
+        // The display space has its origin at the top left of the main
+        // display, and its y axis goes down.
+        let main_height = CGDisplay::main().bounds().size.height;
+        let point = CGPoint::new(on_screen.x, main_height - on_screen.y);
+        if CGDisplay::warp_mouse_cursor_position(point).is_ok() {
+            // A warp stops the mouse events for a short time. This gives
+            // them back at once.
+            let _ = CGDisplay::associate_mouse_and_mouse_cursor_position(true);
+        }
+    }
+
     fn modifiers(&self) -> Modifiers {
         unsafe {
             let modifiers: NSEventModifierFlags = msg_send![class!(NSEvent), modifierFlags];
@@ -2052,6 +2084,14 @@ impl PlatformWindow for MacWindow {
 
     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>) {
         self.0.as_ref().lock().event_callback = Some(callback);
+    }
+
+    fn on_pen(&self, callback: Box<dyn FnMut(PenEvent)>) {
+        // AppKit joins the mouse events that come between two frames. A pen
+        // then gives a fraction of its samples. The setting is global to
+        // the app.
+        NSEvent::setMouseCoalescingEnabled(false);
+        self.0.as_ref().lock().pen_callback = Some(callback);
     }
 
     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>) {
@@ -2586,7 +2626,15 @@ extern "C" fn reset_cursor_rects(this: &AnyObject, _: Sel) {
         let _: () = msg_send![super(this, class!(NSView)), resetCursorRects];
 
         let window_state = get_window_state(this);
-        let cursor_style = window_state.lock().cursor_style;
+        let CursorRequest {
+            style: cursor_style,
+            image,
+        } = window_state.lock().cursor.clone();
+        let bounds: NSRect = msg_send![this, bounds];
+        if let Some(cursor) = image.and_then(|image| image_cursor::cursor(&image)) {
+            let _: () = msg_send![this, addCursorRect: bounds, cursor: &*cursor];
+            return;
+        }
 
         let cursor: *mut AnyObject = match cursor_style {
             CursorStyle::Arrow => msg_send![class!(NSCursor), arrowCursor],
@@ -2624,7 +2672,6 @@ extern "C" fn reset_cursor_rects(this: &AnyObject, _: Sel) {
             CursorStyle::ContextualMenu => msg_send![class!(NSCursor), contextualMenuCursor],
         };
 
-        let bounds: NSRect = msg_send![this, bounds];
         let _: () = msg_send![this, addCursorRect: bounds, cursor: cursor];
     }
 }
@@ -2878,6 +2925,18 @@ extern "C" fn handle_view_event(this: &AnyObject, _: Sel, native_event: *mut Any
             lock.last_left_mouse_down_event = None;
         }
         _ => {}
+    }
+    // The pen state goes first: the window reads it on the mouse event of
+    // the same sample.
+    let pen = unsafe { native_event.cast::<NSEvent>().as_ref() }
+        .and_then(|event| pen_event(event, window_height));
+    if let Some(pen) = pen
+        && let Some(mut callback) = lock.pen_callback.take()
+    {
+        drop(lock);
+        callback(pen);
+        lock = window_state.as_ref().lock();
+        lock.pen_callback = Some(callback);
     }
     let event = unsafe { platform_input_from_native(native_event, Some(window_height)) };
 

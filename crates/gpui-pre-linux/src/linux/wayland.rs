@@ -2,8 +2,10 @@ mod client;
 mod clipboard;
 mod cursor;
 mod display;
+mod image_cursor;
 mod popup;
 mod serial;
+mod tablet;
 mod window;
 
 /// Contains Types for configuring layer_shell surfaces.

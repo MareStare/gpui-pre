@@ -1,4 +1,5 @@
 mod app_menu;
+mod cursor_image;
 mod keyboard;
 mod keystroke;
 mod platform_info;
@@ -40,10 +41,10 @@ use crate::{
     Action, AnyWindowHandle, App, AsyncWindowContext, BackgroundExecutor, Bounds, Corners,
     DEFAULT_WINDOW_SIZE, DevicePixels, DispatchEventResult, Edges, ExternalDragPayload, Font,
     FontId, FontMetrics, FontRun, ForegroundExecutor, GlyphId, GpuFailure, GpuSpecs, Hsla,
-    ImageSource, Keymap, LineLayout, MissingGlyphSink, Pixels, PlatformGestures, PlatformInput,
-    Point, Priority, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Scene,
-    ShapedGlyph, ShapedRun, SharedString, Size, SvgRenderer, SystemWindowTab, Task, Window,
-    WindowControlArea, hash, point, px, size,
+    ImageSource, Keymap, LineLayout, MissingGlyphSink, PenEvent, Pixels, PlatformGestures,
+    PlatformInput, Point, Priority, RenderGlyphParams, RenderImage, RenderImageParams,
+    RenderSvgParams, Scene, ShapedGlyph, ShapedRun, SharedString, Size, SvgRenderer,
+    SystemWindowTab, Task, Window, WindowControlArea, hash, point, px, size,
 };
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use anyhow::bail;
@@ -79,6 +80,7 @@ use strum::EnumIter;
 use uuid::Uuid;
 
 pub use app_menu::*;
+pub use cursor_image::*;
 pub use keyboard::*;
 pub use keystroke::*;
 
@@ -576,6 +578,11 @@ pub trait Platform: 'static {
     fn path_for_auxiliary_executable(&self, name: &str) -> Result<PathBuf>;
 
     fn set_cursor_style(&self, style: CursorStyle);
+
+    /// Shows `cursor`. A platform with no image cursors shows its style.
+    fn set_cursor(&self, cursor: CursorRequest) {
+        self.set_cursor_style(cursor.style);
+    }
 
     /// Hides the mouse cursor until the user moves the mouse over one of
     /// this application's windows.
@@ -1275,6 +1282,12 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn appearance(&self) -> WindowAppearance;
     fn display(&self) -> Option<Rc<dyn PlatformDisplay>>;
     fn mouse_position(&self) -> Point<Pixels>;
+
+    /// Moves the mouse cursor of the system to `position` in the window. A
+    /// platform that cannot move it does nothing.
+    fn set_mouse_position(&self, position: Point<Pixels>) {
+        let _ = position;
+    }
     fn modifiers(&self) -> Modifiers;
     fn capslock(&self) -> Capslock;
     fn set_input_handler(&mut self, input_handler: PlatformInputHandler);
@@ -1311,6 +1324,10 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     }
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>);
     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> DispatchEventResult>);
+    /// Registers the callback that gets each [`PenEvent`] of the window. A
+    /// platform with no pen input never calls it. A platform may change
+    /// app-wide input settings that the pen needs.
+    fn on_pen(&self, _callback: Box<dyn FnMut(PenEvent)>) {}
     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>);
     /// Registers the callback invoked when [`Self::visibility`] changes. Only
     /// transitions are reported; the callback runs on the main thread outside
