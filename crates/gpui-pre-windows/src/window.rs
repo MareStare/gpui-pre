@@ -706,6 +706,21 @@ impl PlatformWindow for WindowsWindow {
         logical_point(point.x as f32, point.y as f32, scale_factor)
     }
 
+    fn set_mouse_position(&self, position: Point<Pixels>) {
+        let device = position.scale(self.scale_factor());
+        let mut point = POINT {
+            x: device.x.as_f32().round() as i32,
+            y: device.y.as_f32().round() as i32,
+        };
+        unsafe {
+            if ClientToScreen(self.0.hwnd, &mut point).as_bool() {
+                SetCursorPos(point.x, point.y)
+                    .context("unable to set cursor position")
+                    .log_err();
+            }
+        }
+    }
+
     fn modifiers(&self) -> Modifiers {
         current_modifiers()
     }
