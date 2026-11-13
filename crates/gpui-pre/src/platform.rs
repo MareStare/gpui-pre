@@ -51,7 +51,6 @@ use anyhow::{Context as _, Result};
 use async_task::Runnable;
 use collections::FxHashMap;
 use futures::channel::oneshot;
-#[cfg(any(test, feature = "headless"))]
 use image::RgbaImage;
 use image::codecs::gif::GifDecoder;
 use image::{AnimationDecoder as _, DynamicImage, Frame};
