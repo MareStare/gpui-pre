@@ -293,6 +293,13 @@ impl Application {
         self
     }
 
+    /// Sets the [`ActivationPolicy`] the app starts with, before it shows in the Dock. See
+    /// [`App::set_activation_policy`].
+    pub fn with_activation_policy(self, policy: ActivationPolicy) -> Self {
+        self.0.borrow().platform.set_activation_policy(policy);
+        self
+    }
+
     /// Sets the windowing mode the app starts in. See [`App::request_windowing`].
     ///
     /// Defaults to windowed. On Linux, the default environment is the process's own, and the app
