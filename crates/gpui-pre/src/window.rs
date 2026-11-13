@@ -9,11 +9,11 @@ use crate::taffy::TaffyLayoutEngine;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
     AsyncWindowContext, AtlasTile, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow,
-    Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
-    DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
-    EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuFailure,
-    GpuSpecs, Hsla, InputHandler, InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent,
-    KeyEvent, Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers,
+    Capslock, Context, Corners, CursorHideMode, CursorImage, CursorStyle, Decorations,
+    DevicePixels, DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect,
+    Entity, EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId,
+    GpuFailure, GpuSpecs, Hsla, InputHandler, InputPreference, IsZero, KeyBinding, KeyContext,
+    KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers,
     ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent,
     Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
     PlatformWindow, Point, PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render,
@@ -739,6 +739,10 @@ pub(crate) type AnyMouseListener =
 pub(crate) struct CursorStyleRequest {
     pub(crate) hitbox_id: Option<HitboxId>,
     pub(crate) style: CursorStyle,
+
+    /// The image that shows in place of `style` where the platform can
+    /// show images.
+    pub(crate) image: Option<Arc<CursorImage>>,
 }
 
 #[derive(Default, Eq, PartialEq)]
@@ -1168,16 +1172,16 @@ impl Frame {
         }
     }
 
-    pub(crate) fn cursor_style(&self, window: &Window) -> Option<CursorStyle> {
+    pub(crate) fn cursor_style(&self, window: &Window) -> Option<&CursorStyleRequest> {
         self.cursor_styles
             .iter()
             .rev()
-            .fold_while(None, |style, request| match request.hitbox_id {
-                None => Done(Some(request.style)),
-                Some(hitbox_id) => Continue(style.or_else(|| {
+            .fold_while(None, |found, request| match request.hitbox_id {
+                None => Done(Some(request)),
+                Some(hitbox_id) => Continue(found.or_else(|| {
                     hitbox_id
                         .is_hovered_ignoring_last_input(window)
-                        .then_some(request.style)
+                        .then_some(request)
                 })),
             })
             .into_inner()
@@ -4398,6 +4402,24 @@ impl Window {
         self.next_frame.cursor_styles.push(CursorStyleRequest {
             hitbox_id: Some(hitbox.id),
             style,
+            image: None,
+        });
+    }
+
+    /// Shows `image` as the cursor over the hitbox, like `set_cursor_style`.
+    /// A platform with no image cursors shows `fallback`. This method should
+    /// only be called during the paint phase of element drawing.
+    pub fn set_cursor_image(
+        &mut self,
+        image: Arc<CursorImage>,
+        fallback: CursorStyle,
+        hitbox: &Hitbox,
+    ) {
+        self.invalidator.debug_assert_paint();
+        self.next_frame.cursor_styles.push(CursorStyleRequest {
+            hitbox_id: Some(hitbox.id),
+            style: fallback,
+            image: Some(image),
         });
     }
 
@@ -4410,6 +4432,7 @@ impl Window {
         self.next_frame.cursor_styles.push(CursorStyleRequest {
             hitbox_id: None,
             style,
+            image: None,
         })
     }
 
@@ -5932,11 +5955,15 @@ impl Window {
     fn reset_cursor_style(&self, cx: &mut App) {
         // Set the cursor only if we're the active window.
         if self.is_window_hovered() {
-            let style = self
-                .rendered_frame
-                .cursor_style(self)
-                .unwrap_or(CursorStyle::Arrow);
-            cx.platform.set_cursor_style(style);
+            match self.rendered_frame.cursor_style(self) {
+                Some(CursorStyleRequest {
+                    style,
+                    image: Some(image),
+                    ..
+                }) => cx.platform.set_cursor_image(image.clone(), *style),
+                Some(request) => cx.platform.set_cursor_style(request.style),
+                None => cx.platform.set_cursor_style(CursorStyle::Arrow),
+            }
         }
     }
 
