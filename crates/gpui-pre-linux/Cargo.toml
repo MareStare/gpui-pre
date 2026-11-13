@@ -224,7 +224,7 @@ version = "0.31.11"
 optional = true
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.wayland-protocols]
-version = "0.32.9"
+version = "0.32.13"
 features = [
     "client",
     "staging",

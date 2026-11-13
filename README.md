@@ -86,6 +86,9 @@ commit, then rebase the patch commits onto it.
   and Wayland. On Wayland the tablet tools show it too. A platform that
   cannot show the image shows the fallback style. The native cursor of an
   image lives as long as the image.
+- Cursor warp: `Window::set_mouse_position` moves the mouse cursor of the
+  system to a point of the window. Wayland uses `wp_pointer_warp_v1`
+  while the pointer is over the window, and the compositor may refuse it.
 - Logs: `GPUI_FRAME_LOG` logs the stages of each frame, and
   `GPUI_STARTUP_LOG` the startup stages of the renderers.
 

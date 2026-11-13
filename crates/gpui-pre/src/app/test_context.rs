@@ -527,6 +527,12 @@ impl TestAppContext {
             .simulate_visual_viewport_change(bounds);
     }
 
+    /// Where the window put the mouse cursor of the system last, through
+    /// [`Window::set_mouse_position`].
+    pub fn system_mouse_position(&self, window_handle: AnyWindowHandle) -> Point<Pixels> {
+        self.test_window(window_handle).0.lock().mouse_position
+    }
+
     /// Simulates the window moving to a display with a different scale factor.
     pub fn simulate_window_scale_factor_change(
         &self,

@@ -44,6 +44,9 @@ pub(crate) struct TestWindowState {
     visual_viewport: Option<Bounds<Pixels>>,
     visual_viewport_callback: Option<Box<dyn FnMut()>>,
     insets: WindowInsets,
+
+    /// Where the window put the mouse cursor of the system last.
+    pub(crate) mouse_position: Point<Pixels>,
     insets_callback: Option<Box<dyn FnMut(WindowInsets)>>,
     virtual_keyboard_requests: usize,
     virtual_keyboard_dismissals: usize,
@@ -122,6 +125,7 @@ impl TestWindow {
             visual_viewport: None,
             visual_viewport_callback: None,
             insets: WindowInsets::default(),
+            mouse_position: Point::default(),
             insets_callback: None,
             virtual_keyboard_requests: 0,
             virtual_keyboard_dismissals: 0,
@@ -390,7 +394,11 @@ impl PlatformWindow for TestWindow {
     }
 
     fn mouse_position(&self) -> Point<Pixels> {
-        Point::default()
+        self.0.lock().mouse_position
+    }
+
+    fn set_mouse_position(&self, position: Point<Pixels>) {
+        self.0.lock().mouse_position = position;
     }
 
     fn modifiers(&self) -> crate::Modifiers {
