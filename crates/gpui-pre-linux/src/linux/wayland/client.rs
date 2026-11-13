@@ -96,6 +96,7 @@ use crate::linux::{
         clipboard::{Clipboard, DataOffer, FILE_LIST_MIME_TYPE, TEXT_MIME_TYPES},
         cursor::Cursor,
         serial::{ActivationContext, Serial, SerialKind, SerialTracker},
+        tablet::{TabletContext, Tablets},
         to_shape,
         window::WaylandWindow,
     },
@@ -114,6 +115,7 @@ use gpui_wgpu::{CompositorGpuHint, GpuContext};
 use wayland_protocols::wp::linux_dmabuf::zv1::client::{
     zwp_linux_dmabuf_feedback_v1, zwp_linux_dmabuf_v1,
 };
+use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_manager_v2::ZwpTabletManagerV2;
 
 /// Used to convert evdev scancode to xkb scancode
 const MIN_KEYCODE: u32 = 8;
@@ -263,6 +265,7 @@ pub struct Globals {
     pub gesture_manager: Option<zwp_pointer_gestures_v1::ZwpPointerGesturesV1>,
     pub dialog: Option<xdg_wm_dialog_v1::XdgWmDialogV1>,
     pub system_bell: Option<xdg_system_bell_v1::XdgSystemBellV1>,
+    pub tablet_manager: Option<ZwpTabletManagerV2>,
     pub executor: ForegroundExecutor,
     pub frame_ping: Ping,
 }
@@ -314,6 +317,7 @@ impl Globals {
             gesture_manager: globals.bind(&qh, 1..=3, ()).ok(),
             dialog: globals.bind(&qh, dialog_v..=dialog_v, ()).ok(),
             system_bell: globals.bind(&qh, 1..=1, ()).ok(),
+            tablet_manager: globals.bind(&qh, 1..=1, ()).ok(),
             executor,
             qh,
             frame_ping,
@@ -368,6 +372,7 @@ pub(crate) struct WaylandClientState {
     pinch_scale: f32,
     wl_keyboard: Option<wl_keyboard::WlKeyboard>,
     cursor_shape_device: Option<wp_cursor_shape_device_v1::WpCursorShapeDeviceV1>,
+    tablets: Tablets,
     data_device: Option<wl_data_device::WlDataDevice>,
     primary_selection: Option<zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1>,
     text_input: Option<zwp_text_input_v3::ZwpTextInputV3>,
@@ -536,11 +541,46 @@ fn file_uri_list(paths: &FileDragPaths) -> String {
         })
 }
 
+#[derive(Debug)]
 pub struct ClickState {
     last_mouse_button: Option<MouseButton>,
     last_click: Instant,
     last_location: Point<Pixels>,
     current_count: usize,
+}
+
+impl ClickState {
+    /// Counts a press of `button`: a quick press near the press before
+    /// continues its click count.
+    pub(super) fn press(&mut self, button: MouseButton, position: Point<Pixels>) -> usize {
+        if self.last_click.elapsed() < DOUBLE_CLICK_INTERVAL
+            && self.last_mouse_button == Some(button)
+            && is_within_click_distance(self.last_location, position)
+        {
+            self.current_count += 1;
+        } else {
+            self.current_count = 1;
+        }
+        self.last_click = Instant::now();
+        self.last_mouse_button = Some(button);
+        self.last_location = position;
+        self.current_count
+    }
+
+    pub(super) fn count(&self) -> usize {
+        self.current_count
+    }
+}
+
+impl Default for ClickState {
+    fn default() -> Self {
+        Self {
+            last_click: Instant::now(),
+            last_mouse_button: None,
+            last_location: Point::default(),
+            current_count: 0,
+        }
+    }
 }
 
 pub(crate) struct KeyRepeat {
@@ -569,6 +609,22 @@ impl WaylandClientState {
         };
         activation.activate(startup_activation_token, surface);
     }
+
+    pub(super) fn tablet_context(&mut self) -> TabletContext<'_> {
+        TabletContext {
+            tablets: &mut self.tablets,
+            globals: &self.globals,
+            windows: &self.windows,
+            serial_tracker: &mut self.serial_tracker,
+            cursor_style: self.cursor_style.unwrap_or_default(),
+        }
+    }
+
+    pub(super) fn is_mouse_over(&self, window: &WaylandWindowStatePtr) -> bool {
+        self.mouse_focused_window
+            .as_ref()
+            .is_some_and(|mouse| mouse.ptr_eq(window))
+    }
 }
 
 /// This struct is required to conform to Rust's orphan rules, so we can dispatch on the state but hand the
@@ -577,6 +633,34 @@ impl WaylandClientState {
 pub struct WaylandClientStatePtr(Weak<RefCell<WaylandClientState>>);
 
 impl WaylandClientStatePtr {
+    /// Ends the text composition of the window with the keyboard focus, as
+    /// each press of a pointer button does.
+    pub(super) fn end_composition_for_press<'a>(
+        &self,
+        client: &'a RefCell<WaylandClientState>,
+        mut state: RefMut<'a, WaylandClientState>,
+    ) -> RefMut<'a, WaylandClientState> {
+        let Some(window) = state.keyboard_focused_window.clone() else {
+            return state;
+        };
+        if state.composing && state.text_input.is_some() {
+            drop(state);
+            // text_input_v3 don't have something like a reset function
+            self.disable_ime();
+            self.enable_ime();
+            window.handle_ime(ImeInput::UnmarkText);
+            state = client.borrow_mut();
+        } else if let (Some(text), Some(compose)) =
+            (state.pre_edit_text.take(), state.compose_state.as_mut())
+        {
+            compose.reset();
+            drop(state);
+            window.handle_ime(ImeInput::InsertText(text));
+            state = client.borrow_mut();
+        }
+        state
+    }
+
     pub fn get_client(&self) -> Rc<RefCell<WaylandClientState>> {
         self.0
             .upgrade()
@@ -821,6 +905,7 @@ impl WaylandClientStatePtr {
         {
             state.cursor_hidden_window = Some(window);
         }
+        state.tablets.drop_window(&closed_window);
     }
 }
 
@@ -1062,6 +1147,7 @@ impl WaylandConnection {
             .map(|primary_selection_manager| primary_selection_manager.get_device(&seat, &qh, ()));
 
         let cursor = Cursor::new(&conn, &globals, 24);
+        let tablets = Tablets::new(globals.tablet_manager.as_ref(), &seat, &qh);
 
         let state = Rc::new(RefCell::new(WaylandClientState {
             serial_tracker: SerialTracker::new(),
@@ -1074,6 +1160,7 @@ impl WaylandConnection {
             pinch_gesture: None,
             pinch_scale: 1.0,
             cursor_shape_device: None,
+            tablets,
             data_device,
             primary_selection,
             text_input: None,
@@ -1097,12 +1184,7 @@ impl WaylandConnection {
                 uri_read_generation: 0,
             },
             external_drag: None,
-            click: ClickState {
-                last_click: Instant::now(),
-                last_mouse_button: None,
-                last_location: Point::default(),
-                current_count: 0,
-            },
+            click: ClickState::default(),
             repeat: KeyRepeat {
                 characters_per_second: 16,
                 delay: Duration::from_millis(500),
@@ -1367,6 +1449,7 @@ impl WaylandConnection {
         }
 
         state.cursor_style = Some(style);
+        state.tablets.set_cursor_style(style);
 
         // Don't clobber the invisible cursor; restore reads back from `cursor_style`.
         if state.cursor_hidden_window.is_some() {
@@ -1621,6 +1704,9 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandClientStat
                     }
                     state.wl_seat.release();
                     state.wl_seat = registry.bind::<wl_seat::WlSeat, _, _>(name, version, qh, ());
+                    let state = &mut *state;
+                    let manager = state.globals.tablet_manager.as_ref();
+                    state.tablets.rebind(manager, &state.wl_seat, qh);
                 }
                 "wl_output" => {
                     let Ok(version) = wl_output_version(version) else {
@@ -2482,6 +2568,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
                         if state.cursor_style != Some(default_style) {
                             let serial = state.serial_tracker.get(SerialKind::MouseEnter);
                             state.cursor_style = Some(default_style);
+                            state.tablets.set_cursor_style(default_style);
 
                             if let Some(cursor_shape_device) = &state.cursor_shape_device {
                                 cursor_shape_device
@@ -2544,44 +2631,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
                 }
                 match button_state {
                     wl_pointer::ButtonState::Pressed => {
-                        if let Some(window) = state.keyboard_focused_window.clone() {
-                            if state.composing && state.text_input.is_some() {
-                                drop(state);
-                                // text_input_v3 don't have something like a reset function
-                                this.disable_ime();
-                                this.enable_ime();
-                                window.handle_ime(ImeInput::UnmarkText);
-                                state = client.borrow_mut();
-                            } else if let (Some(text), Some(compose)) =
-                                (state.pre_edit_text.take(), state.compose_state.as_mut())
-                            {
-                                compose.reset();
-                                drop(state);
-                                window.handle_ime(ImeInput::InsertText(text));
-                                state = client.borrow_mut();
-                            }
-                        }
-                        let click_elapsed = state.click.last_click.elapsed();
-
-                        if click_elapsed < DOUBLE_CLICK_INTERVAL
-                            && state
-                                .click
-                                .last_mouse_button
-                                .is_some_and(|prev_button| prev_button == button)
-                            && is_within_click_distance(
-                                state.click.last_location,
-                                state.mouse_location.unwrap(),
-                            )
-                        {
-                            state.click.current_count += 1;
-                        } else {
-                            state.click.current_count = 1;
-                        }
-
-                        state.click.last_click = Instant::now();
-                        state.click.last_mouse_button = Some(button);
-                        state.click.last_location = state.mouse_location.unwrap();
-
+                        state = this.end_composition_for_press(&client, state);
+                        let position = state.mouse_location.unwrap();
+                        state.click.press(button, position);
                         state.button_pressed = Some(button);
 
                         if let Some(window) = state.mouse_focused_window.clone() {

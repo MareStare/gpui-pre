@@ -44,7 +44,9 @@ use super::{
     ButtonOrScroll, ScrollDirection, X11Display, X11WindowStatePtr, XcbAtoms, XimCallbackEvent,
     XimHandler, button_or_scroll_from_event_detail, check_reply,
     clipboard::{self, Clipboard},
-    get_reply, get_valuator_axis_index, handle_connection_error, modifiers_from_state,
+    event_position, fp3232_to_f32, get_reply, get_valuator_axis_index, handle_connection_error,
+    modifiers_from_state,
+    pen::{Pens, PointerAction, PointerSample},
     pressed_button_from_mask, xcb_flush,
 };
 
@@ -63,7 +65,7 @@ use gpui::{
     Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, Pixels, PlatformDisplay,
     PlatformFrameSignal, PlatformInput, PlatformKeyboardLayout, PlatformWindow, Point,
     RequestFrameOptions, ScrollDelta, Size, TouchPhase, WindowButtonLayout, WindowParams,
-    WindowVisibility, point, px,
+    WindowVisibility, px,
 };
 use gpui_wgpu::{CompositorGpuHint, GpuContext};
 
@@ -232,6 +234,7 @@ pub struct X11ClientState {
     pub(crate) cursor_hidden_window: Option<xproto::Window>,
 
     pointer_device_states: BTreeMap<xinput::DeviceId, PointerDeviceState>,
+    pens: Pens,
 
     pub(crate) supports_xinput_gestures: bool,
 
@@ -407,13 +410,15 @@ impl X11Connection {
             supports_xinput_gestures,
         );
 
-        let pointer_device_states =
-            current_pointer_device_states(&xcb_connection, &BTreeMap::new()).unwrap_or_default();
+        let devices = query_devices(&xcb_connection).unwrap_or_default();
+        let pointer_device_states = current_pointer_device_states(&devices, &BTreeMap::new());
 
         let atoms = XcbAtoms::new(&xcb_connection)
             .context("Failed to get XCB atoms")?
             .reply()
             .context("Failed to get XCB atoms")?;
+        let mut pens = Pens::default();
+        pens.set_devices(&devices, atoms.AbsPressure);
 
         let root = xcb_connection.setup().roots[0].root;
         let compositor_present = check_compositor_present(&xcb_connection, root);
@@ -548,6 +553,7 @@ impl X11Connection {
                 invisible_cursor_cache: None,
 
                 pointer_device_states,
+                pens,
 
                 supports_xinput_gestures,
 
@@ -877,6 +883,21 @@ impl X11Client {
             .windows
             .get(&win)
             .map(|window_reference| window_reference.window.clone())
+    }
+
+    /// Gives `window` the pen event of a pointer event, when a pen sent it.
+    fn handle_pen_sample<'a>(
+        &'a self,
+        mut state: RefMut<'a, X11ClientState>,
+        window: &X11WindowStatePtr,
+        sample: PointerSample,
+    ) -> RefMut<'a, X11ClientState> {
+        if let Some(pen) = state.pens.sample(sample) {
+            drop(state);
+            window.handle_pen(pen);
+            state = self.0.borrow_mut();
+        }
+        state
     }
 
     fn handle_event(&self, event: Event) -> Option<()> {
@@ -1235,10 +1256,9 @@ impl X11Client {
                 let modifiers = modifiers_from_xinput_info(event.mods);
                 state.modifiers = modifiers;
 
-                let position = point(
-                    px(event.event_x as f32 / u16::MAX as f32 / state.scale_factor),
-                    px(event.event_y as f32 / u16::MAX as f32 / state.scale_factor),
-                );
+                let position = event_position(event.event_x, event.event_y, state.scale_factor);
+                let sample = PointerSample::new(&event, PointerAction::Press, position);
+                state = self.handle_pen_sample(state, &window, sample);
 
                 if state.composing && state.ximc.is_some() {
                     drop(state);
@@ -1313,10 +1333,9 @@ impl X11Client {
                 let modifiers = modifiers_from_xinput_info(event.mods);
                 state.modifiers = modifiers;
 
-                let position = point(
-                    px(event.event_x as f32 / u16::MAX as f32 / state.scale_factor),
-                    px(event.event_y as f32 / u16::MAX as f32 / state.scale_factor),
-                );
+                let position = event_position(event.event_x, event.event_y, state.scale_factor);
+                let sample = PointerSample::new(&event, PointerAction::Release, position);
+                state = self.handle_pen_sample(state, &window, sample);
                 match button_or_scroll_from_event_detail(event.detail) {
                     Some(ButtonOrScroll::Button(button)) => {
                         let click_count = state.current_count;
@@ -1364,13 +1383,11 @@ impl X11Client {
                     };
                 }
                 let pressed_button = pressed_button_from_mask(event.button_mask[0]);
-                let position = point(
-                    px(event.event_x as f32 / u16::MAX as f32 / state.scale_factor),
-                    px(event.event_y as f32 / u16::MAX as f32 / state.scale_factor),
-                );
+                let position = event_position(event.event_x, event.event_y, state.scale_factor);
                 let modifiers = modifiers_from_xinput_info(event.mods);
                 state.modifiers = modifiers;
-                drop(state);
+                let sample = PointerSample::new(&event, PointerAction::Motion, position);
+                drop(self.handle_pen_sample(state, &window, sample));
 
                 if event.valuator_mask[0] & 3 != 0 {
                     window.handle_input(PlatformInput::MouseMove(gpui::MouseMoveEvent {
@@ -1407,15 +1424,21 @@ impl X11Client {
                 reset_all_pointer_device_scroll_positions(&mut state.pointer_device_states);
                 state.mouse_focused_window = None;
                 let pressed_button = pressed_button_from_mask(event.buttons[0]);
-                let position = point(
-                    px(event.event_x as f32 / u16::MAX as f32 / state.scale_factor),
-                    px(event.event_y as f32 / u16::MAX as f32 / state.scale_factor),
-                );
+                let position = event_position(event.event_x, event.event_y, state.scale_factor);
                 let modifiers = modifiers_from_xinput_info(event.mods);
                 state.modifiers = modifiers;
+                // The pen of a drag stays: the window keeps its input.
+                let pen = if pressed_button.is_none() {
+                    state.pens.leave()
+                } else {
+                    None
+                };
                 drop(state);
 
                 let window = self.get_window(event.event)?;
+                if let Some(pen) = pen {
+                    window.handle_pen(pen);
+                }
                 window.handle_input(PlatformInput::MouseExited(gpui::MouseExitEvent {
                     pressed_button,
                     position,
@@ -1432,11 +1455,11 @@ impl X11Client {
                         state.pointer_device_states.remove(&info.deviceid);
                     }
                 }
-                if let Some(pointer_device_states) = current_pointer_device_states(
-                    &state.xcb_connection,
-                    &state.pointer_device_states,
-                ) {
-                    state.pointer_device_states = pointer_device_states;
+                if let Some(devices) = query_devices(&state.xcb_connection) {
+                    state.pointer_device_states =
+                        current_pointer_device_states(&devices, &state.pointer_device_states);
+                    let pressure_label = state.atoms.AbsPressure;
+                    state.pens.set_devices(&devices, pressure_label);
                 }
             }
             Event::XinputDeviceChanged(event) => {
@@ -1451,10 +1474,7 @@ impl X11Client {
                 state.pinch_scale = 1.0;
                 let modifiers = modifiers_from_xinput_info(event.mods);
                 state.modifiers = modifiers;
-                let position = point(
-                    px(event.event_x as f32 / u16::MAX as f32 / state.scale_factor),
-                    px(event.event_y as f32 / u16::MAX as f32 / state.scale_factor),
-                );
+                let position = event_position(event.event_x, event.event_y, state.scale_factor);
                 drop(state);
                 window.handle_input(PlatformInput::Pinch(gpui::PinchEvent {
                     position,
@@ -1468,10 +1488,7 @@ impl X11Client {
                 let mut state = self.0.borrow_mut();
                 let modifiers = modifiers_from_xinput_info(event.mods);
                 state.modifiers = modifiers;
-                let position = point(
-                    px(event.event_x as f32 / u16::MAX as f32 / state.scale_factor),
-                    px(event.event_y as f32 / u16::MAX as f32 / state.scale_factor),
-                );
+                let position = event_position(event.event_x, event.event_y, state.scale_factor);
                 // scale is in FP16.16 format: divide by 65536 to get the float value
                 let new_absolute_scale = event.scale as f32 / 65536.0;
                 let previous_scale = state.pinch_scale;
@@ -1491,10 +1508,7 @@ impl X11Client {
                 state.pinch_scale = 1.0;
                 let modifiers = modifiers_from_xinput_info(event.mods);
                 state.modifiers = modifiers;
-                let position = point(
-                    px(event.event_x as f32 / u16::MAX as f32 / state.scale_factor),
-                    px(event.event_y as f32 / u16::MAX as f32 / state.scale_factor),
-                );
+                let position = event_position(event.event_x, event.event_y, state.scale_factor);
                 drop(state);
                 window.handle_input(PlatformInput::Pinch(gpui::PinchEvent {
                     position,
@@ -2246,10 +2260,6 @@ fn handle_visibility_changed(mut state: RefMut<'_, X11ClientState>, x_window: xp
     window.set_visibility(visibility);
 }
 
-fn fp3232_to_f32(value: xinput::Fp3232) -> f32 {
-    value.integral as f32 + value.frac as f32 / u32::MAX as f32
-}
-
 fn detect_compositor_gpu(
     xcb_connection: &XCBConnection,
     screen: &xproto::Screen,
@@ -2453,22 +2463,24 @@ fn xdnd_send_status(
     xcb_connection.flush().log_err();
 }
 
-/// Recomputes `pointer_device_states` by querying all pointer devices.
-/// When a device is present in `scroll_values_to_preserve`, its value for `ScrollAxisState.scroll_value` is used.
-fn current_pointer_device_states(
-    xcb_connection: &XCBConnection,
-    scroll_values_to_preserve: &BTreeMap<xinput::DeviceId, PointerDeviceState>,
-) -> Option<BTreeMap<xinput::DeviceId, PointerDeviceState>> {
-    let devices_query_result = get_reply(
+fn query_devices(xcb_connection: &XCBConnection) -> Option<Vec<xinput::XIDeviceInfo>> {
+    let reply = get_reply(
         || "Failed to query XInput devices",
         xcb_connection.xinput_xi_query_device(XINPUT_ALL_DEVICES),
     )
     .log_err()?;
+    Some(reply.infos)
+}
 
+/// Computes `pointer_device_states` from all devices.
+/// When a device is present in `scroll_values_to_preserve`, its value for `ScrollAxisState.scroll_value` is used.
+fn current_pointer_device_states(
+    devices: &[xinput::XIDeviceInfo],
+    scroll_values_to_preserve: &BTreeMap<xinput::DeviceId, PointerDeviceState>,
+) -> BTreeMap<xinput::DeviceId, PointerDeviceState> {
     let mut pointer_device_states = BTreeMap::new();
     pointer_device_states.extend(
-        devices_query_result
-            .infos
+        devices
             .iter()
             .filter(|info| is_pointer_device(info.type_))
             .filter_map(|info| {
@@ -2506,7 +2518,7 @@ fn current_pointer_device_states(
     if pointer_device_states.is_empty() {
         log::error!("Found no xinput mouse pointers.");
     }
-    Some(pointer_device_states)
+    pointer_device_states
 }
 
 /// Returns true if the device is a pointer device. Does not include pointer device groups.
