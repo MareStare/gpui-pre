@@ -107,7 +107,7 @@ impl WgpuWindowRenderer {
         std::mem::take(&mut self.force_render)
     }
 
-    pub fn render_to_image<T>(&self) -> Result<T> {
-        anyhow::bail!("The wgpu window renderer renders to no image")
+    pub fn render_to_image(&mut self, scene: &Scene) -> Result<image::RgbaImage> {
+        self.renderer.render_to_image(scene)
     }
 }

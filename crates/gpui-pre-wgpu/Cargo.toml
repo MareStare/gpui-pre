@@ -38,10 +38,7 @@ bench-support = [
 ]
 default = []
 font-kit = ["dep:font-kit"]
-headless = [
-    "gpui/headless",
-    "dep:image",
-]
+headless = ["gpui/headless"]
 test-support = [
     "headless",
     "gpui/test-support",
@@ -121,7 +118,6 @@ features = [
     "tiff",
     "webp",
 ]
-optional = true
 default-features = false
 
 [dependencies.itertools]

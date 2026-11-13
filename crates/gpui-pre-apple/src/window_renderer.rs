@@ -4,13 +4,11 @@
 
 use std::{ffi::c_void, ptr::NonNull, sync::Arc};
 
-#[cfg(any(test, feature = "test-support"))]
 use anyhow::Result;
 use gpui::{DevicePixels, PlatformAtlas, Scene, Size};
 use gpui_wgpu::{
     TextContrast, WgpuWindowRenderer, time_frame_draw, time_startup_stage, wgpu, wgpu_requested,
 };
-#[cfg(any(test, feature = "test-support"))]
 use image::RgbaImage;
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
@@ -185,11 +183,10 @@ impl Renderer {
         }
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     pub fn render_to_image(&mut self, scene: &Scene) -> Result<RgbaImage> {
         match self {
             Self::Metal(renderer) => renderer.render_to_image(scene),
-            Self::Wgpu(renderer) => renderer.renderer.render_to_image(),
+            Self::Wgpu(renderer) => renderer.renderer.render_to_image(scene),
         }
     }
 }

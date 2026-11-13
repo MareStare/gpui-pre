@@ -1,8 +1,8 @@
 // Modified for gpui-pre (snapshot of zed@f816e1f): adapt device queues and sRGB detection to wgpu 30.0.1.
 #[cfg(not(target_family = "wasm"))]
-use crate::{WgpuRenderer, WgpuSurfaceConfig};
-#[cfg(not(target_family = "wasm"))]
 use crate::{StartupStage, time_startup_stage};
+#[cfg(not(target_family = "wasm"))]
+use crate::{WgpuRenderer, WgpuSurfaceConfig};
 #[cfg(not(target_family = "wasm"))]
 use anyhow::Context as _;
 #[cfg(not(target_family = "wasm"))]
@@ -710,14 +710,13 @@ impl WgpuContext {
         device_stage.end("wgpu-request-device");
         // Test with the configuration the renderer will use, so that it doesn't need to
         // configure the surface a second time.
-        let (surface_config, _, _) =
-            WgpuRenderer::surface_configuration(
-                surface,
-                adapter,
-                &device,
-                config,
-                wgpu::SurfaceColorSpace::Auto,
-            )?;
+        let (surface_config, _, _) = WgpuRenderer::surface_configuration(
+            surface,
+            adapter,
+            &device,
+            config,
+            wgpu::SurfaceColorSpace::Auto,
+        )?;
         let configure_stage = StartupStage::start();
         let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
 
