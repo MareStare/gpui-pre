@@ -4,11 +4,11 @@ use x11rb::connection::RequestConnection;
 use crate::linux::X11ClientStatePtr;
 use gpui::{
     AnyWindowHandle, Bounds, Decorations, DevicePixels, ForegroundExecutor, GpuSpecs, Modifiers,
-    Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow,
-    Point, PromptButton, PromptLevel, RequestFrameOptions, ResizeEdge, ScaledPixels, Scene, Size,
-    Tiling, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
-    WindowDecorations, WindowKind, WindowParams, WindowVisibility, popup::PopupNotSupportedError,
-    px,
+    PenEvent, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
+    PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions, ResizeEdge,
+    ScaledPixels, Scene, Size, Tiling, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
+    WindowControlArea, WindowDecorations, WindowKind, WindowParams, WindowVisibility,
+    popup::PopupNotSupportedError, px,
 };
 use gpui_wgpu::{CompositorGpuHint, WgpuRenderer, WgpuSurfaceConfig};
 
@@ -49,6 +49,7 @@ x11rb::atom_manager! {
         XdndTypeList,
         XdndActionCopy,
         TextUriList: b"text/uri-list",
+        AbsPressure: b"Abs Pressure",
         UTF8_STRING,
         TEXT,
         STRING,
@@ -245,6 +246,7 @@ unsafe impl Sync for RawWindow {}
 pub struct Callbacks {
     request_frame: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     input: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
+    pen: Option<Box<dyn FnMut(PenEvent)>>,
     active_status_change: Option<Box<dyn FnMut(bool)>>,
     visibility_change: Option<Box<dyn FnMut(WindowVisibility)>>,
     hovered_status_change: Option<Box<dyn FnMut(bool)>>,
@@ -1343,6 +1345,14 @@ impl X11WindowStatePtr {
         }
     }
 
+    pub fn handle_pen(&self, event: PenEvent) {
+        let callback = self.callbacks.borrow_mut().pen.take();
+        if let Some(mut fun) = callback {
+            fun(event);
+            self.callbacks.borrow_mut().pen = Some(fun);
+        }
+    }
+
     pub fn set_hovered(&self, focus: bool) {
         let callback = self.callbacks.borrow_mut().hovered_status_change.take();
         if let Some(mut fun) = callback {
@@ -1703,6 +1713,10 @@ impl PlatformWindow for X11Window {
 
     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>) {
         self.0.callbacks.borrow_mut().input = Some(callback);
+    }
+
+    fn on_pen(&self, callback: Box<dyn FnMut(PenEvent)>) {
+        self.0.callbacks.borrow_mut().pen = Some(callback);
     }
 
     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>) {

@@ -4,6 +4,7 @@ mod cursor;
 mod display;
 mod popup;
 mod serial;
+mod tablet;
 mod window;
 
 /// Contains Types for configuring layer_shell surfaces.

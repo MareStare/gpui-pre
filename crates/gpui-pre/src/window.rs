@@ -15,7 +15,7 @@ use crate::{
     GpuSpecs, Hsla, InputHandler, InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent,
     KeyEvent, Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers,
     ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent,
-    Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
+    Path, PenEvent, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
     PlatformWindow, Point, PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render,
     RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge,
     SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow,
@@ -3305,6 +3305,16 @@ impl Window {
     #[cfg(target_os = "macos")]
     pub fn set_traffic_light_position(&self, position: Point<Pixels>) {
         self.platform_window.set_traffic_light_position(position);
+    }
+
+    /// Registers the callback that gets each [`PenEvent`] of the window,
+    /// before the mouse event of the same pen sample. It replaces the
+    /// callback before it.
+    ///
+    /// On macOS, it turns off the mouse coalescing of AppKit for the whole
+    /// app, so that each pen sample gives a mouse event.
+    pub fn on_pen(&self, callback: impl FnMut(PenEvent) + 'static) {
+        self.platform_window.on_pen(Box::new(callback));
     }
 
     /// Sets the application identifier.

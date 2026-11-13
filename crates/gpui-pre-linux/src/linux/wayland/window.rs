@@ -36,7 +36,7 @@ use crate::linux::wayland::{display::WaylandDisplay, serial::SerialKind};
 use crate::linux::{Globals, Output, PendingActivation, WaylandClientStatePtr, get_window};
 use gpui::{
     AnyWindowHandle, Bounds, Capslock, Corners, Decorations, DevicePixels, ExternalDragPayload,
-    FrameRequestSource, GpuSpecs, Modifiers, Pixels, PlatformAtlas, PlatformDisplay,
+    FrameRequestSource, GpuSpecs, Modifiers, PenEvent, Pixels, PlatformAtlas, PlatformDisplay,
     PlatformFrameSignal, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton,
     PromptLevel, RequestFrameOptions, ResizeEdge, Scene, Size, Tiling, WindowAppearance,
     WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowControls, WindowDecorations,
@@ -51,6 +51,7 @@ use gpui_wgpu::{CompositorGpuHint, WgpuRenderer, WgpuSurfaceConfig, wgpu};
 pub(crate) struct Callbacks {
     request_frame: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     input: Option<Box<dyn FnMut(gpui::PlatformInput) -> gpui::DispatchEventResult>>,
+    pen: Option<Box<dyn FnMut(PenEvent)>>,
     active_status_change: Option<Box<dyn FnMut(bool)>>,
     visibility_change: Option<Box<dyn FnMut(WindowVisibility)>>,
     hover_status_change: Option<Box<dyn FnMut(bool)>>,
@@ -1606,6 +1607,14 @@ impl WaylandWindowStatePtr {
         }
     }
 
+    pub fn handle_pen(&self, event: PenEvent) {
+        let callback = self.callbacks.borrow_mut().pen.take();
+        if let Some(mut fun) = callback {
+            fun(event);
+            self.callbacks.borrow_mut().pen = Some(fun);
+        }
+    }
+
     pub fn set_focused(&self, focus: bool) {
         self.state.borrow_mut().active = focus;
         let callback = self.callbacks.borrow_mut().active_status_change.take();
@@ -1976,6 +1985,10 @@ impl PlatformWindow for WaylandWindow {
 
     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>) {
         self.0.callbacks.borrow_mut().input = Some(callback);
+    }
+
+    fn on_pen(&self, callback: Box<dyn FnMut(PenEvent)>) {
+        self.0.callbacks.borrow_mut().pen = Some(callback);
     }
 
     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>) {

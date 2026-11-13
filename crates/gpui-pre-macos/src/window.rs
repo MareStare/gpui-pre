@@ -2,7 +2,7 @@ use crate::{
     BoolExt, MacDisplay, MetalFrames, NSRange, NSStringExt, TISCopyCurrentKeyboardInputSource,
     TISGetInputSourceProperty, WindowFrameSource, events::platform_input_from_native,
     kTISPropertyInputSourceIsASCIICapable, kTISPropertyInputSourceType, kTISTypeKeyboardInputMode,
-    ns_string, renderer,
+    ns_string, pen::pen_event, renderer,
 };
 use anyhow::Result;
 use block2::RcBlock;
@@ -11,7 +11,7 @@ use gpui::{
     AnyWindowHandle, BackgroundExecutor, Bounds, Capslock, CursorStyle, ExternalDragPayload,
     ExternalPaths, FileDropEvent, ForegroundExecutor, FrameRequestSource, KeyDownEvent, Keystroke,
     Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, PlatformAtlas, PlatformDisplay, PlatformFrameSignal, PlatformInput,
+    PenEvent, Pixels, PlatformAtlas, PlatformDisplay, PlatformFrameSignal, PlatformInput,
     PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
     SharedString, Size, SystemWindowTab, WindowAppearance, WindowBackgroundAppearance,
     WindowBounds, WindowControlArea, WindowKind, WindowParams, WindowVisibility, point, px, size,
@@ -40,7 +40,7 @@ use objc2_app_kit::NSFilenamesPboardType;
 use objc2_app_kit::{
     NSAlert, NSAlertStyle, NSAppearance, NSAutoresizingMaskOptions, NSBackingStoreType, NSBeep,
     NSButton, NSColor, NSDragOperation, NSDraggingContext, NSDraggingImageComponent,
-    NSDraggingImageComponentIconKey, NSDraggingItem, NSEventModifierFlags, NSEventType,
+    NSDraggingImageComponentIconKey, NSDraggingItem, NSEvent, NSEventModifierFlags, NSEventType,
     NSPasteboardWriting, NSRequestUserAttentionType, NSScreen, NSTrackingArea,
     NSTrackingAreaOptions, NSView, NSViewLayerContentsRedrawPolicy, NSVisualEffectBlendingMode,
     NSVisualEffectMaterial, NSVisualEffectState, NSWindow, NSWindowAnimationBehavior,
@@ -157,6 +157,14 @@ unsafe fn build_classes() {
             );
             decl.add_method(
                 sel!(mouseExited:),
+                handle_view_event as extern "C" fn(_, Sel, *mut AnyObject),
+            );
+            decl.add_method(
+                sel!(tabletPoint:),
+                handle_view_event as extern "C" fn(_, Sel, *mut AnyObject),
+            );
+            decl.add_method(
+                sel!(tabletProximity:),
                 handle_view_event as extern "C" fn(_, Sel, *mut AnyObject),
             );
             decl.add_method(
@@ -660,6 +668,7 @@ struct MacWindowState {
     renderer: renderer::Renderer,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
+    pen_callback: Option<Box<dyn FnMut(PenEvent)>>,
     activate_callback: Option<Box<dyn FnMut(bool)>>,
     visibility_callback: Option<Box<dyn FnMut(WindowVisibility)>>,
     // `None` until a callback is registered, so notifications during
@@ -1132,6 +1141,7 @@ impl MacWindow {
                 renderer,
                 request_frame_callback: None,
                 event_callback: None,
+                pen_callback: None,
                 activate_callback: None,
                 visibility_callback: None,
                 last_visibility: None,
@@ -2054,6 +2064,14 @@ impl PlatformWindow for MacWindow {
         self.0.as_ref().lock().event_callback = Some(callback);
     }
 
+    fn on_pen(&self, callback: Box<dyn FnMut(PenEvent)>) {
+        // AppKit joins the mouse events that come between two frames. A pen
+        // then gives a fraction of its samples. The setting is global to
+        // the app.
+        NSEvent::setMouseCoalescingEnabled(false);
+        self.0.as_ref().lock().pen_callback = Some(callback);
+    }
+
     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>) {
         self.0.as_ref().lock().activate_callback = Some(callback);
     }
@@ -2878,6 +2896,18 @@ extern "C" fn handle_view_event(this: &AnyObject, _: Sel, native_event: *mut Any
             lock.last_left_mouse_down_event = None;
         }
         _ => {}
+    }
+    // The pen state goes first: the window reads it on the mouse event of
+    // the same sample.
+    let pen = unsafe { native_event.cast::<NSEvent>().as_ref() }
+        .and_then(|event| pen_event(event, window_height));
+    if let Some(pen) = pen
+        && let Some(mut callback) = lock.pen_callback.take()
+    {
+        drop(lock);
+        callback(pen);
+        lock = window_state.as_ref().lock();
+        lock.pen_callback = Some(callback);
     }
     let event = unsafe { platform_input_from_native(native_event, Some(window_height)) };
 

@@ -74,6 +74,13 @@ commit, then rebase the patch commits onto it.
 - Window screenshots: `Window::render_to_image` works in every build, not
   only with `test-support`. The wgpu renderer draws the scene to an
   offscreen texture and reads it back, also for X11 and Wayland windows.
+- Pen input on macOS and Linux: `Window::on_pen` gets each pen sample
+  with its pressure and the proximity changes of the pen, before the
+  mouse event of the same sample. macOS reads the tablet events of
+  AppKit, and `on_pen` turns off mouse coalescing for the whole app.
+  Wayland reads the tablet protocol and makes the mouse events of each
+  tool. X11 reads the pressure valuator of XInput 2 and converts event
+  positions from 16.16 fixed point by 65536.
 - Logs: `GPUI_FRAME_LOG` logs the stages of each frame, and
   `GPUI_STARTUP_LOG` the startup stages of the renderers.
 

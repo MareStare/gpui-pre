@@ -335,3 +335,13 @@ priority = -1
 [lints.rust.unexpected_cfgs]
 level = "allow"
 priority = 0
+
+[target.'cfg(target_os = "macos")'.dev-dependencies.objc2-app-kit]
+version = "0.3.2"
+features = ["NSEvent", "objc2-core-graphics"]
+default-features = false
+
+[target.'cfg(target_os = "macos")'.dev-dependencies.objc2-core-graphics]
+version = "0.3.2"
+features = ["CGEvent", "CGEventTypes", "objc2"]
+default-features = false
