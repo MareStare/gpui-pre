@@ -22,7 +22,7 @@ use image::RgbaImage;
 use core_foundation::base::{CFRelease, CFTypeRef};
 use core_foundation_sys::base::CFEqual;
 use core_foundation_sys::number::{CFBooleanGetValue, CFBooleanRef};
-use core_graphics::display::CGDirectDisplayID;
+use core_graphics::display::{CGDirectDisplayID, CGDisplay, CGPoint};
 use ctor::ctor;
 use futures::channel::oneshot;
 use gpui_apple::display_link::MetalFrameSource;
@@ -1707,6 +1707,27 @@ impl PlatformWindow for MacWindow {
             .native_window()
             .mouseLocationOutsideOfEventStream();
         convert_mouse_position(position, self.content_size().height)
+    }
+
+    fn set_mouse_position(&self, position: Point<Pixels>) {
+        let height = self.content_size().height;
+        let on_screen = self
+            .0
+            .lock()
+            .native_window()
+            .convertPointToScreen(NSPoint::new(
+                f64::from(position.x.as_f32()),
+                f64::from((height - position.y).as_f32()),
+            ));
+        // The display space has its origin at the top left of the main
+        // display, and its y axis goes down.
+        let main_height = CGDisplay::main().bounds().size.height;
+        let point = CGPoint::new(on_screen.x, main_height - on_screen.y);
+        if CGDisplay::warp_mouse_cursor_position(point).is_ok() {
+            // A warp stops the mouse events for a short time. This gives
+            // them back at once.
+            let _ = CGDisplay::associate_mouse_and_mouse_cursor_position(true);
+        }
     }
 
     fn modifiers(&self) -> Modifiers {
