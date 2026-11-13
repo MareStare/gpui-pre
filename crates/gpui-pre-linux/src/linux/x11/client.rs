@@ -17,6 +17,7 @@ use std::{
     ops::Deref,
     path::PathBuf,
     rc::{Rc, Weak},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -45,6 +46,7 @@ use super::{
     XimHandler, button_or_scroll_from_event_detail, check_reply,
     clipboard::{self, Clipboard},
     event_position, fp3232_to_f32, get_reply, get_valuator_axis_index, handle_connection_error,
+    image_cursor::{self, ImageCursor},
     modifiers_from_state,
     pen::{Pens, PointerAction, PointerSample},
     pressed_button_from_mask, xcb_flush,
@@ -61,11 +63,11 @@ use crate::linux::{
 use crate::linux::{LinuxCommon, LinuxKeyboardLayout, X11Window, modifiers_from_xinput_info};
 
 use gpui::{
-    AnyWindowHandle, Bounds, ClipboardItem, CursorStyle, FileDropEvent, FrameRequestSource,
-    Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, Pixels, PlatformDisplay,
-    PlatformFrameSignal, PlatformInput, PlatformKeyboardLayout, PlatformWindow, Point,
-    RequestFrameOptions, ScrollDelta, Size, TouchPhase, WindowButtonLayout, WindowParams,
-    WindowVisibility, px,
+    AnyWindowHandle, Bounds, ClipboardItem, CursorImage, CursorImageCache, CursorRequest,
+    CursorStyle, FileDropEvent, FrameRequestSource, Keystroke, Modifiers, ModifiersChangedEvent,
+    MouseButton, Pixels, PlatformDisplay, PlatformFrameSignal, PlatformInput,
+    PlatformKeyboardLayout, PlatformWindow, Point, RequestFrameOptions, ScrollDelta, Size,
+    TouchPhase, WindowButtonLayout, WindowParams, WindowVisibility, px,
 };
 use gpui_wgpu::{CompositorGpuHint, GpuContext};
 
@@ -228,8 +230,12 @@ pub struct X11ClientState {
     pub(crate) composing: bool,
     pub(crate) pre_key_char_down: Option<Keystroke>,
     pub(crate) cursor_handle: cursor::Handle,
-    pub(crate) cursor_styles: HashMap<xproto::Window, CursorStyle>,
+    pub(crate) window_cursors: HashMap<xproto::Window, CursorRequest>,
     pub(crate) cursor_cache: HashMap<CursorStyle, Option<xproto::Cursor>>,
+
+    /// The cursors made from images. None for an image that the server
+    /// did not take.
+    pub(crate) image_cursor_cache: CursorImageCache<Option<ImageCursor>>,
     pub(crate) invisible_cursor_cache: Option<xproto::Cursor>,
     pub(crate) cursor_hidden_window: Option<xproto::Window>,
 
@@ -274,7 +280,7 @@ impl X11ClientStatePtr {
         if state.cursor_hidden_window == Some(x_window) {
             state.cursor_hidden_window = None;
         }
-        state.cursor_styles.remove(&x_window);
+        state.window_cursors.remove(&x_window);
     }
 
     pub fn update_ime_position(&self, bounds: Bounds<Pixels>) {
@@ -547,8 +553,9 @@ impl X11Connection {
                 composing: false,
 
                 cursor_handle,
-                cursor_styles: HashMap::default(),
+                window_cursors: HashMap::default(),
                 cursor_cache: HashMap::default(),
+                image_cursor_cache: CursorImageCache::default(),
                 cursor_hidden_window: None,
                 invisible_cursor_cache: None,
 
@@ -1358,29 +1365,7 @@ impl X11Client {
                 if window.is_blocked() {
                     // We want to set the cursor to the default arrow
                     // when the window is blocked
-                    let style = CursorStyle::Arrow;
-
-                    let current_style = state
-                        .cursor_styles
-                        .get(&window.x_window)
-                        .unwrap_or(&CursorStyle::Arrow);
-                    if *current_style != style
-                        && let Some(cursor) = state.get_cursor_icon(style)
-                    {
-                        state.cursor_styles.insert(window.x_window, style);
-                        check_reply(
-                            || "Failed to set cursor style",
-                            state.xcb_connection.change_window_attributes(
-                                window.x_window,
-                                &ChangeWindowAttributesAux {
-                                    cursor: Some(cursor),
-                                    ..Default::default()
-                                },
-                            ),
-                        )
-                        .log_err();
-                        state.xcb_connection.flush().log_err();
-                    };
+                    state.set_window_cursor(window.x_window, CursorRequest::default());
                 }
                 let pressed_button = pressed_button_from_mask(event.button_mask[0]);
                 let position = event_position(event.event_x, event.event_y, state.scale_factor);
@@ -1767,50 +1752,19 @@ impl X11Client {
         Ok(Box::new(window))
     }
 
-    pub(crate) fn set_cursor_style(&self, style: CursorStyle) {
+    pub(crate) fn set_cursor(&self, cursor: CursorRequest) {
         let mut state = self.0.borrow_mut();
         let Some(focused_window) = state.mouse_focused_window else {
             return;
         };
-        let current_style = state
-            .cursor_styles
+        if state
+            .windows
             .get(&focused_window)
-            .unwrap_or(&CursorStyle::Arrow);
-
-        let window = state
-            .mouse_focused_window
-            .and_then(|w| state.windows.get(&w));
-
-        let should_change = *current_style != style
-            && (window.is_none() || window.is_some_and(|w| !w.is_blocked()));
-
-        if !should_change {
+            .is_some_and(|window| window.is_blocked())
+        {
             return;
         }
-
-        state.cursor_styles.insert(focused_window, style);
-
-        // Don't clobber the invisible cursor; restore reads back from `cursor_styles`.
-        if state.cursor_hidden_window == Some(focused_window) {
-            return;
-        }
-
-        let Some(cursor) = state.get_cursor_icon(style) else {
-            return;
-        };
-
-        check_reply(
-            || "Failed to set cursor style",
-            state.xcb_connection.change_window_attributes(
-                focused_window,
-                &ChangeWindowAttributesAux {
-                    cursor: Some(cursor),
-                    ..Default::default()
-                },
-            ),
-        )
-        .log_err();
-        state.xcb_connection.flush().log_err();
+        state.set_window_cursor(focused_window, cursor);
     }
 
     pub(crate) fn hide_cursor_until_mouse_moves(&self) {
@@ -2206,30 +2160,61 @@ impl X11ClientState {
         let Some(hidden_window) = self.cursor_hidden_window.take() else {
             return;
         };
-        let style = self
-            .cursor_styles
+        let cursor = self
+            .window_cursors
             .get(&hidden_window)
-            .copied()
-            .unwrap_or(CursorStyle::Arrow);
-        let Some(cursor) = self.get_cursor_icon(style) else {
-            log::warn!(
-                "X11: no cursor icon available to restore {:?} after hide; cursor may stay invisible",
-                style
-            );
+            .cloned()
+            .unwrap_or_default();
+        self.apply_window_cursor(hidden_window, &cursor);
+    }
+
+    /// Keeps `cursor` as the cursor of `window` and shows it, unless the
+    /// window hides its cursor until the mouse moves.
+    fn set_window_cursor(&mut self, window: xproto::Window, cursor: CursorRequest) {
+        let current = self.window_cursors.get(&window);
+        if current.is_some_and(|current| *current == cursor)
+            || (current.is_none() && cursor == CursorRequest::default())
+        {
+            return;
+        }
+        if self.cursor_hidden_window != Some(window) {
+            self.apply_window_cursor(window, &cursor);
+        }
+        self.window_cursors.insert(window, cursor);
+    }
+
+    fn apply_window_cursor(&mut self, window: xproto::Window, cursor: &CursorRequest) {
+        let image = cursor
+            .image
+            .as_ref()
+            .and_then(|image| self.get_image_cursor(image));
+        let Some(native) = image.or_else(|| self.get_cursor_icon(cursor.style)) else {
+            log::warn!("X11: no cursor icon for {:?}", cursor.style);
             return;
         };
         check_reply(
-            || "Failed to restore cursor style after hide",
+            || "Failed to set cursor style",
             self.xcb_connection.change_window_attributes(
-                hidden_window,
+                window,
                 &ChangeWindowAttributesAux {
-                    cursor: Some(cursor),
+                    cursor: Some(native),
                     ..Default::default()
                 },
             ),
         )
         .log_err();
         self.xcb_connection.flush().log_err();
+    }
+
+    fn get_image_cursor(&mut self, image: &Arc<CursorImage>) -> Option<xproto::Cursor> {
+        let connection = &self.xcb_connection;
+        let root = connection.setup().roots[self.x_root_index].root;
+        self.image_cursor_cache
+            .get_or_insert_with(image, |image| {
+                image_cursor::create(connection, root, image).log_err()
+            })
+            .as_ref()
+            .map(ImageCursor::cursor)
     }
 }
 

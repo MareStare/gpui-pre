@@ -1,7 +1,7 @@
 use std::{path::PathBuf, rc::Rc};
 
 use gpui::{
-    AnyWindowHandle, ClipboardItem, CursorStyle, GraphicalEnvironment, PlatformDisplay,
+    AnyWindowHandle, ClipboardItem, CursorRequest, GraphicalEnvironment, PlatformDisplay,
     PlatformKeyboardLayout, PlatformWindow, WindowParams, WindowingModes,
 };
 
@@ -154,8 +154,8 @@ impl DisplayConnection {
         dispatch!(self, connection => connection.window_stack(), headless => None)
     }
 
-    pub(crate) fn set_cursor_style(&self, style: CursorStyle) {
-        dispatch!(self, connection => connection.set_cursor_style(style), headless => ())
+    pub(crate) fn set_cursor(&self, cursor: CursorRequest) {
+        dispatch!(self, connection => connection.set_cursor(cursor), headless => ())
     }
 
     pub(crate) fn hide_cursor_until_mouse_moves(&self) {

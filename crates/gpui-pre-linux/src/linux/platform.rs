@@ -36,11 +36,11 @@ use crate::linux::{
     select_backend,
 };
 use gpui::{
-    Action, ActivityGuard, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle,
-    ForegroundExecutor, GraphicalEnvironment, Keymap, Menu, MenuItem, OwnedMenu, PathPromptOptions,
-    Platform, PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
-    PlatformWindow, PowerMode, Result, RunnableVariant, Task, ThermalState, WindowAppearance,
-    WindowButtonLayout, WindowParams, WindowingModes, WindowingRequest,
+    Action, ActivityGuard, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorRequest,
+    CursorStyle, ForegroundExecutor, GraphicalEnvironment, Keymap, Menu, MenuItem, OwnedMenu,
+    PathPromptOptions, Platform, PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper,
+    PlatformTextSystem, PlatformWindow, PowerMode, Result, RunnableVariant, Task, ThermalState,
+    WindowAppearance, WindowButtonLayout, WindowParams, WindowingModes, WindowingRequest,
 };
 #[cfg(any(feature = "wayland", feature = "x11"))]
 use gpui::{Pixels, Point, px};
@@ -1064,7 +1064,11 @@ impl Platform for LinuxPlatform {
     }
 
     fn set_cursor_style(&self, style: CursorStyle) {
-        self.connection.borrow().set_cursor_style(style)
+        self.set_cursor(style.into())
+    }
+
+    fn set_cursor(&self, cursor: CursorRequest) {
+        self.connection.borrow().set_cursor(cursor)
     }
 
     fn hide_cursor_until_mouse_moves(&self) {

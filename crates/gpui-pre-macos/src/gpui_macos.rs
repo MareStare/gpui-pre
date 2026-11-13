@@ -7,6 +7,7 @@
 mod display;
 mod display_link;
 mod events;
+mod image_cursor;
 mod keyboard;
 mod pasteboard;
 mod pen;

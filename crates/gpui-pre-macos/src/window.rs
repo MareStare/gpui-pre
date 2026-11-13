@@ -1,6 +1,6 @@
 use crate::{
     BoolExt, MacDisplay, MetalFrames, NSRange, NSStringExt, TISCopyCurrentKeyboardInputSource,
-    TISGetInputSourceProperty, WindowFrameSource, events::platform_input_from_native,
+    TISGetInputSourceProperty, WindowFrameSource, events::platform_input_from_native, image_cursor,
     kTISPropertyInputSourceIsASCIICapable, kTISPropertyInputSourceType, kTISTypeKeyboardInputMode,
     ns_string, pen::pen_event, renderer,
 };
@@ -8,13 +8,14 @@ use anyhow::Result;
 use block2::RcBlock;
 use dispatch2::DispatchQueue;
 use gpui::{
-    AnyWindowHandle, BackgroundExecutor, Bounds, Capslock, CursorStyle, ExternalDragPayload,
-    ExternalPaths, FileDropEvent, ForegroundExecutor, FrameRequestSource, KeyDownEvent, Keystroke,
-    Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PenEvent, Pixels, PlatformAtlas, PlatformDisplay, PlatformFrameSignal, PlatformInput,
-    PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
-    SharedString, Size, SystemWindowTab, WindowAppearance, WindowBackgroundAppearance,
-    WindowBounds, WindowControlArea, WindowKind, WindowParams, WindowVisibility, point, px, size,
+    AnyWindowHandle, BackgroundExecutor, Bounds, Capslock, CursorRequest, CursorStyle,
+    ExternalDragPayload, ExternalPaths, FileDropEvent, ForegroundExecutor, FrameRequestSource,
+    KeyDownEvent, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PenEvent, Pixels, PlatformAtlas, PlatformDisplay,
+    PlatformFrameSignal, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton,
+    PromptLevel, RequestFrameOptions, SharedString, Size, SystemWindowTab, WindowAppearance,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind, WindowParams,
+    WindowVisibility, point, px, size,
 };
 use image::RgbaImage;
 
@@ -377,14 +378,14 @@ pub(crate) fn convert_mouse_position(position: NSPoint, window_height: Pixels) -
     )
 }
 
-/// Stores the cursor style on the active GPUI window and invalidates its cursor rects.
+/// Stores the cursor on the active GPUI window and invalidates its cursor rects.
 ///
 /// # Safety
 ///
 /// This function is not thread safe. Callers must ensure this is called on the AppKit main
 /// thread because it reads the active AppKit window and updates GPUI window state associated
 /// with Objective-C objects.
-pub(crate) unsafe fn set_active_window_cursor_style(style: CursorStyle) {
+pub(crate) unsafe fn set_active_window_cursor(cursor: CursorRequest) {
     // SAFETY: The caller guarantees AppKit main-thread access. `is_gpui_window` ensures the
     // window has our WINDOW_STATE_IVAR before reading it.
     unsafe {
@@ -405,8 +406,8 @@ pub(crate) unsafe fn set_active_window_cursor_style(style: CursorStyle) {
 
         let window_state = get_window_state(&*active_window);
         let mut window_state = window_state.lock();
-        if window_state.cursor_style != style {
-            window_state.cursor_style = style;
+        if window_state.cursor != cursor {
+            window_state.cursor = cursor;
             let _: () = msg_send![
                 window_state.native_window,
                 invalidateCursorRectsForView: window_state.native_view.as_ptr()
@@ -662,7 +663,7 @@ struct MacWindowState {
     native_view: NonNull<AnyObject>,
     blurred_view: Option<*mut AnyObject>,
     background_appearance: WindowBackgroundAppearance,
-    cursor_style: CursorStyle,
+    cursor: CursorRequest,
     cursor_visible: Arc<AtomicBool>,
     frame_source: FrameSource,
     renderer: renderer::Renderer,
@@ -1132,7 +1133,7 @@ impl MacWindow {
                 native_view: NonNull::new_unchecked(native_view),
                 blurred_view: None,
                 background_appearance: WindowBackgroundAppearance::Opaque,
-                cursor_style: CursorStyle::Arrow,
+                cursor: CursorRequest::default(),
                 cursor_visible,
                 frame_source: match &metal_frames {
                     Some(metal_frames) => FrameSource::Metal(metal_frames.clone()),
@@ -2604,7 +2605,15 @@ extern "C" fn reset_cursor_rects(this: &AnyObject, _: Sel) {
         let _: () = msg_send![super(this, class!(NSView)), resetCursorRects];
 
         let window_state = get_window_state(this);
-        let cursor_style = window_state.lock().cursor_style;
+        let CursorRequest {
+            style: cursor_style,
+            image,
+        } = window_state.lock().cursor.clone();
+        let bounds: NSRect = msg_send![this, bounds];
+        if let Some(cursor) = image.and_then(|image| image_cursor::cursor(&image)) {
+            let _: () = msg_send![this, addCursorRect: bounds, cursor: &*cursor];
+            return;
+        }
 
         let cursor: *mut AnyObject = match cursor_style {
             CursorStyle::Arrow => msg_send![class!(NSCursor), arrowCursor],
@@ -2642,7 +2651,6 @@ extern "C" fn reset_cursor_rects(this: &AnyObject, _: Sel) {
             CursorStyle::ContextualMenu => msg_send![class!(NSCursor), contextualMenuCursor],
         };
 
-        let bounds: NSRect = msg_send![this, bounds];
         let _: () = msg_send![this, addCursorRect: bounds, cursor: cursor];
     }
 }

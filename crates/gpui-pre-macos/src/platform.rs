@@ -1,7 +1,7 @@
 use crate::{
     AppleActivity, AppleDispatcher, BoolExt, MacDisplay, MacKeyboardLayout, MacKeyboardMapper,
     MacWindow, events::key_to_native, main_thread_marker, ns_string, pasteboard::Pasteboard,
-    renderer, set_active_window_cursor_style,
+    renderer, set_active_window_cursor,
 };
 use anyhow::{Context as _, anyhow};
 use block2::RcBlock;
@@ -11,11 +11,11 @@ use dispatch2::DispatchQueue;
 use futures::channel::oneshot;
 use gpui::{
     Action, ActivationPolicy, ActivityGuard, AnyWindowHandle, BackgroundExecutor, ClipboardItem,
-    CursorStyle, ForegroundExecutor, GraphicalEnvironment, KeyContext, Keymap, Menu, MenuItem,
-    OsMenu, OwnedMenu, PathPromptOptions, Platform, PlatformDisplay, PlatformKeyboardLayout,
-    PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, PowerMode, Result, SystemMenuType,
-    Task, ThermalState, WindowAppearance, WindowKind, WindowParams, WindowingRequest,
-    popup::PopupNotSupportedError,
+    CursorRequest, CursorStyle, ForegroundExecutor, GraphicalEnvironment, KeyContext, Keymap, Menu,
+    MenuItem, OsMenu, OwnedMenu, PathPromptOptions, Platform, PlatformDisplay,
+    PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, PowerMode,
+    Result, SystemMenuType, Task, ThermalState, WindowAppearance, WindowKind, WindowParams,
+    WindowingRequest, popup::PopupNotSupportedError,
 };
 use gpui_apple::{
     keychain,
@@ -1180,8 +1180,12 @@ impl Platform for MacPlatform {
     /// Match cursor style to one of the styles available
     /// in macOS's [NSCursor](https://developer.apple.com/documentation/appkit/nscursor).
     fn set_cursor_style(&self, style: CursorStyle) {
+        self.set_cursor(style.into());
+    }
+
+    fn set_cursor(&self, cursor: CursorRequest) {
         unsafe {
-            set_active_window_cursor_style(style);
+            set_active_window_cursor(cursor);
         }
     }
 

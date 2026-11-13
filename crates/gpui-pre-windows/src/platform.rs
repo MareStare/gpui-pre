@@ -94,6 +94,8 @@ pub(crate) struct WindowsPlatformState {
     jump_list: RefCell<JumpList>,
     // NOTE: standard cursor handles don't need to close.
     pub(crate) current_cursor: Cell<Option<HCURSOR>>,
+    /// The image of the current cursor. It keeps the cursor alive.
+    current_cursor_image: RefCell<Option<Arc<CursorImage>>>,
     /// Shared with each window so `WM_SETCURSOR` can read it directly.
     pub(crate) cursor_visible: Arc<AtomicBool>,
     /// Shared with each window to coordinate draws across windows on the UI
@@ -128,6 +130,7 @@ impl WindowsPlatformState {
             callbacks,
             jump_list: RefCell::new(jump_list),
             current_cursor: Cell::new(current_cursor),
+            current_cursor_image: RefCell::default(),
             cursor_visible: Arc::new(AtomicBool::new(true)),
             draw_coordinator: Rc::new(DrawCoordinator::new()),
             directx_devices: RefCell::new(directx_devices),
@@ -291,6 +294,17 @@ impl WindowsPlatform {
 
     pub(crate) fn window_from_hwnd(&self, hwnd: HWND) -> Option<Rc<WindowsWindowInner>> {
         self.inner.window_from_hwnd(hwnd)
+    }
+
+    fn show_cursor(&self, hcursor: Option<HCURSOR>) {
+        if self.inner.state.current_cursor.get().map(|c| c.0) != hcursor.map(|c| c.0) {
+            self.post_message(
+                WM_GPUI_CURSOR_STYLE_CHANGED,
+                WPARAM(self.inner.validation_number),
+                LPARAM(hcursor.map_or(0, |c| c.0 as isize)),
+            );
+            self.inner.state.current_cursor.set(hcursor);
+        }
     }
 
     #[inline]
@@ -991,15 +1005,14 @@ impl Platform for WindowsPlatform {
     }
 
     fn set_cursor_style(&self, style: CursorStyle) {
-        let hcursor = load_cursor(style);
-        if self.inner.state.current_cursor.get().map(|c| c.0) != hcursor.map(|c| c.0) {
-            self.post_message(
-                WM_GPUI_CURSOR_STYLE_CHANGED,
-                WPARAM(self.inner.validation_number),
-                LPARAM(hcursor.map_or(0, |c| c.0 as isize)),
-            );
-            self.inner.state.current_cursor.set(hcursor);
-        }
+        self.set_cursor(style.into());
+    }
+
+    fn set_cursor(&self, cursor: CursorRequest) {
+        let CursorRequest { style, image } = cursor;
+        let image_cursor = image.as_ref().and_then(image_cursor::cursor);
+        self.show_cursor(image_cursor.or_else(|| load_cursor(style)));
+        *self.inner.state.current_cursor_image.borrow_mut() = image;
     }
 
     fn hide_cursor_until_mouse_moves(&self) {

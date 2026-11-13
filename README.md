@@ -81,6 +81,11 @@ commit, then rebase the patch commits onto it.
   Wayland reads the tablet protocol and makes the mouse events of each
   tool. X11 reads the pressure valuator of XInput 2 and converts event
   positions from 16.16 fixed point by 65536.
+- Image cursors: `Window::set_cursor_image` shows an RGBA image as the
+  cursor of a hitbox, with a hotspot and a scale, on Windows, macOS, X11
+  and Wayland. On Wayland the tablet tools show it too. A platform that
+  cannot show the image shows the fallback style. The native cursor of an
+  image lives as long as the image.
 - Logs: `GPUI_FRAME_LOG` logs the stages of each frame, and
   `GPUI_STARTUP_LOG` the startup stages of the renderers.
 
