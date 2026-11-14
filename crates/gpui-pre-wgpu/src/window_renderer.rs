@@ -107,7 +107,7 @@ impl WgpuWindowRenderer {
         std::mem::take(&mut self.force_render)
     }
 
-    pub fn render_to_image(&mut self, scene: &Scene) -> Result<image::RgbaImage> {
-        self.renderer.render_to_image(scene)
+    pub fn render_to_pending_image(&mut self, scene: &Scene) -> Result<gpui::PendingImage> {
+        self.renderer.render_to_pending_image(scene)
     }
 }

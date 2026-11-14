@@ -7,7 +7,6 @@ use std::{ffi::c_void, ptr::NonNull, sync::Arc};
 use anyhow::Result;
 use gpui::{DevicePixels, PlatformAtlas, Scene, Size};
 use gpui_wgpu::{TextContrast, WgpuWindowRenderer, time_startup_stage, wgpu, wgpu_requested};
-use image::RgbaImage;
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
@@ -181,10 +180,10 @@ impl Renderer {
         }
     }
 
-    pub fn render_to_image(&mut self, scene: &Scene) -> Result<RgbaImage> {
+    pub fn render_to_pending_image(&mut self, scene: &Scene) -> Result<gpui::PendingImage> {
         match self {
-            Self::Metal(renderer) => renderer.render_to_image(scene),
-            Self::Wgpu(renderer) => renderer.renderer.render_to_image(scene),
+            Self::Metal(renderer) => renderer.render_to_pending_image(scene),
+            Self::Wgpu(renderer) => renderer.renderer.render_to_pending_image(scene),
         }
     }
 }

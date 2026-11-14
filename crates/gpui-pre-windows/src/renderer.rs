@@ -89,14 +89,16 @@ impl WindowRenderer {
         }
     }
 
-    pub(crate) fn render_to_image(
+    pub(crate) fn render_to_pending_image(
         &mut self,
         scene: &Scene,
         background_appearance: WindowBackgroundAppearance,
-    ) -> Result<image::RgbaImage> {
+    ) -> Result<gpui::PendingImage> {
         match self {
-            Self::DirectX(renderer) => renderer.render_to_image(scene, background_appearance),
-            Self::Wgpu(renderer) => renderer.render_to_image(scene),
+            Self::DirectX(renderer) => renderer
+                .render_to_image(scene, background_appearance)
+                .map(gpui::PendingImage::ready),
+            Self::Wgpu(renderer) => renderer.render_to_pending_image(scene),
         }
     }
 

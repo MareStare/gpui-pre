@@ -17,7 +17,6 @@ use gpui::{
     WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind, WindowParams,
     WindowVisibility, point, px, size,
 };
-use image::RgbaImage;
 
 use core_foundation::base::{CFRelease, CFTypeRef};
 use core_foundation_sys::base::CFEqual;
@@ -2451,9 +2450,9 @@ impl PlatformWindow for MacWindow {
         NSBeep()
     }
 
-    fn render_to_image(&self, scene: &gpui::Scene) -> Result<RgbaImage> {
+    fn render_to_pending_image(&self, scene: &gpui::Scene) -> Result<gpui::PendingImage> {
         let mut this = self.0.lock();
-        this.renderer.render_to_image(scene)
+        this.renderer.render_to_pending_image(scene)
     }
 
     fn a11y_init(&self, callbacks: gpui::A11yCallbacks) {

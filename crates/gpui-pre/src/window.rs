@@ -3112,9 +3112,18 @@ impl Window {
     /// Renders the current frame's scene to a texture and returns the pixel data as an RGBA image.
     /// This does not present the frame to screen - useful for visual testing where we want
     /// to capture what would be rendered without displaying it or requiring the window to be visible.
+    ///
+    /// It waits for the GPU. [`Window::render_to_pending_image`] does not.
     pub fn render_to_image(&self) -> anyhow::Result<image::RgbaImage> {
+        self.render_to_pending_image()?.wait()
+    }
+
+    /// Submits a render of the current frame's scene to a texture, as
+    /// [`Window::render_to_image`] does, and returns the image that the GPU draws. Wait for it
+    /// off the UI thread.
+    pub fn render_to_pending_image(&self) -> anyhow::Result<crate::PendingImage> {
         self.platform_window
-            .render_to_image(&self.rendered_frame.scene)
+            .render_to_pending_image(&self.rendered_frame.scene)
     }
 
     /// Borrows the most recently rendered frame's scene, so benchmarks can validate their
