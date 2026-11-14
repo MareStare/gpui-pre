@@ -26,6 +26,9 @@ pub(crate) struct DirectManipulationHandler {
     window: HWND,
     scale_factor: Rc<Cell<f32>>,
     pending_events: Rc<RefCell<Vec<PlatformInput>>>,
+    /// Whether a gesture runs or moves on with inertia. It needs an update
+    /// at each frame then.
+    in_gesture: Rc<Cell<bool>>,
 }
 
 impl DirectManipulationHandler {
@@ -65,12 +68,14 @@ impl DirectManipulationHandler {
 
             let scale_factor = Rc::new(Cell::new(scale_factor));
             let pending_events = Rc::new(RefCell::new(Vec::new()));
+            let in_gesture = Rc::new(Cell::new(false));
 
             let event_handler: IDirectManipulationViewportEventHandler =
                 DirectManipulationEventHandler::new(
                     window,
                     Rc::clone(&scale_factor),
                     Rc::clone(&pending_events),
+                    Rc::clone(&in_gesture),
                 )
                 .into();
 
@@ -86,6 +91,7 @@ impl DirectManipulationHandler {
                 window,
                 scale_factor,
                 pending_events,
+                in_gesture,
             })
         }
     }
@@ -94,15 +100,23 @@ impl DirectManipulationHandler {
         self.scale_factor.set(scale_factor);
     }
 
-    pub fn on_pointer_hit_test(&self, wparam: WPARAM) {
+    /// Returns whether a touchpad contact starts, which needs an update at
+    /// the next frame.
+    pub fn on_pointer_hit_test(&self, wparam: WPARAM) -> bool {
         unsafe {
             let pointer_id = wparam.loword() as u32;
             let mut pointer_type = POINTER_INPUT_TYPE::default();
             if GetPointerType(pointer_id, &mut pointer_type).is_ok() && pointer_type == PT_TOUCHPAD
             {
                 self.viewport.SetContact(pointer_id).log_err();
+                return true;
             }
         }
+        false
+    }
+
+    pub fn in_gesture(&self) -> bool {
+        self.in_gesture.get()
     }
 
     pub fn update(&self) {
@@ -143,6 +157,7 @@ struct DirectManipulationEventHandler {
     last_y_offset: Cell<f32>,
     scroll_phase: Cell<TouchPhase>,
     pending_events: Rc<RefCell<Vec<PlatformInput>>>,
+    in_gesture: Rc<Cell<bool>>,
 }
 
 impl DirectManipulationEventHandler {
@@ -150,6 +165,7 @@ impl DirectManipulationEventHandler {
         window: HWND,
         scale_factor: Rc<Cell<f32>>,
         pending_events: Rc<RefCell<Vec<PlatformInput>>>,
+        in_gesture: Rc<Cell<bool>>,
     ) -> Self {
         Self {
             window,
@@ -160,6 +176,7 @@ impl DirectManipulationEventHandler {
             last_y_offset: Cell::new(0.0),
             scroll_phase: Cell::new(TouchPhase::Started),
             pending_events,
+            in_gesture,
         }
     }
 
@@ -214,6 +231,8 @@ impl IDirectManipulationViewportEventHandler_Impl for DirectManipulationEventHan
         if current == previous {
             return Ok(());
         }
+        self.in_gesture
+            .set(current == DIRECTMANIPULATION_RUNNING || current == DIRECTMANIPULATION_INERTIA);
 
         // A new gesture interrupted inertia, so end the old sequence.
         if current == DIRECTMANIPULATION_RUNNING && previous == DIRECTMANIPULATION_INERTIA {

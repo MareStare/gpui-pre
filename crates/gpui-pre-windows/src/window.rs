@@ -55,6 +55,7 @@ pub struct WindowsWindowState {
 
     pub callbacks: Callbacks,
     pub frame_signal: Arc<PlatformFrameSignal>,
+    pub(crate) frames: Arc<WindowFrames>,
     pub input_handler: Cell<Option<PlatformInputHandler>>,
     pub ime_enabled: Cell<bool>,
     pub pending_surrogate: Cell<Option<u16>>,
@@ -124,6 +125,7 @@ impl WindowsWindowState {
         disable_direct_composition: bool,
         invalidate_devices: Arc<AtomicBool>,
         draw_coordinator: Rc<DrawCoordinator>,
+        frame_requests: Arc<FrameRequests>,
     ) -> Result<Self> {
         let scale_factor = {
             let monitor_dpi = unsafe { GetDpiForWindow(hwnd) } as f32;
@@ -173,6 +175,7 @@ impl WindowsWindowState {
             min_size,
             callbacks,
             frame_signal: Arc::new(PlatformFrameSignal::new()),
+            frames: Arc::new(WindowFrames::new(frame_requests)),
             input_handler: Cell::new(input_handler),
             ime_enabled: Cell::new(true),
             pending_surrogate: Cell::new(pending_surrogate),
@@ -284,6 +287,7 @@ impl WindowsWindowInner {
             context.disable_direct_composition,
             context.invalidate_devices.clone(),
             context.draw_coordinator.clone(),
+            context.frame_requests.clone(),
         )?;
 
         Ok(Rc::new(Self {
@@ -435,6 +439,7 @@ struct WindowCreateContext {
     directx_devices: DirectXDevices,
     invalidate_devices: Arc<AtomicBool>,
     draw_coordinator: Rc<DrawCoordinator>,
+    frame_requests: Arc<FrameRequests>,
     parent_hwnd: Option<HWND>,
 }
 
@@ -463,6 +468,7 @@ impl WindowsWindow {
             directx_devices,
             invalidate_devices,
             draw_coordinator,
+            frame_requests,
         } = creation_info;
         register_window_class(icon);
         let parent_hwnd = if params.kind == WindowKind::Dialog {
@@ -548,6 +554,7 @@ impl WindowsWindow {
             directx_devices,
             invalidate_devices,
             draw_coordinator,
+            frame_requests,
             parent_hwnd,
         };
         let creation_result = gpui_wgpu::time_startup_stage("create-window", || unsafe {
@@ -1058,6 +1065,23 @@ impl PlatformWindow for WindowsWindow {
             .borrow_mut()
             .draw(scene, self.state.background_appearance.get())
             .log_err();
+        // GPUI decides at each frame whether to draw or present again, for
+        // example after high-rate input. The frame after a present gives it
+        // that chance. A frame that neither draws nor presents asks for none.
+        self.state.frames.ask();
+    }
+
+    fn schedule_frame(&self) {
+        self.state.frames.ask();
+    }
+
+    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
+        let frames = Arc::downgrade(&self.state.frames);
+        Some(Rc::new(move || {
+            if let Some(frames) = frames.upgrade() {
+                frames.ask();
+            }
+        }))
     }
 
     fn render_to_image(&self, scene: &Scene) -> anyhow::Result<image::RgbaImage> {

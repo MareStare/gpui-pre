@@ -42,6 +42,7 @@ use gpui::*;
 struct TrackedWindow {
     handle: SafeHwnd,
     frame_signal: Arc<PlatformFrameSignal>,
+    frames: Arc<WindowFrames>,
 }
 
 impl TrackedWindow {
@@ -55,8 +56,8 @@ pub struct WindowsPlatform {
     raw_window_handles: Arc<RwLock<SmallVec<[TrackedWindow; 4]>>>,
     /// The windowing mode to start in, applied when `run` starts. Windowed when unset.
     initial_windowing: RefCell<Option<WindowingRequest>>,
-    /// Set to stop the current `VSyncProvider` thread, which runs while windowed.
-    vsync_stop: RefCell<Option<Arc<AtomicBool>>>,
+    /// The frame requests of the current `VSyncProvider` thread, which runs while windowed.
+    frame_requests: RefCell<Option<Arc<FrameRequests>>>,
     // The below members will never change throughout the entire lifecycle of the app.
     /// Created with `headless()`: never windowed.
     headless: bool,
@@ -275,7 +276,7 @@ impl WindowsPlatform {
             handle,
             raw_window_handles,
             initial_windowing: RefCell::new(None),
-            vsync_stop: RefCell::new(None),
+            frame_requests: RefCell::new(None),
             headless,
             icon,
             background_executor,
@@ -331,6 +332,7 @@ impl WindowsPlatform {
             directx_devices: self.inner.state.directx_devices.borrow().clone().unwrap(),
             invalidate_devices: self.invalidate_devices.clone(),
             draw_coordinator: self.inner.state.draw_coordinator.clone(),
+            frame_requests: self.frame_requests.borrow().clone().unwrap(),
         }
     }
 
@@ -434,10 +436,10 @@ impl WindowsPlatform {
 
     /// Stops vsync and releases the DirectX devices. No window may be open.
     fn detach_gpu(&self) {
-        if let Some(stop) = self.vsync_stop.borrow_mut().take() {
-            // Not joined: the thread can be sending this thread a message. It exits after its
-            // next vsync, and drops its reference to the devices then.
-            stop.store(true, Ordering::Release);
+        if let Some(requests) = self.frame_requests.borrow_mut().take() {
+            // Not joined: the thread can be sending this thread a message. It exits when it
+            // wakes, and drops its reference to the devices then.
+            requests.stop();
         }
         self.text_system.release_gpu();
         self.inner.state.directx_devices.borrow_mut().take();
@@ -447,8 +449,8 @@ impl WindowsPlatform {
         let Some(directx_devices) = self.inner.state.directx_devices.borrow().clone() else {
             return;
         };
-        let stop = Arc::new(AtomicBool::new(false));
-        *self.vsync_stop.borrow_mut() = Some(stop.clone());
+        let requests = Arc::new(FrameRequests::default());
+        *self.frame_requests.borrow_mut() = Some(requests.clone());
         let mut directx_device = directx_devices;
         let platform_window: SafeHwnd = self.handle.into();
         let validation_number = self.inner.validation_number;
@@ -460,10 +462,12 @@ impl WindowsPlatform {
             .name("VSyncProvider".to_owned())
             .spawn(move || {
                 let vsync_provider = VSyncProvider::new();
-                loop {
+                // Each vsync draws only the windows that asked for a frame. A window
+                // asks again while it has more to draw.
+                while requests.wait() {
                     let signal_source = vsync_provider.wait_for_vsync();
                     let signal_at = PlatformFrameSignal::capture(scheduler::Instant::now);
-                    if stop.load(Ordering::Acquire) {
+                    if requests.is_stopped() {
                         break;
                     }
                     if check_device_lost(&directx_device.device)
@@ -483,6 +487,9 @@ impl WindowsPlatform {
                         break;
                     };
                     for hwnd in all_windows.read().iter() {
+                        if !hwnd.frames.take() {
+                            continue;
+                        }
                         unsafe {
                             if let Some(signal_at) = signal_at {
                                 if IsWindowVisible(hwnd.as_raw()).as_bool()
@@ -771,6 +778,7 @@ impl Platform for WindowsPlatform {
         self.raw_window_handles.write().push(TrackedWindow {
             handle: handle.into(),
             frame_signal: window.state.frame_signal.clone(),
+            frames: window.state.frames.clone(),
         });
 
         Ok(Box::new(window))
@@ -1471,8 +1479,8 @@ unsafe fn power_saving_status(lparam: LPARAM) -> Option<bool> {
 
 impl Drop for WindowsPlatform {
     fn drop(&mut self) {
-        if let Some(stop) = self.vsync_stop.borrow_mut().take() {
-            stop.store(true, Ordering::Release);
+        if let Some(requests) = self.frame_requests.borrow_mut().take() {
+            requests.stop();
         }
         unsafe {
             if let Some(notification) = self.suspend_resume_notification.borrow_mut().take() {
@@ -1506,6 +1514,7 @@ pub(crate) struct WindowCreationInfo {
     pub(crate) invalidate_devices: Arc<AtomicBool>,
     /// Shared with [`WindowsPlatformState::draw_coordinator`] and every other window.
     pub(crate) draw_coordinator: Rc<DrawCoordinator>,
+    pub(crate) frame_requests: Arc<FrameRequests>,
 }
 
 struct PlatformWindowCreateContext {
