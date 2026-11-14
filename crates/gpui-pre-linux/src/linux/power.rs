@@ -101,7 +101,7 @@ mod tests {
     struct TestBus(Child);
 
     impl TestBus {
-        #[expect(
+        #[allow(
             clippy::disallowed_methods,
             reason = "this integration test owns and reaps a real D-Bus daemon"
         )]
@@ -164,7 +164,7 @@ mod tests {
     }
 
     #[test]
-    #[expect(
+    #[allow(
         clippy::disallowed_methods,
         reason = "real D-Bus I/O requires a wall-clock timeout, not a GPUI scheduler timer"
     )]
