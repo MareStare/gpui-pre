@@ -1301,6 +1301,7 @@ impl WgpuRenderer {
             size,
             premultiplied_alpha,
             wgpu::Color::TRANSPARENT,
+            |_| {},
         ) {
             self.last_frame_error = Some(format!("{error:#}"));
             return false;
@@ -1324,12 +1325,13 @@ impl WgpuRenderer {
 
 #[cfg(not(target_family = "wasm"))]
 impl WgpuRenderer {
-    /// Renders the scene to an image of the size of the surface, as `draw` renders it
-    /// to the surface, and waits for the GPU. The image holds premultiplied colors when
-    /// the compositor reads premultiplied colors from the surface. It presents nothing.
-    pub fn render_to_image(&mut self, scene: &Scene) -> Result<image::RgbaImage> {
+    /// Submits a render of the scene to an image of the size of the surface, as `draw`
+    /// renders it to the surface. The image holds premultiplied colors when the compositor
+    /// reads premultiplied colors from the surface. It presents nothing.
+    pub fn render_to_pending_image(&mut self, scene: &Scene) -> Result<gpui::PendingImage> {
         anyhow::ensure!(!self.device_lost(), "The GPU device is lost");
-        let mut error_generation = self.device_errors.current_generation();
+        let errors = Arc::clone(&self.device_errors);
+        let error_generation = errors.current_generation();
         let size = Size {
             width: DevicePixels(self.surface_config.width as i32),
             height: DevicePixels(self.surface_config.height as i32),
@@ -1339,13 +1341,14 @@ impl WgpuRenderer {
             .core_mut()
             .context("The renderer released its GPU resources")?;
         let premultiplied_alpha = composites_premultiplied(alpha_mode, core.adapter_info.backend);
-        let target = OffscreenTarget::new(core, size)?;
-        target.render(core, scene, premultiplied_alpha, wgpu::Color::TRANSPARENT)?;
-        let image = target.read_image(core)?;
-        if let Some(error) = self.device_errors.observe_error(&mut error_generation) {
-            anyhow::bail!("GPU error while rendering to an image: {error}");
-        }
-        Ok(image)
+        OffscreenTarget::new(core, size)?.render_to_image(
+            core,
+            scene,
+            premultiplied_alpha,
+            wgpu::Color::TRANSPARENT,
+            errors,
+            error_generation,
+        )
     }
 }
 
@@ -1573,6 +1576,8 @@ impl WgpuRendererCore {
         Ok(())
     }
 
+    /// Renders the scene to the target. `record_after` records commands that run after the
+    /// frame, in the same submission.
     fn render_frame(
         &mut self,
         scene: &Scene,
@@ -1580,6 +1585,7 @@ impl WgpuRendererCore {
         size: Size<DevicePixels>,
         premultiplied_alpha: bool,
         clear_color: wgpu::Color,
+        record_after: impl FnOnce(&mut wgpu::CommandEncoder),
     ) -> Result<wgpu::SubmissionIndex> {
         self.check_target_size(size)?;
 
@@ -1618,7 +1624,7 @@ impl WgpuRendererCore {
             bytemuck::bytes_of(&gamma_params),
         );
 
-        self.record_frame(scene, target_view, size, clear_color)
+        self.record_frame(scene, target_view, size, clear_color, record_after)
             .inspect_err(|_| {
                 // Queue writes are staged before encoding; flush them even if the frame fails.
                 self.resources.queue.submit(std::iter::empty());
@@ -1631,6 +1637,7 @@ impl WgpuRendererCore {
         frame_view: &wgpu::TextureView,
         frame_size: Size<DevicePixels>,
         clear_color: wgpu::Color,
+        record_after: impl FnOnce(&mut wgpu::CommandEncoder),
     ) -> Result<wgpu::SubmissionIndex> {
         let mut instance_offset = 0;
         let instance_bindings = self
@@ -1781,6 +1788,7 @@ impl WgpuRendererCore {
             }
         }
 
+        record_after(&mut encoder);
         let submission = self
             .resources()
             .queue
@@ -2513,8 +2521,23 @@ impl OffscreenTarget {
         }
     }
 
+    /// Takes the target in `slot` while it has `size`, or puts a new target there.
+    #[cfg(any(test, feature = "headless"))]
+    fn reuse<'a>(
+        slot: &'a mut Option<Self>,
+        core: &WgpuRendererCore,
+        size: Size<DevicePixels>,
+    ) -> Result<&'a Self> {
+        let target = match slot.take() {
+            Some(target) if target.size() == size => target,
+            _ => Self::new(core, size)?,
+        };
+        Ok(slot.insert(target))
+    }
+
     /// Renders the scene to the target. The arguments after `scene` are as for
     /// `WgpuRendererCore::render_frame`.
+    #[cfg(any(test, feature = "headless"))]
     fn render(
         &self,
         core: &mut WgpuRendererCore,
@@ -2528,44 +2551,97 @@ impl OffscreenTarget {
             self.size(),
             premultiplied_alpha,
             clear_color,
+            |_| {},
         )?;
         Ok(())
     }
 
-    /// Copies the target back to the CPU and waits for the GPU. Dimensions come from the
-    /// target texture itself, so the copy can never disagree with what was rendered.
-    fn read_image(&self, core: &WgpuRendererCore) -> Result<image::RgbaImage> {
-        let swap_red_blue = match core.target_format {
+    /// Renders the scene to the target and copies the target to a buffer that the CPU
+    /// reads, in one submission: on some drivers a second submission waits until the GPU
+    /// is done with the first. The image waits for the GPU and fails on a GPU error that
+    /// `errors` sees after `error_generation`.
+    fn render_to_image(
+        &self,
+        core: &mut WgpuRendererCore,
+        scene: &Scene,
+        premultiplied_alpha: bool,
+        clear_color: wgpu::Color,
+        errors: Arc<DeviceErrorState>,
+        error_generation: u64,
+    ) -> Result<gpui::PendingImage> {
+        let readback = Readback::new(&core.resources.device, &self.texture)?;
+        core.render_frame(
+            scene,
+            &self.view,
+            self.size(),
+            premultiplied_alpha,
+            clear_color,
+            |encoder| readback.record_copy(encoder),
+        )?;
+        Ok(readback.finish(errors, error_generation))
+    }
+}
+
+/// A copy of a texture in a buffer that the CPU maps once the GPU is done.
+#[cfg(not(target_family = "wasm"))]
+struct Readback {
+    device: Arc<wgpu::Device>,
+    texture: wgpu::Texture,
+    buffer: wgpu::Buffer,
+    bytes_per_row: u32,
+
+    /// The size of a row in `buffer`, which wgpu aligns.
+    padded_bytes_per_row: u32,
+    swap_red_blue: bool,
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl Readback {
+    /// The longest time to wait for the GPU.
+    const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+    /// The time between two polls of the device.
+    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1);
+
+    /// Makes a buffer for a copy of all of `texture`.
+    fn new(device: &Arc<wgpu::Device>, texture: &wgpu::Texture) -> Result<Self> {
+        let swap_red_blue = match texture.format() {
             wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Rgba8UnormSrgb => false,
             wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb => true,
             format => anyhow::bail!("Cannot read back a render target of format {format:?}"),
         };
-        let device = &core.resources.device;
-        let width = self.texture.width();
-        let height = self.texture.height();
-        let bytes_per_row = width
+        let bytes_per_row = texture
+            .width()
             .checked_mul(4)
             .context("Render target row size overflowed")?;
         let padded_bytes_per_row = bytes_per_row
             .checked_next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
             .context("Padded row size overflowed")?;
         let buffer_size = u64::from(padded_bytes_per_row)
-            .checked_mul(u64::from(height))
+            .checked_mul(u64::from(texture.height()))
             .context("Readback buffer size overflowed")?;
         anyhow::ensure!(
             buffer_size <= device.limits().max_buffer_size,
             "Readback buffer size {buffer_size} exceeds maximum buffer size {}",
             device.limits().max_buffer_size
         );
-        let readback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("offscreen_readback_buffer"),
             size: buffer_size,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("offscreen_readback_encoder"),
-        });
+        Ok(Self {
+            device: Arc::clone(device),
+            texture: texture.clone(),
+            buffer,
+            bytes_per_row,
+            padded_bytes_per_row,
+            swap_red_blue,
+        })
+    }
+
+    fn record_copy(&self, encoder: &mut wgpu::CommandEncoder) {
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.texture,
@@ -2574,43 +2650,56 @@ impl OffscreenTarget {
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::TexelCopyBufferInfo {
-                buffer: &readback_buffer,
+                buffer: &self.buffer,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(padded_bytes_per_row),
-                    rows_per_image: Some(height),
+                    bytes_per_row: Some(self.padded_bytes_per_row),
+                    rows_per_image: Some(self.texture.height()),
                 },
             },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
+            self.texture.size(),
         );
-        let submission = core
-            .resources
-            .queue
-            .submit(std::iter::once(encoder.finish()));
-        let (sender, receiver) = std::sync::mpsc::channel();
-        readback_buffer
+    }
+
+    /// Maps the buffer after the submission of the copy. The image waits for the GPU and
+    /// fails on a GPU error that `errors` sees after `error_generation`.
+    fn finish(
+        self,
+        errors: Arc<DeviceErrorState>,
+        mut error_generation: u64,
+    ) -> gpui::PendingImage {
+        let (sender, mapped) = std::sync::mpsc::channel();
+        self.buffer
             .slice(..)
             .map_async(wgpu::MapMode::Read, move |result| {
-                if sender.send(result).is_err() {
-                    log::error!("Readback receiver was dropped before mapping completed");
-                }
+                // The image can be dropped before the GPU is done.
+                sender.send(result).ok();
             });
-        device
-            .poll(wgpu::PollType::Wait {
-                submission_index: Some(submission),
-                timeout: Some(std::time::Duration::from_secs(30)),
-            })
-            .map_err(|error| anyhow::anyhow!("Failed to wait for the render: {error}"))?;
-        receiver
-            .recv_timeout(std::time::Duration::from_secs(30))
-            .map_err(|error| anyhow::anyhow!("Failed to receive the mapping result: {error}"))?
-            .map_err(|error| anyhow::anyhow!("Failed to map the readback buffer: {error}"))?;
+        gpui::PendingImage::new(move || {
+            let image = self.read(&mapped)?;
+            if let Some(error) = errors.observe_error(&mut error_generation) {
+                anyhow::bail!("GPU error while rendering to an image: {error}");
+            }
+            Ok(image)
+        })
+    }
 
-        let mapped_data = readback_buffer.slice(..).get_mapped_range()?;
+    /// Waits for the mapping and copies the pixels to an image.
+    fn read(
+        self,
+        mapped: &std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
+    ) -> Result<image::RgbaImage> {
+        let Self {
+            device,
+            texture,
+            buffer,
+            bytes_per_row,
+            padded_bytes_per_row,
+            swap_red_blue,
+        } = self;
+        Self::wait_for_mapping(&device, mapped)?;
+        let (width, height) = (texture.width(), texture.height());
+        let mapped_data = buffer.slice(..).get_mapped_range()?;
         let pixel_capacity = usize::try_from(u64::from(bytes_per_row) * u64::from(height))
             .map_err(|_| anyhow::anyhow!("Image size exceeds addressable memory"))?;
         let mut pixels = Vec::with_capacity(pixel_capacity);
@@ -2621,7 +2710,7 @@ impl OffscreenTarget {
             pixels.extend_from_slice(&row[..bytes_per_row as usize]);
         }
         drop(mapped_data);
-        readback_buffer.unmap();
+        buffer.unmap();
 
         if swap_red_blue {
             for pixel in pixels.chunks_exact_mut(4) {
@@ -2631,6 +2720,40 @@ impl OffscreenTarget {
 
         image::RgbaImage::from_raw(width, height, pixels)
             .context("Failed to create an image from the pixel data")
+    }
+
+    /// Polls the device until `receiver` gets the result of the mapping.
+    ///
+    /// A poll that waits holds a lock of the device until the GPU is done, and a frame that
+    /// presents on another thread waits for that lock. A poll that does not wait releases it
+    /// at once.
+    fn wait_for_mapping(
+        device: &wgpu::Device,
+        receiver: &std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
+    ) -> Result<()> {
+        let deadline = std::time::Instant::now() + Self::TIMEOUT;
+        loop {
+            device
+                .poll(wgpu::PollType::Poll)
+                .map_err(|error| anyhow::anyhow!("Failed to poll the GPU device: {error}"))?;
+            match receiver.try_recv() {
+                Ok(result) => {
+                    return result.map_err(|error| {
+                        anyhow::anyhow!("Failed to map the readback buffer: {error}")
+                    });
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    anyhow::bail!("The GPU dropped the mapping of the readback buffer");
+                }
+            }
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "The GPU did not finish the render in {:?}",
+                Self::TIMEOUT
+            );
+            std::thread::sleep(Self::POLL_INTERVAL);
+        }
     }
 }
 
@@ -2644,6 +2767,8 @@ pub struct WgpuHeadlessRenderer {
 
 #[cfg(all(not(target_family = "wasm"), any(test, feature = "headless")))]
 impl WgpuHeadlessRenderer {
+    const CLEAR_COLOR: wgpu::Color = wgpu::Color::BLACK;
+
     pub fn new() -> anyhow::Result<Self> {
         let (context, target_format) = WgpuContext::new_headless()?;
         // The device may be shared with earlier renderers; observe only errors raised from
@@ -2679,17 +2804,6 @@ impl WgpuHeadlessRenderer {
         }
         Ok(())
     }
-
-    /// Renders to a target of `size`, reused while the size stays the same.
-    fn render(&mut self, scene: &Scene, size: Size<DevicePixels>) -> anyhow::Result<()> {
-        self.check_gpu_errors()?;
-        let target = match self.render_target.take() {
-            Some(target) if target.size() == size => target,
-            _ => OffscreenTarget::new(&self.core, size)?,
-        };
-        let target = self.render_target.insert(target);
-        target.render(&mut self.core, scene, false, wgpu::Color::BLACK)
-    }
 }
 
 #[cfg(all(not(target_family = "wasm"), any(test, feature = "headless")))]
@@ -2698,23 +2812,27 @@ impl gpui::PlatformHeadlessRenderer for WgpuHeadlessRenderer {
         true
     }
 
-    fn render_scene_to_image(
+    fn render_scene_to_pending_image(
         &mut self,
         scene: &Scene,
         size: Size<DevicePixels>,
-    ) -> anyhow::Result<image::RgbaImage> {
-        self.render(scene, size)?;
-        let target = self
-            .render_target
-            .as_ref()
-            .context("Headless render target was not created")?;
-        let image = target.read_image(&self.core)?;
+    ) -> anyhow::Result<gpui::PendingImage> {
         self.check_gpu_errors()?;
-        Ok(image)
+        let target = OffscreenTarget::reuse(&mut self.render_target, &self.core, size)?;
+        target.render_to_image(
+            &mut self.core,
+            scene,
+            false,
+            Self::CLEAR_COLOR,
+            Arc::clone(self.context.errors()),
+            self.observed_error_generation,
+        )
     }
 
     fn render_scene(&mut self, scene: &Scene, size: Size<DevicePixels>) -> anyhow::Result<()> {
-        self.render(scene, size)
+        self.check_gpu_errors()?;
+        let target = OffscreenTarget::reuse(&mut self.render_target, &self.core, size)?;
+        target.render(&mut self.core, scene, false, Self::CLEAR_COLOR)
     }
 
     fn sprite_atlas(&self) -> Arc<dyn gpui::PlatformAtlas> {

@@ -74,6 +74,13 @@ commit, then rebase the patch commits onto it.
 - Window screenshots: `Window::render_to_image` works in every build, not
   only with `test-support`. The wgpu renderer draws the scene to an
   offscreen texture and reads it back, also for X11 and Wayland windows.
+- Screenshots off the UI thread: `Window::render_to_pending_image` submits
+  the render of the frame and returns a `PendingImage`. Its `wait` waits
+  for the GPU and reads the pixels on any thread. The wgpu and Metal
+  renderers implement it, and the headless renderers through
+  `PlatformHeadlessRenderer::render_scene_to_pending_image`. wgpu puts
+  the render and the copy to the CPU in one submission: on some drivers
+  a second submission waits for the GPU to finish the first.
 - Pen input on macOS and Linux: `Window::on_pen` gets each pen sample
   with its pressure and the proximity changes of the pen, before the
   mouse event of the same sample. macOS reads the tablet events of

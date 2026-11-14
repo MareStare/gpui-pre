@@ -1,14 +1,12 @@
 use crate::{
     AnyWindowHandle, Bounds, DevicePixels, DispatchEventResult, DisplayId, GpuSpecs, HeadlessAtlas,
-    Pixels, PlatformAtlas, PlatformDisplay, PlatformHeadlessRenderer, PlatformInput,
+    PendingImage, Pixels, PlatformAtlas, PlatformDisplay, PlatformHeadlessRenderer, PlatformInput,
     PlatformInputHandler, PlatformWindow, Point, PromptButton, RequestFrameOptions, Scene, Size,
     TestDisplay, TestPlatform, TextInputConfiguration, TextInputStateChange, WindowAppearance,
     WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowInsets, WindowParams,
     WindowVisibility,
 };
 use gpui_util::ResultExt as _;
-#[cfg(any(test, feature = "headless"))]
-use image::RgbaImage;
 use parking_lot::Mutex;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::{
@@ -591,13 +589,13 @@ impl PlatformWindow for TestWindow {
     }
 
     #[cfg(any(test, feature = "headless"))]
-    fn render_to_image(&self, scene: &Scene) -> anyhow::Result<RgbaImage> {
+    fn render_to_pending_image(&self, scene: &Scene) -> anyhow::Result<PendingImage> {
         let scale_factor = self.scale_factor();
         let mut state = self.0.lock();
         let size = state.bounds.size;
         if let Some(renderer) = &mut state.renderer {
             let device_size: Size<DevicePixels> = size.to_device_pixels(scale_factor);
-            renderer.render_scene_to_image(scene, device_size)
+            renderer.render_scene_to_pending_image(scene, device_size)
         } else {
             anyhow::bail!("render_to_image not available: no HeadlessRenderer configured")
         }

@@ -2,6 +2,7 @@ mod app_menu;
 mod cursor_image;
 mod keyboard;
 mod keystroke;
+mod pending_image;
 mod platform_info;
 
 #[cfg(all(target_os = "linux", feature = "wayland"))]
@@ -83,6 +84,7 @@ pub use app_menu::*;
 pub use cursor_image::*;
 pub use keyboard::*;
 pub use keystroke::*;
+pub use pending_image::*;
 
 /// Whether the platform is presenting a window's frames.
 ///
@@ -1481,10 +1483,11 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
         None
     }
 
-    /// Renders the given scene to a texture and returns the pixel data as an RGBA image.
-    /// This does not present the frame to screen - useful for visual testing where we want
-    /// to capture what would be rendered without displaying it or requiring the window to be visible.
-    fn render_to_image(&self, _scene: &Scene) -> Result<RgbaImage> {
+    /// Submits a render of the given scene to a texture, and returns the image that the
+    /// GPU draws. This does not present the frame to screen - useful for visual testing where
+    /// we want to capture what would be rendered without displaying it or requiring the window
+    /// to be visible.
+    fn render_to_pending_image(&self, _scene: &Scene) -> Result<PendingImage> {
         anyhow::bail!("render_to_image not implemented for this platform")
     }
 }
@@ -1492,12 +1495,21 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
 /// A renderer for headless windows that can produce real rendered output.
 #[cfg(any(test, feature = "headless"))]
 pub trait PlatformHeadlessRenderer {
-    /// Render a scene and return the result as an RGBA image.
+    /// Submit a render of a scene, and return the image that the GPU draws.
+    fn render_scene_to_pending_image(
+        &mut self,
+        scene: &Scene,
+        size: Size<DevicePixels>,
+    ) -> Result<PendingImage>;
+
+    /// Render a scene and return the result as an RGBA image. It waits for the GPU.
     fn render_scene_to_image(
         &mut self,
         scene: &Scene,
         size: Size<DevicePixels>,
-    ) -> Result<RgbaImage>;
+    ) -> Result<RgbaImage> {
+        self.render_scene_to_pending_image(scene, size)?.wait()
+    }
 
     /// Whether the renderer draws the custom surfaces of a scene.
     fn draws_custom_surfaces(&self) -> bool {

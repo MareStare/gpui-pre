@@ -63,6 +63,23 @@ impl Default for InstanceBufferPool {
     }
 }
 
+/// A texture that the GPU renders to, and that the CPU reads once the GPU is done.
+struct OffscreenTexture(Retained<ProtocolObject<dyn MTLTexture>>);
+
+impl OffscreenTexture {
+    /// The longest time to wait for the GPU.
+    const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+    fn read(&self) -> Result<RgbaImage> {
+        read_texture_to_image(&self.0)
+    }
+}
+
+// SAFETY: Metal resources have no thread affinity, and the retain count of an object is
+// atomic. Only the GPU writes the texture, and the CPU reads it only after the command buffer
+// that writes it completes.
+unsafe impl Send for OffscreenTexture {}
+
 struct InstanceBuffer {
     metal_buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
     size: usize,
@@ -700,13 +717,13 @@ impl MetalRenderer {
         Ok(command_buffer)
     }
 
-    /// Renders the scene to a texture and returns the pixel data as an RGBA image.
+    /// Submits a render of the scene to a texture and returns the image that the GPU draws.
     /// This does not present the frame to screen - useful for visual testing
     /// where we want to capture what would be rendered without displaying it.
     ///
     /// Note: This requires a layer-backed renderer. For headless rendering,
-    /// use `render_scene_to_image()` instead.
-    pub fn render_to_image(&mut self, scene: &Scene) -> Result<RgbaImage> {
+    /// use `render_scene_to_pending_image()` instead.
+    pub fn render_to_pending_image(&mut self, scene: &Scene) -> Result<gpui::PendingImage> {
         let layer = self
             .layer
             .clone()
@@ -723,15 +740,15 @@ impl MetalRenderer {
     /// Renders a scene to an image without requiring a window or CAMetalLayer.
     ///
     /// This is the primary method for headless rendering. It creates an offscreen
-    /// texture, renders the scene to it, and returns the pixel data as an RGBA image.
+    /// texture, submits a render of the scene to it, and returns the image that the GPU draws.
     #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
-    pub fn render_scene_to_image(
+    pub fn render_scene_to_pending_image(
         &mut self,
         scene: &Scene,
         size: Size<DevicePixels>,
-    ) -> Result<RgbaImage> {
+    ) -> Result<gpui::PendingImage> {
         if size.width.0 <= 0 || size.height.0 <= 0 {
-            anyhow::bail!("Invalid size for render_scene_to_image: {:?}", size);
+            anyhow::bail!("Invalid size for render_scene_to_pending_image: {:?}", size);
         }
 
         // Headless callers do not have a Cocoa event-loop pool to release
@@ -742,9 +759,13 @@ impl MetalRenderer {
         })
     }
 
-    /// Renders a scene into a new offscreen texture of `size` and reads it
-    /// back, without presenting anything.
-    fn render_offscreen(&mut self, scene: &Scene, size: Size<DevicePixels>) -> Result<RgbaImage> {
+    /// Submits a render of a scene into a new offscreen texture of `size`, without
+    /// presenting anything. The image reads the texture back once the GPU is done.
+    fn render_offscreen(
+        &mut self,
+        scene: &Scene,
+        size: Size<DevicePixels>,
+    ) -> Result<gpui::PendingImage> {
         if size.width.0 <= 0 || size.height.0 <= 0 {
             anyhow::bail!("Invalid size for render_offscreen: {:?}", size);
         }
@@ -783,10 +804,27 @@ impl MetalRenderer {
             blit.endEncoding();
         }
 
+        let (completed, completion) = std::sync::mpsc::channel();
+        let block = RcBlock::new(
+            move |_: ptr::NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
+                // The image can be dropped before the GPU is done.
+                completed.send(()).ok();
+            },
+        );
+        // SAFETY: Metal copies the live block and invokes it once after the render completes.
+        // Its capture is a channel sender, which any thread can use.
+        unsafe {
+            command_buffer.addCompletedHandler(RcBlock::as_ptr(&block));
+        }
         command_buffer.commit();
-        command_buffer.waitUntilCompleted();
 
-        read_texture_to_image(&target_texture)
+        let target = OffscreenTexture(target_texture);
+        Ok(gpui::PendingImage::new(move || {
+            completion
+                .recv_timeout(OffscreenTexture::TIMEOUT)
+                .context("waiting for the GPU to render the image")?;
+            target.read()
+        }))
     }
 
     /// Renders a scene to a reused offscreen texture without reading pixels
@@ -1901,12 +1939,12 @@ impl MetalHeadlessRenderer {
 
 #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
 impl gpui::PlatformHeadlessRenderer for MetalHeadlessRenderer {
-    fn render_scene_to_image(
+    fn render_scene_to_pending_image(
         &mut self,
         scene: &Scene,
         size: Size<DevicePixels>,
-    ) -> anyhow::Result<image::RgbaImage> {
-        self.renderer.render_scene_to_image(scene, size)
+    ) -> anyhow::Result<gpui::PendingImage> {
+        self.renderer.render_scene_to_pending_image(scene, size)
     }
 
     fn render_scene(&mut self, scene: &Scene, size: Size<DevicePixels>) -> anyhow::Result<()> {
@@ -1988,7 +2026,7 @@ mod tests {
         let mut renderer = MetalRenderer::new(Default::default(), false, false)?;
         for (width, height) in [(0, 0), (0, 64), (64, 0)] {
             renderer.update_drawable_size(size(DevicePixels(width), DevicePixels(height)));
-            assert!(renderer.render_to_image(&Scene::default()).is_err());
+            assert!(renderer.render_to_pending_image(&Scene::default()).is_err());
         }
         Ok(())
     }
@@ -2096,7 +2134,9 @@ mod tests {
             MetalRenderer::new_headless(Arc::new(Mutex::new(InstanceBufferPool::default())))
                 .unwrap();
         let image = renderer
-            .render_scene_to_image(&scene, size(DevicePixels(16), DevicePixels(16)))
+            .render_scene_to_pending_image(&scene, size(DevicePixels(16), DevicePixels(16)))
+            .unwrap()
+            .wait()
             .unwrap();
         for image::Rgba([red, green, blue, alpha]) in image.pixels() {
             assert!(red.abs_diff(128) <= 2);

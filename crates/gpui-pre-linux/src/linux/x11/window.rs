@@ -1816,14 +1816,14 @@ impl PlatformWindow for X11Window {
         }
     }
 
-    fn render_to_image(&self, scene: &Scene) -> anyhow::Result<image::RgbaImage> {
+    fn render_to_pending_image(&self, scene: &Scene) -> anyhow::Result<gpui::PendingImage> {
         self.0
             .state
             .borrow_mut()
             .renderer
             .as_mut()
             .context("The window has no renderer")?
-            .render_to_image(scene)
+            .render_to_pending_image(scene)
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {

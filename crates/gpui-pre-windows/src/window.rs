@@ -1060,11 +1060,11 @@ impl PlatformWindow for WindowsWindow {
             .log_err();
     }
 
-    fn render_to_image(&self, scene: &Scene) -> anyhow::Result<image::RgbaImage> {
+    fn render_to_pending_image(&self, scene: &Scene) -> anyhow::Result<gpui::PendingImage> {
         self.state
             .renderer
             .borrow_mut()
-            .render_to_image(scene, self.state.background_appearance.get())
+            .render_to_pending_image(scene, self.state.background_appearance.get())
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
