@@ -30,6 +30,7 @@ pub(crate) const WM_GPUI_GPU_DEVICE_LOST: u32 = WM_USER + 7;
 pub(crate) const WM_GPUI_DISPLAYS_CHANGED: u32 = WM_USER + 10;
 
 const SIZE_MOVE_LOOP_TIMER_ID: usize = 1;
+const GPU_RECOVERY_TIMER_ID: usize = 2;
 
 /// Coordinates window draws on the UI thread. Owned by the platform and
 /// shared with every window (like `WindowsPlatformState::cursor_visible`),
@@ -264,9 +265,7 @@ impl WindowsWindowInner {
             && let Err(e) = self.state.renderer.borrow_mut().resize(device_size)
         {
             log::error!("Failed to resize renderer, invalidating devices: {}", e);
-            self.state
-                .invalidate_devices
-                .store(true, std::sync::atomic::Ordering::Release);
+            self.state.vsync_requests.invalidate_devices();
         }
         if let Some(mut callback) = self.state.callbacks.resize.take() {
             callback(new_logical_size, scale_factor);
@@ -306,6 +305,13 @@ impl WindowsWindowInner {
                 WindowsDispatcher::execute_runnable(runnable);
             }
             self.handle_paint_msg(handle)
+        } else if wparam.0 == GPU_RECOVERY_TIMER_ID {
+            // SAFETY: The window belongs to this thread.
+            unsafe { KillTimer(Some(handle), GPU_RECOVERY_TIMER_ID) }.log_err();
+            // The forced render draws, and the draw tries the recovery again.
+            self.state.force_render_pending.set(true);
+            self.state.frames.ask();
+            Some(0)
         } else {
             None
         }
@@ -1358,10 +1364,10 @@ impl WindowsWindowInner {
             }
             // Validate the region so a nested message pump doesn't keep
             // re-dispatching WM_PAINT for the still-invalid region in a busy
-            // loop until the in-progress draw unwinds. The vsync thread
-            // re-invalidates every window on each vsync (see
-            // `begin_vsync_thread`), so the deferred frame still gets drawn,
-            // at most one vsync late.
+            // loop until the in-progress draw unwinds. The window asks the
+            // vsync thread for a frame, so the deferred frame still gets
+            // drawn, at most one vsync late.
+            self.state.frames.ask();
             unsafe { ValidateRect(Some(handle), None).ok().log_err() };
             return Some(0);
         };
@@ -1395,9 +1401,22 @@ impl WindowsWindowInner {
             signal_at,
             signal_source,
         });
-        if self.state.renderer.borrow_mut().take_force_render() {
+        let mut renderer = self.state.renderer.borrow_mut();
+        if renderer.take_force_render() {
             self.state.force_render_pending.set(true);
+            self.state.frames.ask();
         }
+        if let Some(delay) = renderer.take_recovery_retry() {
+            let millis = u32::try_from(delay.as_millis()).unwrap_or(u32::MAX);
+            // SAFETY: The window belongs to this thread.
+            if unsafe { SetTimer(Some(handle), GPU_RECOVERY_TIMER_ID, millis, None) } == 0 {
+                log::error!(
+                    "cannot retry the GPU recovery: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+        }
+        drop(renderer);
 
         self.state.callbacks.request_frame.set(Some(request_frame));
         self.update_ime_enabled(handle);

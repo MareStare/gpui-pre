@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use gpui_util::ResultExt;
 use itertools::Itertools;
 use windows::Win32::{
-    Foundation::HMODULE,
+    Foundation::{HANDLE, HMODULE},
     Graphics::{
         Direct3D::{
             D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_10_1,
@@ -11,15 +11,16 @@ use windows::Win32::{
         Direct3D11::{
             D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_DEBUG,
             D3D11_FEATURE_D3D10_X_HARDWARE_OPTIONS, D3D11_FEATURE_DATA_D3D10_X_HARDWARE_OPTIONS,
-            D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
+            D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device, ID3D11Device4, ID3D11DeviceContext,
         },
         Dxgi::{
             CreateDXGIFactory2, DXGI_CREATE_FACTORY_DEBUG, DXGI_CREATE_FACTORY_FLAGS,
             IDXGIAdapter1, IDXGIFactory6,
         },
     },
+    System::Threading::CreateEventW,
 };
-use windows::core::Interface;
+use windows::core::{Interface, Owned};
 
 pub(crate) fn try_to_recover_from_device_lost<T>(mut f: impl FnMut() -> Result<T>) -> Result<T> {
     (0..5)
@@ -202,5 +203,85 @@ fn get_device(
         Err(anyhow::anyhow!(
             "Required feature StructuredBuffer is not supported by GPU/driver"
         ))
+    }
+}
+
+/// An event that the system signals when a Direct3D 11 device is removed,
+/// for example by a driver reset or a GPU timeout. A thread can wait on it
+/// in place of a poll of the device.
+///
+/// See <https://learn.microsoft.com/en-us/windows/win32/api/d3d11_4/nf-d3d11_4-id3d11device4-registerdeviceremovedevent>.
+pub(crate) struct DeviceRemovedEvent {
+    device: ID3D11Device4,
+    cookie: u32,
+    event: Owned<HANDLE>,
+}
+
+impl DeviceRemovedEvent {
+    pub(crate) fn register(device: &ID3D11Device) -> Result<Self> {
+        let device: ID3D11Device4 = device.cast().context("Getting ID3D11Device4")?;
+        // A manual-reset event: the system signals it at most once.
+        // SAFETY: The handle is new and nothing else owns it.
+        let event = unsafe { Owned::new(CreateEventW(None, true, false, None)?) };
+        // SAFETY: The event lives as long as the registration.
+        let cookie = unsafe { device.RegisterDeviceRemovedEvent(*event) }
+            .context("Registering the device removed event")?;
+        Ok(Self {
+            device,
+            cookie,
+            event,
+        })
+    }
+
+    pub(crate) fn handle(&self) -> HANDLE {
+        *self.event
+    }
+}
+
+// SAFETY: A Direct3D 11 device is thread safe, and a kernel event handle
+// works from any thread. See
+// <https://learn.microsoft.com/en-us/windows/win32/direct3d11/overviews-direct3d-11-render-multi-thread-intro>.
+unsafe impl Send for DeviceRemovedEvent {}
+
+impl Drop for DeviceRemovedEvent {
+    fn drop(&mut self) {
+        // SAFETY: The cookie comes from the registration on this device.
+        unsafe { self.device.UnregisterDeviceRemoved(self.cookie) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use windows::Win32::{
+        Foundation::WAIT_TIMEOUT, Graphics::Direct3D::D3D_DRIVER_TYPE_WARP,
+        System::Threading::WaitForSingleObject,
+    };
+
+    use super::*;
+
+    #[test]
+    fn the_device_removed_event_of_a_working_device_is_not_signaled() {
+        let mut device: Option<ID3D11Device> = None;
+        // SAFETY: The out pointer is valid.
+        unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_WARP,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                None,
+            )
+        }
+        .unwrap();
+        let event = DeviceRemovedEvent::register(&device.unwrap()).unwrap();
+        // SAFETY: The handle is a valid event.
+        assert_eq!(
+            unsafe { WaitForSingleObject(event.handle(), 0) },
+            WAIT_TIMEOUT
+        );
     }
 }

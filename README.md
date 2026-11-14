@@ -93,6 +93,15 @@ commit, then rebase the patch commits onto it.
   activation policy before the app shows in the Dock of macOS.
 - Logs: `GPUI_FRAME_LOG` logs the stages of each frame, and
   `GPUI_STARTUP_LOG` the startup stages of the renderers.
+- Frames on demand on Windows: the vsync thread sleeps until a window
+  asks for a frame, and draws only the windows that asked. On every
+  platform, a window asks for a frame once, at the end of the frame or of
+  the update that changed it, and a frame that presents during high-rate
+  input asks for the next one. A touchpad gesture asks for frames from its
+  first contact to its end, and the reset of the viewport after it. The
+  thread wakes on the device removed event of Direct3D 11 to recover from a
+  lost device on an idle app. A wgpu renderer that fails to make a new
+  device tries again after a delay that grows to 2 s.
 
 ## License
 

@@ -133,6 +133,20 @@ struct WindowInvalidatorInner {
     #[cfg(feature = "profiler")]
     pub frame_dirty: FrameDirtyAccumulator,
     pub platform_waker: Option<Rc<dyn Fn()>>,
+    /// A frame of the window runs. It asks for the next frame at its end, so
+    /// a change during the frame does not wake the platform.
+    pub frame_in_progress: bool,
+}
+
+impl WindowInvalidatorInner {
+    /// The waker to call after the window became dirty.
+    fn waker_for_dirty(&self, became_dirty: bool) -> Option<Rc<dyn Fn()>> {
+        if became_dirty && !self.frame_in_progress {
+            self.platform_waker.clone()
+        } else {
+            None
+        }
+    }
 }
 
 /// Per-frame invalidation bookkeeping, drained at draw time and emitted to the
@@ -165,6 +179,7 @@ impl WindowInvalidator {
                 #[cfg(feature = "profiler")]
                 frame_dirty: FrameDirtyAccumulator::default(),
                 platform_waker: None,
+                frame_in_progress: false,
             })),
         }
     }
@@ -178,7 +193,7 @@ impl WindowInvalidator {
             let dirty_at = Self::record_frame_dirty(&mut inner);
             let became_dirty = !inner.dirty;
             inner.dirty = true;
-            let waker = became_dirty.then(|| inner.platform_waker.clone()).flatten();
+            let waker = inner.waker_for_dirty(became_dirty);
             #[cfg(feature = "profiler")]
             let window_id = inner.window_id;
             drop(inner);
@@ -209,7 +224,7 @@ impl WindowInvalidator {
         }
         #[cfg(feature = "profiler")]
         let dirty_at = dirty.then(|| Self::record_frame_dirty(&mut inner));
-        let waker = became_dirty.then(|| inner.platform_waker.clone()).flatten();
+        let waker = inner.waker_for_dirty(became_dirty);
         #[cfg(feature = "profiler")]
         let window_id = inner.window_id;
         drop(inner);
@@ -235,11 +250,27 @@ impl WindowInvalidator {
     /// Wakes the platform's frame-request source so a frame request is
     /// delivered even if the platform stops requesting frames for idle
     /// windows. No-op on platforms without a frame waker.
-    pub fn wake_platform(&self) {
+    fn wake_platform(&self) {
         let waker = self.inner.borrow().platform_waker.clone();
         if let Some(waker) = waker {
             waker();
         }
+    }
+
+    /// Marks the start of a frame of the window. Until its end, nothing asks
+    /// the platform for a frame.
+    fn begin_frame(&self) {
+        self.inner.borrow_mut().frame_in_progress = true;
+    }
+
+    /// Marks the end of a frame of the window. The flush of effects after
+    /// it asks for the next frame while demand remains.
+    fn end_frame(&self) {
+        self.inner.borrow_mut().frame_in_progress = false;
+    }
+
+    fn frame_in_progress(&self) -> bool {
+        self.inner.borrow().frame_in_progress
     }
 
     pub fn set_phase(&self, phase: DrawPhase) {
@@ -1904,6 +1935,7 @@ impl Window {
             let needs_present = needs_present.clone();
             let next_frame_callbacks = next_frame_callbacks.clone();
             let input_rate_tracker = input_rate_tracker.clone();
+            // A forced render of a request that came during a draw.
             let mut deferred_force_render = false;
             let mut frame_pacer = FramePacer::default();
             move |request_frame_options| {
@@ -1946,33 +1978,46 @@ impl Window {
                 // force a second, redundant render on the next frame.
                 let force_render =
                     mem::take(&mut deferred_force_render) || request_frame_options.force_render;
+                invalidator.begin_frame();
+                // Ends the frame. The flush of effects at the end of the update
+                // asks for the next frame while demand remains.
+                let end_frame = |cx: &mut crate::AsyncApp, refresh: bool| {
+                    invalidator.end_frame();
+                    handle
+                        .update(cx, |_, window, _| {
+                            if refresh {
+                                window.refresh();
+                            }
+                        })
+                        .with_context(|| format!("ending frame of window {:?}", handle.window_id()))
+                        .log_err();
+                };
 
-                let power_state = handle
-                    .update(&mut cx, |_, _, cx| (cx.thermal_state(), cx.power_mode()))
+                let Some((thermal_state, power_mode, frame_demand)) = handle
+                    .update(&mut cx, |_, window, cx| {
+                        (cx.thermal_state(), cx.power_mode(), window.frame_demand())
+                    })
                     .with_context(|| {
                         format!(
                             "reading power state for frame request for window {:?}",
                             handle.window_id()
                         )
                     })
-                    .log_err();
+                    .log_err()
+                else {
+                    invalidator.end_frame();
+                    return;
+                };
 
                 // Keep presenting briefly after high-rate input to prevent display
                 // underclocking, but subject to the same power limits as redraws.
-                let high_rate_input = input_rate_tracker.borrow_mut().is_high_rate();
-                let has_next_frame_callbacks = !next_frame_callbacks.borrow().is_empty();
-                let has_frame_demand = invalidator.is_dirty()
-                    || force_render
-                    || has_next_frame_callbacks
-                    || request_frame_options.require_presentation
-                    || needs_present.get()
-                    || high_rate_input;
+                let high_rate_input = input_rate_tracker.borrow().is_high_rate();
+                let has_frame_demand =
+                    frame_demand || force_render || request_frame_options.require_presentation;
 
                 let should_throttle = !request_frame_options.require_presentation;
                 let inactive_without_high_rate_input =
                     should_throttle && !active.get() && !high_rate_input;
-                let (thermal_state, power_mode) =
-                    power_state.unwrap_or((ThermalState::Nominal, crate::PowerMode::Unknown));
                 let min_frame_interval = minimum_frame_interval(
                     should_throttle,
                     inactive_without_high_rate_input,
@@ -1987,23 +2032,10 @@ impl Window {
                 // Idle display-link ticks must neither consume a frame slot nor
                 // wake a demand-driven frame source.
                 if has_frame_demand && frame_pacer.should_defer(now, min_frame_interval) {
-                    // Don't lose a pending forced render to throttling.
-                    deferred_force_render |= force_render;
-                    // Deferred by throttling: ask demand-driven platforms to retry.
-                    handle
-                        .update(&mut cx, |_, window, _| {
-                            window.platform_window.schedule_frame();
-                        })
-                        .with_context(|| {
-                            format!(
-                                "rescheduling throttled frame for window {:?}",
-                                handle.window_id()
-                            )
-                        })
-                        .log_err();
-                    // The demand is still unserved; platforms that stop
-                    // requesting frames for idle windows need a wakeup to retry.
-                    invalidator.wake_platform();
+                    // The demand is still unserved. A refresh keeps a forced
+                    // render for the deferred frame, and the end of this frame
+                    // asks for that frame.
+                    end_frame(&mut cx, force_render);
                     #[cfg(feature = "profiler")]
                     profiler::journal::record_frame_skipped(
                         window_id,
@@ -2041,7 +2073,7 @@ impl Window {
                 }
 
                 let should_draw = invalidator.is_dirty() || force_render;
-                let needs_present = request_frame_options.require_presentation
+                let should_present = request_frame_options.require_presentation
                     || needs_present.get()
                     || high_rate_input;
                 if should_draw {
@@ -2069,7 +2101,7 @@ impl Window {
                             })
                             .log_err();
                     })
-                } else if needs_present {
+                } else if should_present {
                     handle
                         .update(&mut cx, |_, window, _| window.present())
                         .with_context(|| {
@@ -2078,30 +2110,7 @@ impl Window {
                         .log_err();
                 }
 
-                handle
-                    .update(&mut cx, |_, window, _| {
-                        if window.invalidator.is_dirty()
-                            || !window.next_frame_callbacks.borrow().is_empty()
-                        {
-                            window.platform_window.schedule_frame();
-                        }
-                    })
-                    .with_context(|| {
-                        format!(
-                            "scheduling follow-up frame for window {:?}",
-                            handle.window_id()
-                        )
-                    })
-                    .log_err();
-
-                // Platforms that stop requesting frames for idle windows only
-                // deliver another request after a wakeup. If demand remains
-                // after this frame (the window was re-invalidated mid-draw, or
-                // animations scheduled next-frame callbacks), re-arm the frame
-                // source explicitly.
-                if invalidator.is_dirty() || !next_frame_callbacks.borrow().is_empty() {
-                    invalidator.wake_platform();
-                }
+                end_frame(&mut cx, false);
                 #[cfg(feature = "profiler")]
                 if !should_draw {
                     profiler::journal::record_frame_skipped(
@@ -2524,6 +2533,25 @@ impl Window {
         }
     }
 
+    /// Whether the window has work for a frame: a draw, a present or a
+    /// next-frame callback. High-rate input keeps the display presenting.
+    fn frame_demand(&self) -> bool {
+        self.invalidator.is_dirty()
+            || self.needs_present.get()
+            || !self.next_frame_callbacks.borrow().is_empty()
+            || self.input_rate_tracker.borrow().is_high_rate()
+    }
+
+    /// Asks the platform for a frame while the window has demand for one. A
+    /// running frame of the window asks at its end instead.
+    pub(crate) fn request_frame_for_demand(&self) {
+        if self.invalidator.frame_in_progress() || !self.frame_demand() {
+            return;
+        }
+        self.platform_window.schedule_frame();
+        self.invalidator.wake_platform();
+    }
+
     /// Whether the platform is presenting this window's frames (see
     /// [`WindowVisibility`]).
     pub fn visibility(&self) -> WindowVisibility {
@@ -2938,11 +2966,8 @@ impl Window {
 
     /// Schedule the given closure to be run directly after the current frame is rendered.
     pub fn on_next_frame(&self, callback: impl FnOnce(&mut Window, &mut App) + 'static) {
+        // The flush of effects after the current update asks for the frame.
         RefCell::borrow_mut(&self.next_frame_callbacks).push(Box::new(callback));
-        self.platform_window.schedule_frame();
-        // Next-frame callbacks create frame demand without dirtying the
-        // window, so the platform's frame source must be woken explicitly.
-        self.invalidator.wake_platform();
     }
 
     /// Schedule a frame to be drawn on the next animation frame.
@@ -8631,6 +8656,10 @@ mod tests {
             })
             .unwrap();
         let test_window = cx.test_window(window.into());
+        // Serve the first frame: a window with frame demand asks again at each
+        // update.
+        test_window.simulate_active_status_change(true);
+        while test_window.simulate_scheduled_frame() {}
         let frame_wake_count = test_window.frame_wake_count();
 
         test_window.simulate_visibility_change(WindowVisibility::Hidden);
@@ -9166,7 +9195,42 @@ mod tests {
             "notifying a view in an idle window must wake the frame source"
         );
 
-        // Serving that demand returns to idle without further wakes.
+        // The frame that serves that demand asks for no frame after it.
+        let baseline = test_window.frame_wake_count();
+        test_window.simulate_frame_request(RequestFrameOptions::default());
+        assert_eq!(
+            test_window.frame_wake_count(),
+            baseline,
+            "a drawn frame must ask for no frame after it"
+        );
+
+        // A change inside a frame asks for one frame, at the end of the frame.
+        window
+            .update(cx, |_, window, _| {
+                window.on_next_frame(|window, _| window.refresh());
+            })
+            .unwrap();
+        let baseline = test_window.frame_wake_count();
+        test_window.simulate_frame_request(RequestFrameOptions::default());
+        assert_eq!(
+            test_window.frame_wake_count(),
+            baseline,
+            "a frame that draws the change of its callback must ask for no frame after it"
+        );
+        window
+            .update(cx, |_, window, _| {
+                window.on_next_frame(|window, _| {
+                    window.on_next_frame(|_, _| {});
+                });
+            })
+            .unwrap();
+        let baseline = test_window.frame_wake_count();
+        test_window.simulate_frame_request(RequestFrameOptions::default());
+        assert_eq!(
+            test_window.frame_wake_count(),
+            baseline + 1,
+            "a callback that asks for the next frame must get one ask"
+        );
         test_window.simulate_frame_request(RequestFrameOptions::default());
         let baseline = test_window.frame_wake_count();
         test_window.simulate_frame_request(RequestFrameOptions::default());
@@ -9277,7 +9341,7 @@ mod tests {
 
         cx.update_window(window.into(), |_, window, _| {
             window.active.set(true);
-            window.on_next_frame(|_, _| {});
+            window.on_next_frame(|window, _| window.refresh());
         })
         .unwrap();
         assert!(
@@ -9309,6 +9373,44 @@ mod tests {
         assert!(
             test_window.frame_scheduled(),
             "a rendered scene awaiting presentation must wake the render loop"
+        );
+    }
+
+    #[gpui::test]
+    fn high_rate_input_keeps_the_render_loop_presenting(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| Empty);
+        let test_window = cx.test_window(window.into());
+
+        assert!(test_window.simulate_scheduled_frame());
+        assert!(test_window.simulate_scheduled_frame());
+        assert!(!test_window.frame_scheduled());
+
+        cx.update_window(window.into(), |_, window, _| {
+            window.active.set(true);
+            let mut tracker = window.input_rate_tracker.borrow_mut();
+            while !tracker.is_high_rate() {
+                tracker.record_input();
+            }
+        })
+        .unwrap();
+
+        // Each frame presents. A frame source that does not tie the next
+        // frame to a present must get a wake for it.
+        let baseline = test_window.frame_wake_count();
+        test_window.simulate_frame_request(RequestFrameOptions::default());
+        assert!(
+            test_window.frame_wake_count() > baseline,
+            "high-rate input must ask for the next frame after a present"
+        );
+
+        cx.update_window(window.into(), |_, window, _| {
+            window.input_rate_tracker.borrow_mut().sustain_until = scheduler::Instant::now();
+        })
+        .unwrap();
+        while test_window.simulate_scheduled_frame() {}
+        assert!(
+            !test_window.frame_scheduled(),
+            "the render loop must park when the input rate drops"
         );
     }
 

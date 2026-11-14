@@ -2,7 +2,7 @@
 //! `GPUI_RENDERER=dx11` picks the Direct3D 11 renderer. A window whose wgpu
 //! renderer fails to start uses the Direct3D 11 renderer too.
 
-use std::{num::NonZeroIsize, sync::Arc};
+use std::{num::NonZeroIsize, sync::Arc, time::Duration};
 
 use anyhow::{Context as _, Result};
 use gpui::{
@@ -88,6 +88,16 @@ impl WindowRenderer {
         match self {
             Self::DirectX(_) => false,
             Self::Wgpu(renderer) => renderer.take_force_render(),
+        }
+    }
+
+    /// The delay after which the window must force a render, so that the
+    /// renderer tries again to make its lost device. Clears the delay.
+    pub(crate) fn take_recovery_retry(&mut self) -> Option<Duration> {
+        match self {
+            // The vsync thread recovers the DirectX devices.
+            Self::DirectX(_) => None,
+            Self::Wgpu(renderer) => renderer.take_recovery_retry(),
         }
     }
 

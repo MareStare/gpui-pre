@@ -2,6 +2,7 @@
 //! renderer. The windows of a thread share one device.
 
 use std::rc::Rc;
+use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use gpui::{DevicePixels, Scene, Size};
@@ -17,10 +18,38 @@ thread_local! {
 /// The largest side of a window surface.
 const MAX_SIDE: i32 = 16384;
 
+/// The delays between the tries to make a lost device again. Each failed try
+/// doubles the delay, up to a limit. The delays keep a window from a busy loop
+/// while the GPU is gone.
+#[derive(Default)]
+struct RecoveryBackoff {
+    last_delay: Option<Duration>,
+}
+
+impl RecoveryBackoff {
+    const FIRST_DELAY: Duration = Duration::from_millis(100);
+    const MAX_DELAY: Duration = Duration::from_secs(2);
+
+    /// Records a failed try. Returns the delay until the next try.
+    fn failed(&mut self) -> Duration {
+        let delay = self
+            .last_delay
+            .map_or(Self::FIRST_DELAY, |delay| (delay * 2).min(Self::MAX_DELAY));
+        self.last_delay = Some(delay);
+        delay
+    }
+
+    fn succeeded(&mut self) {
+        self.last_delay = None;
+    }
+}
+
 pub struct WgpuWindowRenderer {
     renderer: WgpuRenderer,
     source: Box<dyn SurfaceSource>,
     force_render: bool,
+    recovery: RecoveryBackoff,
+    recovery_retry: Option<Duration>,
 }
 
 impl WgpuWindowRenderer {
@@ -74,6 +103,8 @@ impl WgpuWindowRenderer {
             renderer,
             source,
             force_render: false,
+            recovery: RecoveryBackoff::default(),
+            recovery_retry: None,
         })
     }
 
@@ -87,13 +118,22 @@ impl WgpuWindowRenderer {
 
     /// Draws the scene. After a lost device, it makes a new device and draws
     /// nothing. The new device has an empty atlas, so the next frame must build
-    /// the scene again: see `take_force_render`.
+    /// the scene again: see `take_force_render`. When it cannot make the
+    /// device, it tells the window when to try again: see
+    /// `take_recovery_retry`.
     pub fn draw(&mut self, scene: &Scene) {
         if self.renderer.device_lost() {
-            if let Err(error) = self.renderer.recover_from(&*self.source) {
-                log::warn!("GPU recovery failed, will retry on next frame: {error:#}");
+            match self.renderer.recover_from(&*self.source) {
+                Ok(()) => {
+                    self.recovery.succeeded();
+                    self.force_render = true;
+                }
+                Err(error) => {
+                    let delay = self.recovery.failed();
+                    log::warn!("GPU recovery failed, will retry in {delay:?}: {error:#}");
+                    self.recovery_retry = Some(delay);
+                }
             }
-            self.force_render = true;
             return;
         }
         self.renderer.draw(scene);
@@ -107,7 +147,41 @@ impl WgpuWindowRenderer {
         std::mem::take(&mut self.force_render)
     }
 
+    /// The delay after which the window must force a render, so that the
+    /// renderer tries again to make its lost device. Clears the delay.
+    pub fn take_recovery_retry(&mut self) -> Option<Duration> {
+        self.recovery_retry.take()
+    }
+
     pub fn render_to_image(&mut self, scene: &Scene) -> Result<image::RgbaImage> {
         self.renderer.render_to_image(scene)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::RecoveryBackoff;
+
+    #[test]
+    fn failed_recoveries_wait_longer_up_to_a_limit() {
+        let mut backoff = RecoveryBackoff::default();
+        let delays: Vec<_> = (0..7).map(|_| backoff.failed()).collect();
+        let ms = Duration::from_millis;
+        assert_eq!(
+            delays,
+            [
+                ms(100),
+                ms(200),
+                ms(400),
+                ms(800),
+                ms(1600),
+                ms(2000),
+                ms(2000)
+            ]
+        );
+        backoff.succeeded();
+        assert_eq!(backoff.failed(), ms(100), "a success resets the delay");
     }
 }
