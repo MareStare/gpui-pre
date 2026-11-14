@@ -6,7 +6,9 @@ use std::{num::NonZeroIsize, rc::Rc, sync::Arc};
 
 use anyhow::{Context as _, Result};
 use gpui::{DevicePixels, GpuSpecs, PlatformAtlas, Scene, Size, WindowBackgroundAppearance};
-use gpui_wgpu::{GpuContext, TextContrast, WgpuRenderer, WgpuSurfaceConfig, time_startup_stage};
+use gpui_wgpu::{
+    GpuContext, TextContrast, WgpuRenderer, WgpuSurfaceConfig, time_startup_stage, wgpu_requested,
+};
 use raw_window_handle as rwh;
 
 use crate::{DirectXDevices, DirectXRenderer, HWND};
@@ -19,10 +21,6 @@ pub(crate) enum WindowRenderer {
 thread_local! {
     /// The windows of the thread share one wgpu device.
     static WGPU_CONTEXT: GpuContext = Rc::default();
-}
-
-fn wgpu_requested() -> bool {
-    !std::env::var("GPUI_RENDERER").is_ok_and(|value| value == "dx11")
 }
 
 impl WindowRenderer {
@@ -43,7 +41,7 @@ impl WindowRenderer {
         disable_direct_composition: bool,
         size: Size<DevicePixels>,
     ) -> Result<Self> {
-        if wgpu_requested() {
+        if wgpu_requested("dx11") {
             match Self::new_wgpu(hwnd, size) {
                 Ok(renderer) => return Ok(renderer),
                 Err(error) => log::error!("{error:#}: falling back to Direct3D 11"),
