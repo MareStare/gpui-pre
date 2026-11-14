@@ -3313,7 +3313,10 @@ impl Window {
     /// callback before it.
     ///
     /// On macOS, it turns off the mouse coalescing of AppKit for the whole
-    /// app, so that each pen sample gives a mouse event.
+    /// app, so that each pen sample gives a mouse event. On Windows,
+    /// [`App::set_pen_api`] picks the system API, and the window opens a
+    /// WinTab context when that API reads WinTab. Set the API first, so a
+    /// window of Windows Ink opens no context.
     pub fn on_pen(&self, callback: impl FnMut(PenEvent) + 'static) {
         self.platform_window.on_pen(Box::new(callback));
     }
