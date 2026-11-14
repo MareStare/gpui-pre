@@ -91,6 +91,12 @@ commit, then rebase the patch commits onto it.
 - Cursor warp: `Window::set_mouse_position` moves the mouse cursor of the
   system to a point of the window. Wayland uses `wp_pointer_warp_v1`
   while the pointer is over the window, and the compositor may refuse it.
+- Pen input on Windows: `Window::on_pen` reads the pointer messages of
+  Windows Ink, with the whole history of each message, and the packets
+  of a WinTab context. `App::set_pen_api` picks Windows Ink, WinTab, or
+  WinTab until Windows Ink gives the first touch of a pen. A thread
+  other than the UI thread opens each WinTab context, so a driver that
+  does not answer blocks no window.
 
 ## License
 
