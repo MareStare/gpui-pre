@@ -101,6 +101,9 @@ pub(crate) struct WindowsPlatformState {
     /// Shared with each window to coordinate draws across windows on the UI
     /// thread; see [`DrawCoordinator`].
     pub(crate) draw_coordinator: Rc<DrawCoordinator>,
+    /// Shared with each window, so a window reads the pen API on each pen
+    /// message.
+    pub(crate) pen_api: Rc<crate::pen::PenApiState>,
     directx_devices: RefCell<Option<DirectXDevices>>,
     low_power_mode_enabled: Cell<bool>,
 }
@@ -133,6 +136,7 @@ impl WindowsPlatformState {
             current_cursor_image: RefCell::default(),
             cursor_visible: Arc::new(AtomicBool::new(true)),
             draw_coordinator: Rc::new(DrawCoordinator::new()),
+            pen_api: Rc::default(),
             directx_devices: RefCell::new(directx_devices),
             low_power_mode_enabled: Cell::new(false),
             menus: RefCell::new(Vec::new()),
@@ -331,6 +335,7 @@ impl WindowsPlatform {
             directx_devices: self.inner.state.directx_devices.borrow().clone().unwrap(),
             invalidate_devices: self.invalidate_devices.clone(),
             draw_coordinator: self.inner.state.draw_coordinator.clone(),
+            pen_api: self.inner.state.pen_api.clone(),
         }
     }
 
@@ -1036,6 +1041,22 @@ impl Platform for WindowsPlatform {
         }
     }
 
+    fn set_pen_api(&self, api: PenApi) {
+        self.inner.state.pen_api.set(api);
+        // The pen callbacks run with no lock held.
+        let windows: Vec<HWND> = self
+            .raw_window_handles
+            .read()
+            .iter()
+            .map(TrackedWindow::as_raw)
+            .collect();
+        for hwnd in windows {
+            if let Some(window) = window_from_hwnd(hwnd) {
+                window.state.pen.use_api(hwnd);
+            }
+        }
+    }
+
     fn is_cursor_visible(&self) -> bool {
         self.inner.state.cursor_visible.load(Ordering::Relaxed)
     }
@@ -1506,6 +1527,8 @@ pub(crate) struct WindowCreationInfo {
     pub(crate) invalidate_devices: Arc<AtomicBool>,
     /// Shared with [`WindowsPlatformState::draw_coordinator`] and every other window.
     pub(crate) draw_coordinator: Rc<DrawCoordinator>,
+    /// Shared with [`WindowsPlatformState::pen_api`] and every other window.
+    pub(crate) pen_api: Rc<crate::pen::PenApiState>,
 }
 
 struct PlatformWindowCreateContext {

@@ -28,6 +28,7 @@ pub(crate) const WM_GPUI_FORCE_UPDATE_WINDOW: u32 = WM_USER + 5;
 pub(crate) const WM_GPUI_KEYBOARD_LAYOUT_CHANGED: u32 = WM_USER + 6;
 pub(crate) const WM_GPUI_GPU_DEVICE_LOST: u32 = WM_USER + 7;
 pub(crate) const WM_GPUI_DISPLAYS_CHANGED: u32 = WM_USER + 10;
+pub(crate) const WM_GPUI_WINTAB_OPENED: u32 = WM_USER + 11;
 
 const SIZE_MOVE_LOOP_TIMER_ID: usize = 1;
 
@@ -85,6 +86,9 @@ impl WindowsWindowInner {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
+        // The pen events go first: the window reads them on the mouse
+        // events that the default window procedure makes from the message.
+        self.state.pen.handle_msg(handle, msg, wparam, lparam);
         let handled = match msg {
             // `DefWindowProc` answers `MA_NOACTIVATE` for a left click on `HTCAPTION`.
             // The activation is only triggered when `DefWindowProc` handles the following `WM_NCLBUTTONDOWN`.
@@ -157,6 +161,7 @@ impl WindowsWindowInner {
             WM_SHOWWINDOW => self.handle_window_visibility_changed(handle, wparam),
             DM_POINTERHITTEST => self.handle_dm_pointer_hit_test(wparam),
             WM_GETOBJECT => self.handle_wm_getobject(wparam, lparam),
+            WM_GPUI_WINTAB_OPENED => self.state.pen.handle_wintab_opened(),
             WM_GPUI_CURSOR_STYLE_CHANGED
             | WM_GPUI_FORCE_UPDATE_WINDOW
             | WM_GPUI_GPU_DEVICE_LOST => self.handle_gpui_events(handle, msg, wparam, lparam),

@@ -41,7 +41,7 @@ use crate::{
     Action, AnyWindowHandle, App, AsyncWindowContext, BackgroundExecutor, Bounds, Corners,
     DEFAULT_WINDOW_SIZE, DevicePixels, DispatchEventResult, Edges, ExternalDragPayload, Font,
     FontId, FontMetrics, FontRun, ForegroundExecutor, GlyphId, GpuFailure, GpuSpecs, Hsla,
-    ImageSource, Keymap, LineLayout, MissingGlyphSink, PenEvent, Pixels, PlatformGestures,
+    ImageSource, Keymap, LineLayout, MissingGlyphSink, PenApi, PenEvent, Pixels, PlatformGestures,
     PlatformInput, Point, Priority, RenderGlyphParams, RenderImage, RenderImageParams,
     RenderSvgParams, Scene, ShapedGlyph, ShapedRun, SharedString, Size, SvgRenderer,
     SystemWindowTab, Task, Window, WindowControlArea, hash, point, px, size,
@@ -391,6 +391,9 @@ pub trait Platform: 'static {
     fn activate(&self, ignoring_other_apps: bool);
     /// Sets the initial or current activation policy. Has no effect outside macOS.
     fn set_activation_policy(&self, _policy: ActivationPolicy) {}
+    /// Picks the system API that gives the pen events of all windows. The
+    /// pen of each window leaves. Has no effect outside Windows.
+    fn set_pen_api(&self, _api: PenApi) {}
     fn hide(&self);
     fn hide_other_apps(&self);
     fn unhide_other_apps(&self);

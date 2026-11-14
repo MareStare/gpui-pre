@@ -86,6 +86,7 @@ pub struct WindowsWindowState {
     pub invalidate_devices: Arc<AtomicBool>,
     /// Shared with [`WindowsPlatformState::draw_coordinator`] and every other window.
     pub(crate) draw_coordinator: Rc<DrawCoordinator>,
+    pub(crate) pen: crate::pen::WindowPen,
     fullscreen: Cell<Option<StyleAndBounds>>,
     initial_placement: Cell<Option<WindowOpenStatus>>,
     hwnd: HWND,
@@ -124,6 +125,7 @@ impl WindowsWindowState {
         disable_direct_composition: bool,
         invalidate_devices: Arc<AtomicBool>,
         draw_coordinator: Rc<DrawCoordinator>,
+        pen_api: Rc<crate::pen::PenApiState>,
     ) -> Result<Self> {
         let scale_factor = {
             let monitor_dpi = unsafe { GetDpiForWindow(hwnd) } as f32;
@@ -192,6 +194,7 @@ impl WindowsWindowState {
             hwnd,
             invalidate_devices,
             draw_coordinator,
+            pen: crate::pen::WindowPen::new(pen_api),
             direct_manipulation,
             a11y: RefCell::new(None),
             mouse_position: Cell::new(Point::default()),
@@ -284,6 +287,7 @@ impl WindowsWindowInner {
             context.disable_direct_composition,
             context.invalidate_devices.clone(),
             context.draw_coordinator.clone(),
+            context.pen_api.clone(),
         )?;
 
         Ok(Rc::new(Self {
@@ -435,6 +439,7 @@ struct WindowCreateContext {
     directx_devices: DirectXDevices,
     invalidate_devices: Arc<AtomicBool>,
     draw_coordinator: Rc<DrawCoordinator>,
+    pen_api: Rc<crate::pen::PenApiState>,
     parent_hwnd: Option<HWND>,
 }
 
@@ -463,6 +468,7 @@ impl WindowsWindow {
             directx_devices,
             invalidate_devices,
             draw_coordinator,
+            pen_api,
         } = creation_info;
         register_window_class(icon);
         let parent_hwnd = if params.kind == WindowKind::Dialog {
@@ -548,6 +554,7 @@ impl WindowsWindow {
             directx_devices,
             invalidate_devices,
             draw_coordinator,
+            pen_api,
             parent_hwnd,
         };
         let creation_result = gpui_wgpu::time_startup_stage("create-window", || unsafe {
@@ -993,6 +1000,10 @@ impl PlatformWindow for WindowsWindow {
 
     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> DispatchEventResult>) {
         self.state.callbacks.input.set(Some(callback));
+    }
+
+    fn on_pen(&self, callback: Box<dyn FnMut(PenEvent)>) {
+        self.state.pen.listen(self.0.hwnd, callback);
     }
 
     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>) {

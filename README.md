@@ -91,6 +91,12 @@ commit, then rebase the patch commits onto it.
   while the pointer is over the window, and the compositor may refuse it.
 - Start activation policy: `Application::with_activation_policy` sets the
   activation policy before the app shows in the Dock of macOS.
+- Pen input on Windows: `Window::on_pen` reads the pointer messages of
+  Windows Ink, with the whole history of each message, and the packets
+  of a WinTab context. `App::set_pen_api` picks Windows Ink, WinTab, or
+  WinTab until Windows Ink gives the first touch of a pen. A thread
+  other than the UI thread opens each WinTab context, so a driver that
+  does not answer blocks no window.
 - Logs: `GPUI_FRAME_LOG` logs the stages of each frame, and
   `GPUI_STARTUP_LOG` the startup stages of the renderers.
 

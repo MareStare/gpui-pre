@@ -13,6 +13,7 @@ mod display;
 mod events;
 mod image_cursor;
 mod keyboard;
+mod pen;
 mod platform;
 mod renderer;
 mod system_notifications;
@@ -20,6 +21,7 @@ mod system_settings;
 mod util;
 mod vsync;
 mod window;
+mod wintab;
 mod wrapper;
 
 pub(crate) use clipboard::*;
