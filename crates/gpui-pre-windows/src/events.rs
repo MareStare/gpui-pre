@@ -264,9 +264,7 @@ impl WindowsWindowInner {
             && let Err(e) = self.state.renderer.borrow_mut().resize(device_size)
         {
             log::error!("Failed to resize renderer, invalidating devices: {}", e);
-            self.state
-                .invalidate_devices
-                .store(true, std::sync::atomic::Ordering::Release);
+            self.state.frames.requests().invalidate_devices();
         }
         if let Some(mut callback) = self.state.callbacks.resize.take() {
             callback(new_logical_size, scale_factor);
@@ -1358,10 +1356,10 @@ impl WindowsWindowInner {
             }
             // Validate the region so a nested message pump doesn't keep
             // re-dispatching WM_PAINT for the still-invalid region in a busy
-            // loop until the in-progress draw unwinds. The vsync thread
-            // re-invalidates every window on each vsync (see
-            // `begin_vsync_thread`), so the deferred frame still gets drawn,
-            // at most one vsync late.
+            // loop until the in-progress draw unwinds. The window asks the
+            // vsync thread for a frame, so the deferred frame still gets
+            // drawn, at most one vsync late.
+            self.state.frames.ask();
             unsafe { ValidateRect(Some(handle), None).ok().log_err() };
             return Some(0);
         };
@@ -1397,6 +1395,7 @@ impl WindowsWindowInner {
         });
         if self.state.renderer.borrow_mut().take_force_render() {
             self.state.force_render_pending.set(true);
+            self.state.frames.ask();
         }
 
         self.state.callbacks.request_frame.set(Some(request_frame));

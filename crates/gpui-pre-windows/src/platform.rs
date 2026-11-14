@@ -42,6 +42,7 @@ use gpui::*;
 struct TrackedWindow {
     handle: SafeHwnd,
     frame_signal: Arc<PlatformFrameSignal>,
+    frames: Arc<WindowFrames>,
 }
 
 impl TrackedWindow {
@@ -55,8 +56,8 @@ pub struct WindowsPlatform {
     raw_window_handles: Arc<RwLock<SmallVec<[TrackedWindow; 4]>>>,
     /// The windowing mode to start in, applied when `run` starts. Windowed when unset.
     initial_windowing: RefCell<Option<WindowingRequest>>,
-    /// Set to stop the current `VSyncProvider` thread, which runs while windowed.
-    vsync_stop: RefCell<Option<Arc<AtomicBool>>>,
+    /// The requests to the current `VSyncProvider` thread, which runs while windowed.
+    vsync_requests: RefCell<Option<Arc<VSyncRequests>>>,
     // The below members will never change throughout the entire lifecycle of the app.
     /// Created with `headless()`: never windowed.
     headless: bool,
@@ -67,9 +68,6 @@ pub struct WindowsPlatform {
     /// devices.
     text_system: Arc<DirectWriteTextSystem>,
     drop_target_helper: Option<IDropTargetHelper>,
-    /// Flag to instruct the `VSyncProvider` thread to invalidate the directx devices
-    /// as resizing them has failed, causing us to have lost at least the render target.
-    invalidate_devices: Arc<AtomicBool>,
     handle: HWND,
     suspend_resume_notification: RefCell<Option<HPOWERNOTIFY>>,
     power_saving_notification: RefCell<Option<HPOWERNOTIFY>>,
@@ -275,7 +273,7 @@ impl WindowsPlatform {
             handle,
             raw_window_handles,
             initial_windowing: RefCell::new(None),
-            vsync_stop: RefCell::new(None),
+            vsync_requests: RefCell::new(None),
             headless,
             icon,
             background_executor,
@@ -286,7 +284,6 @@ impl WindowsPlatform {
             disable_direct_composition,
             has_package_identity: has_package_identity(),
             drop_target_helper,
-            invalidate_devices: Arc::new(AtomicBool::new(false)),
             app_identity: RefCell::new(None),
             system_notifications: RefCell::new(SystemNotificationState::new()),
         })
@@ -329,8 +326,8 @@ impl WindowsPlatform {
             platform_window_handle: self.handle,
             disable_direct_composition: self.disable_direct_composition,
             directx_devices: self.inner.state.directx_devices.borrow().clone().unwrap(),
-            invalidate_devices: self.invalidate_devices.clone(),
             draw_coordinator: self.inner.state.draw_coordinator.clone(),
+            vsync_requests: self.vsync_requests.borrow().clone().unwrap(),
         }
     }
 
@@ -428,47 +425,56 @@ impl WindowsPlatform {
             .context("Creating DirectX devices")?;
         self.text_system.handle_gpu_lost(&devices)?;
         *self.inner.state.directx_devices.borrow_mut() = Some(devices);
-        self.begin_vsync_thread();
-        Ok(())
+        self.begin_vsync_thread()
     }
 
     /// Stops vsync and releases the DirectX devices. No window may be open.
     fn detach_gpu(&self) {
-        if let Some(stop) = self.vsync_stop.borrow_mut().take() {
-            // Not joined: the thread can be sending this thread a message. It exits after its
-            // next vsync, and drops its reference to the devices then.
-            stop.store(true, Ordering::Release);
+        if let Some(requests) = self.vsync_requests.borrow_mut().take() {
+            // Not joined: the thread can be sending this thread a message. It exits when it
+            // wakes, and drops its reference to the devices then.
+            requests.stop();
         }
         self.text_system.release_gpu();
         self.inner.state.directx_devices.borrow_mut().take();
     }
 
-    fn begin_vsync_thread(&self) {
+    fn begin_vsync_thread(&self) -> Result<()> {
         let Some(directx_devices) = self.inner.state.directx_devices.borrow().clone() else {
-            return;
+            return Ok(());
         };
-        let stop = Arc::new(AtomicBool::new(false));
-        *self.vsync_stop.borrow_mut() = Some(stop.clone());
+        let requests = Arc::new(VSyncRequests::new().context("Creating the vsync requests")?);
+        *self.vsync_requests.borrow_mut() = Some(requests.clone());
         let mut directx_device = directx_devices;
         let platform_window: SafeHwnd = self.handle.into();
         let validation_number = self.inner.validation_number;
         let all_windows = Arc::downgrade(&self.raw_window_handles);
         let text_system = Arc::downgrade(&self.text_system);
-        let invalidate_devices = self.invalidate_devices.clone();
 
         std::thread::Builder::new()
             .name("VSyncProvider".to_owned())
             .spawn(move || {
                 let vsync_provider = VSyncProvider::new();
+                let mut device_removed = register_device_removed(&directx_device.device);
+                // Each vsync draws only the windows that asked for a frame. A window
+                // asks again while it has more to draw.
                 loop {
-                    let signal_source = vsync_provider.wait_for_vsync();
-                    let signal_at = PlatformFrameSignal::capture(scheduler::Instant::now);
-                    if stop.load(Ordering::Acquire) {
-                        break;
-                    }
-                    if check_device_lost(&directx_device.device)
-                        || invalidate_devices.fetch_and(false, Ordering::Acquire)
-                    {
+                    let wake =
+                        requests.wait(device_removed.as_ref().map(DeviceRemovedEvent::handle));
+                    let devices_lost = match wake {
+                        VSyncWake::Stop => break,
+                        VSyncWake::DevicesLost => {
+                            check_device_lost(&directx_device.device);
+                            true
+                        }
+                        // Without the event, a frame finds the loss.
+                        VSyncWake::Frame => {
+                            device_removed.is_none() && check_device_lost(&directx_device.device)
+                        }
+                    };
+                    if devices_lost {
+                        // The registration holds the old device. Drop it first.
+                        drop(device_removed.take());
                         if let Err(err) = handle_gpu_device_lost(
                             &mut directx_device,
                             platform_window.as_raw(),
@@ -478,11 +484,18 @@ impl WindowsPlatform {
                         ) {
                             panic!("Device lost: {err}");
                         }
+                        device_removed = register_device_removed(&directx_device.device);
                     }
+                    // A frame request can share the wake of a device loss.
+                    let signal_source = vsync_provider.wait_for_vsync();
+                    let signal_at = PlatformFrameSignal::capture(scheduler::Instant::now);
                     let Some(all_windows) = all_windows.upgrade() else {
                         break;
                     };
                     for hwnd in all_windows.read().iter() {
+                        if !hwnd.frames.take() {
+                            continue;
+                        }
                         unsafe {
                             if let Some(signal_at) = signal_at {
                                 if IsWindowVisible(hwnd.as_raw()).as_bool()
@@ -501,7 +514,8 @@ impl WindowsPlatform {
                     }
                 }
             })
-            .unwrap();
+            .context("Starting the vsync thread")?;
+        Ok(())
     }
 }
 
@@ -771,6 +785,7 @@ impl Platform for WindowsPlatform {
         self.raw_window_handles.write().push(TrackedWindow {
             handle: handle.into(),
             frame_signal: window.state.frame_signal.clone(),
+            frames: window.state.frames.clone(),
         });
 
         Ok(Box::new(window))
@@ -1471,8 +1486,8 @@ unsafe fn power_saving_status(lparam: LPARAM) -> Option<bool> {
 
 impl Drop for WindowsPlatform {
     fn drop(&mut self) {
-        if let Some(stop) = self.vsync_stop.borrow_mut().take() {
-            stop.store(true, Ordering::Release);
+        if let Some(requests) = self.vsync_requests.borrow_mut().take() {
+            requests.stop();
         }
         unsafe {
             if let Some(notification) = self.suspend_resume_notification.borrow_mut().take() {
@@ -1503,9 +1518,9 @@ pub(crate) struct WindowCreationInfo {
     pub(crate) directx_devices: DirectXDevices,
     /// Flag to instruct the `VSyncProvider` thread to invalidate the directx devices
     /// as resizing them has failed, causing us to have lost at least the render target.
-    pub(crate) invalidate_devices: Arc<AtomicBool>,
     /// Shared with [`WindowsPlatformState::draw_coordinator`] and every other window.
     pub(crate) draw_coordinator: Rc<DrawCoordinator>,
+    pub(crate) vsync_requests: Arc<VSyncRequests>,
 }
 
 struct PlatformWindowCreateContext {
@@ -1721,6 +1736,12 @@ fn load_icon() -> Result<HICON> {
 fn should_auto_hide_scrollbars() -> Result<bool> {
     let ui_settings = UISettings::new()?;
     Ok(ui_settings.AutoHideScrollBars()?)
+}
+
+/// Registers the device removed event of `device`. Logs the error when the
+/// system has no such event.
+fn register_device_removed(device: &ID3D11Device) -> Option<DeviceRemovedEvent> {
+    DeviceRemovedEvent::register(device).log_err()
 }
 
 fn check_device_lost(device: &ID3D11Device) -> bool {

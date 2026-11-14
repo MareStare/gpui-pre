@@ -2041,7 +2041,7 @@ impl Window {
                 }
 
                 let should_draw = invalidator.is_dirty() || force_render;
-                let needs_present = request_frame_options.require_presentation
+                let should_present = request_frame_options.require_presentation
                     || needs_present.get()
                     || high_rate_input;
                 if should_draw {
@@ -2069,7 +2069,7 @@ impl Window {
                             })
                             .log_err();
                     })
-                } else if needs_present {
+                } else if should_present {
                     handle
                         .update(&mut cx, |_, window, _| window.present())
                         .with_context(|| {
@@ -2078,28 +2078,28 @@ impl Window {
                         .log_err();
                 }
 
-                handle
-                    .update(&mut cx, |_, window, _| {
-                        if window.invalidator.is_dirty()
-                            || !window.next_frame_callbacks.borrow().is_empty()
-                        {
-                            window.platform_window.schedule_frame();
-                        }
-                    })
-                    .with_context(|| {
-                        format!(
-                            "scheduling follow-up frame for window {:?}",
-                            handle.window_id()
-                        )
-                    })
-                    .log_err();
-
                 // Platforms that stop requesting frames for idle windows only
                 // deliver another request after a wakeup. If demand remains
-                // after this frame (the window was re-invalidated mid-draw, or
-                // animations scheduled next-frame callbacks), re-arm the frame
-                // source explicitly.
-                if invalidator.is_dirty() || !next_frame_callbacks.borrow().is_empty() {
+                // after this frame (the window was re-invalidated mid-draw,
+                // animations scheduled next-frame callbacks, a frame waits for
+                // its present, or high-rate input keeps the display presenting),
+                // re-arm the frame source explicitly.
+                let demand_remains = invalidator.is_dirty()
+                    || !next_frame_callbacks.borrow().is_empty()
+                    || needs_present.get()
+                    || input_rate_tracker.borrow().is_high_rate();
+                if demand_remains {
+                    handle
+                        .update(&mut cx, |_, window, _| {
+                            window.platform_window.schedule_frame();
+                        })
+                        .with_context(|| {
+                            format!(
+                                "scheduling follow-up frame for window {:?}",
+                                handle.window_id()
+                            )
+                        })
+                        .log_err();
                     invalidator.wake_platform();
                 }
                 #[cfg(feature = "profiler")]
@@ -9309,6 +9309,44 @@ mod tests {
         assert!(
             test_window.frame_scheduled(),
             "a rendered scene awaiting presentation must wake the render loop"
+        );
+    }
+
+    #[gpui::test]
+    fn high_rate_input_keeps_the_render_loop_presenting(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| Empty);
+        let test_window = cx.test_window(window.into());
+
+        assert!(test_window.simulate_scheduled_frame());
+        assert!(test_window.simulate_scheduled_frame());
+        assert!(!test_window.frame_scheduled());
+
+        cx.update_window(window.into(), |_, window, _| {
+            window.active.set(true);
+            let mut tracker = window.input_rate_tracker.borrow_mut();
+            while !tracker.is_high_rate() {
+                tracker.record_input();
+            }
+        })
+        .unwrap();
+
+        // Each frame presents. A frame source that does not tie the next
+        // frame to a present must get a wake for it.
+        let baseline = test_window.frame_wake_count();
+        test_window.simulate_frame_request(RequestFrameOptions::default());
+        assert!(
+            test_window.frame_wake_count() > baseline,
+            "high-rate input must ask for the next frame after a present"
+        );
+
+        cx.update_window(window.into(), |_, window, _| {
+            window.input_rate_tracker.borrow_mut().sustain_until = scheduler::Instant::now();
+        })
+        .unwrap();
+        while test_window.simulate_scheduled_frame() {}
+        assert!(
+            !test_window.frame_scheduled(),
+            "the render loop must park when the input rate drops"
         );
     }
 

@@ -87,13 +87,16 @@ impl WgpuWindowRenderer {
 
     /// Draws the scene. After a lost device, it makes a new device and draws
     /// nothing. The new device has an empty atlas, so the next frame must build
-    /// the scene again: see `take_force_render`.
+    /// the scene again: see `take_force_render`. When it cannot make the
+    /// device, the next frame that draws tries again.
     pub fn draw(&mut self, scene: &Scene) {
         if self.renderer.device_lost() {
-            if let Err(error) = self.renderer.recover_from(&*self.source) {
-                log::warn!("GPU recovery failed, will retry on next frame: {error:#}");
+            match self.renderer.recover_from(&*self.source) {
+                Ok(()) => self.force_render = true,
+                Err(error) => {
+                    log::warn!("GPU recovery failed, will retry on next frame: {error:#}")
+                }
             }
-            self.force_render = true;
             return;
         }
         self.renderer.draw(scene);

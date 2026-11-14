@@ -1,5 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use anyhow::Result;
 use gpui::*;
@@ -26,10 +27,43 @@ pub(crate) struct DirectManipulationHandler {
     window: HWND,
     scale_factor: Rc<Cell<f32>>,
     pending_events: Rc<RefCell<Vec<PlatformInput>>>,
+    updates: Rc<UpdateDemand>,
+}
+
+/// Asks the window for frames while Direct Manipulation needs an `Update` at
+/// each frame: while the user touches the touchpad, while a gesture runs or
+/// moves on with inertia, and until a reset of the viewport ends. The
+/// viewport updates only in `Update`, and the window calls it only in a frame.
+struct UpdateDemand {
+    frames: Arc<WindowFrames>,
+    interacting: Cell<bool>,
+    in_gesture: Cell<bool>,
+    resetting: Cell<bool>,
+}
+
+impl UpdateDemand {
+    fn new(frames: Arc<WindowFrames>) -> Self {
+        Self {
+            frames,
+            interacting: Cell::new(false),
+            in_gesture: Cell::new(false),
+            resetting: Cell::new(false),
+        }
+    }
+
+    fn needs_updates(&self) -> bool {
+        self.interacting.get() || self.in_gesture.get() || self.resetting.get()
+    }
+
+    fn ask_if_needed(&self) {
+        if self.needs_updates() {
+            self.frames.ask();
+        }
+    }
 }
 
 impl DirectManipulationHandler {
-    pub fn new(window: HWND, scale_factor: f32) -> Result<Self> {
+    pub fn new(window: HWND, scale_factor: f32, frames: Arc<WindowFrames>) -> Result<Self> {
         unsafe {
             let manager: IDirectManipulationManager =
                 CoCreateInstance(&DirectManipulationManager, None, CLSCTX_INPROC_SERVER)?;
@@ -65,12 +99,14 @@ impl DirectManipulationHandler {
 
             let scale_factor = Rc::new(Cell::new(scale_factor));
             let pending_events = Rc::new(RefCell::new(Vec::new()));
+            let updates = Rc::new(UpdateDemand::new(frames));
 
             let event_handler: IDirectManipulationViewportEventHandler =
                 DirectManipulationEventHandler::new(
                     window,
                     Rc::clone(&scale_factor),
                     Rc::clone(&pending_events),
+                    Rc::clone(&updates),
                 )
                 .into();
 
@@ -86,6 +122,7 @@ impl DirectManipulationHandler {
                 window,
                 scale_factor,
                 pending_events,
+                updates,
             })
         }
     }
@@ -101,14 +138,19 @@ impl DirectManipulationHandler {
             if GetPointerType(pointer_id, &mut pointer_type).is_ok() && pointer_type == PT_TOUCHPAD
             {
                 self.viewport.SetContact(pointer_id).log_err();
+                // The contact takes effect at the next update.
+                self.updates.frames.ask();
             }
         }
     }
 
+    /// Updates the viewport. Asks for the next frame while the viewport
+    /// needs more updates.
     pub fn update(&self) {
         unsafe {
             self.update_manager.Update(None).log_err();
         }
+        self.updates.ask_if_needed();
     }
 
     pub fn drain_events(&self) -> Vec<PlatformInput> {
@@ -133,7 +175,10 @@ enum GestureKind {
     Pinch,
 }
 
-#[windows_core::implement(IDirectManipulationViewportEventHandler)]
+#[windows_core::implement(
+    IDirectManipulationViewportEventHandler,
+    IDirectManipulationInteractionEventHandler
+)]
 struct DirectManipulationEventHandler {
     window: HWND,
     scale_factor: Rc<Cell<f32>>,
@@ -143,6 +188,7 @@ struct DirectManipulationEventHandler {
     last_y_offset: Cell<f32>,
     scroll_phase: Cell<TouchPhase>,
     pending_events: Rc<RefCell<Vec<PlatformInput>>>,
+    updates: Rc<UpdateDemand>,
 }
 
 impl DirectManipulationEventHandler {
@@ -150,6 +196,7 @@ impl DirectManipulationEventHandler {
         window: HWND,
         scale_factor: Rc<Cell<f32>>,
         pending_events: Rc<RefCell<Vec<PlatformInput>>>,
+        updates: Rc<UpdateDemand>,
     ) -> Self {
         Self {
             window,
@@ -160,7 +207,14 @@ impl DirectManipulationEventHandler {
             last_y_offset: Cell::new(0.0),
             scroll_phase: Cell::new(TouchPhase::Started),
             pending_events,
+            updates,
         }
+    }
+
+    /// Queues an event for the window, which takes it in its next frame.
+    fn push_event(&self, event: PlatformInput) {
+        self.pending_events.borrow_mut().push(event);
+        self.updates.frames.ask();
     }
 
     fn end_gesture(&self) {
@@ -168,25 +222,21 @@ impl DirectManipulationEventHandler {
         let modifiers = current_modifiers();
         match self.gesture_kind.get() {
             GestureKind::Scroll => {
-                self.pending_events
-                    .borrow_mut()
-                    .push(PlatformInput::Scroll(ScrollEvent {
-                        position,
-                        delta: ScrollDelta::Pixels(point(px(0.0), px(0.0))),
-                        modifiers,
-                        touch_phase: TouchPhase::Ended,
-                        source: ScrollSource::Pointer,
-                    }));
+                self.push_event(PlatformInput::Scroll(ScrollEvent {
+                    position,
+                    delta: ScrollDelta::Pixels(point(px(0.0), px(0.0))),
+                    modifiers,
+                    touch_phase: TouchPhase::Ended,
+                    source: ScrollSource::Pointer,
+                }));
             }
             GestureKind::Pinch => {
-                self.pending_events
-                    .borrow_mut()
-                    .push(PlatformInput::Pinch(PinchEvent {
-                        position,
-                        delta: 0.0,
-                        modifiers,
-                        phase: TouchPhase::Ended,
-                    }));
+                self.push_event(PlatformInput::Pinch(PinchEvent {
+                    position,
+                    delta: 0.0,
+                    modifiers,
+                    phase: TouchPhase::Ended,
+                }));
             }
             GestureKind::None => {}
         }
@@ -214,6 +264,9 @@ impl IDirectManipulationViewportEventHandler_Impl for DirectManipulationEventHan
         if current == previous {
             return Ok(());
         }
+        self.updates
+            .in_gesture
+            .set(current == DIRECTMANIPULATION_RUNNING || current == DIRECTMANIPULATION_INERTIA);
 
         // A new gesture interrupted inertia, so end the old sequence.
         if current == DIRECTMANIPULATION_RUNNING && previous == DIRECTMANIPULATION_INERTIA {
@@ -224,31 +277,34 @@ impl IDirectManipulationViewportEventHandler_Impl for DirectManipulationEventHan
             self.end_gesture();
 
             // Reset the content transform so the viewport is ready for the next gesture.
-            // ZoomToRect triggers a second RUNNING -> READY cycle, so prevent an infinite loop here.
-            if self.last_scale.get() != 1.0
+            // ZoomToRect triggers a second RUNNING -> READY cycle in the updates that follow.
+            // The transform is identity at that READY, so it does not reset again.
+            let transformed = self.last_scale.get() != 1.0
                 || self.last_x_offset.get() != 0.0
-                || self.last_y_offset.get() != 0.0
-            {
-                if let Some(viewport) = viewport.as_ref() {
-                    unsafe {
-                        viewport
-                            .ZoomToRect(
-                                0.0,
-                                0.0,
-                                DEFAULT_VIEWPORT_SIZE as f32,
-                                DEFAULT_VIEWPORT_SIZE as f32,
-                                false,
-                            )
-                            .log_err();
-                    }
-                }
-            }
-
+                || self.last_y_offset.get() != 0.0;
             self.last_scale.set(1.0);
             self.last_x_offset.set(0.0);
             self.last_y_offset.set(0.0);
+            self.updates.resetting.set(false);
+            if transformed && let Some(viewport) = viewport.as_ref() {
+                // A READY inside the call ends the reset.
+                self.updates.resetting.set(true);
+                let reset = unsafe {
+                    viewport.ZoomToRect(
+                        0.0,
+                        0.0,
+                        DEFAULT_VIEWPORT_SIZE as f32,
+                        DEFAULT_VIEWPORT_SIZE as f32,
+                        false,
+                    )
+                };
+                if reset.log_err().is_none() {
+                    self.updates.resetting.set(false);
+                }
+            }
         }
 
+        self.updates.ask_if_needed();
         Ok(())
     }
 
@@ -303,14 +359,12 @@ impl IDirectManipulationViewportEventHandler_Impl for DirectManipulationEventHan
             if self.gesture_kind.get() != GestureKind::Pinch {
                 self.end_gesture();
                 self.gesture_kind.set(GestureKind::Pinch);
-                self.pending_events
-                    .borrow_mut()
-                    .push(PlatformInput::Pinch(PinchEvent {
-                        position,
-                        delta: 0.0,
-                        modifiers,
-                        phase: TouchPhase::Started,
-                    }));
+                self.push_event(PlatformInput::Pinch(PinchEvent {
+                    position,
+                    delta: 0.0,
+                    modifiers,
+                    phase: TouchPhase::Started,
+                }));
             }
         } else if self.gesture_kind.get() == GestureKind::None {
             self.gesture_kind.set(GestureKind::Scroll);
@@ -323,26 +377,22 @@ impl IDirectManipulationViewportEventHandler_Impl for DirectManipulationEventHan
                 let dy = y_offset - last_y;
                 let touch_phase = self.scroll_phase.get();
                 self.scroll_phase.set(TouchPhase::Moved);
-                self.pending_events
-                    .borrow_mut()
-                    .push(PlatformInput::Scroll(ScrollEvent {
-                        position,
-                        delta: ScrollDelta::Pixels(point(px(dx), px(dy))),
-                        modifiers,
-                        touch_phase,
-                        source: ScrollSource::Pointer,
-                    }));
+                self.push_event(PlatformInput::Scroll(ScrollEvent {
+                    position,
+                    delta: ScrollDelta::Pixels(point(px(dx), px(dy))),
+                    modifiers,
+                    touch_phase,
+                    source: ScrollSource::Pointer,
+                }));
             }
             GestureKind::Pinch => {
                 let scale_delta = scale / last_scale;
-                self.pending_events
-                    .borrow_mut()
-                    .push(PlatformInput::Pinch(PinchEvent {
-                        position,
-                        delta: scale_delta - 1.0,
-                        modifiers,
-                        phase: TouchPhase::Moved,
-                    }));
+                self.push_event(PlatformInput::Pinch(PinchEvent {
+                    position,
+                    delta: scale_delta - 1.0,
+                    modifiers,
+                    phase: TouchPhase::Moved,
+                }));
             }
             GestureKind::None => {}
         }
@@ -355,7 +405,167 @@ impl IDirectManipulationViewportEventHandler_Impl for DirectManipulationEventHan
     }
 }
 
+impl IDirectManipulationInteractionEventHandler_Impl for DirectManipulationEventHandler_Impl {
+    fn OnInteraction(
+        &self,
+        _viewport: windows_core::Ref<'_, IDirectManipulationViewport2>,
+        interaction: DIRECTMANIPULATION_INTERACTION_TYPE,
+    ) -> windows_core::Result<()> {
+        if interaction == DIRECTMANIPULATION_INTERACTION_BEGIN {
+            self.updates.interacting.set(true);
+        } else if interaction == DIRECTMANIPULATION_INTERACTION_END {
+            self.updates.interacting.set(false);
+        }
+        self.updates.ask_if_needed();
+        Ok(())
+    }
+}
+
 fn float_equals(f1: f32, f2: f32) -> bool {
     const EPSILON_SCALE: f32 = 0.00001;
     (f1 - f2).abs() < EPSILON_SCALE * f1.abs().max(f2.abs()).max(EPSILON_SCALE)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    use windows::{
+        Win32::{
+            Foundation::HWND,
+            Graphics::DirectManipulation::{
+                DIRECTMANIPULATION_INERTIA, DIRECTMANIPULATION_INTERACTION_BEGIN,
+                DIRECTMANIPULATION_INTERACTION_END, DIRECTMANIPULATION_INTERACTION_TYPE,
+                DIRECTMANIPULATION_READY, DIRECTMANIPULATION_RUNNING, DIRECTMANIPULATION_STATUS,
+                IDirectManipulationInteractionEventHandler, IDirectManipulationViewport,
+                IDirectManipulationViewportEventHandler,
+            },
+            System::{
+                Com::{COINIT_APARTMENTTHREADED, CoInitializeEx},
+                LibraryLoader::GetModuleHandleW,
+            },
+            UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_POPUP},
+        },
+        core::{ComObject, w},
+    };
+
+    use super::{DirectManipulationEventHandler, DirectManipulationHandler, UpdateDemand};
+    use crate::{VSyncRequests, WindowFrames};
+
+    struct Handler {
+        frames: Arc<WindowFrames>,
+        updates: Rc<UpdateDemand>,
+        object: ComObject<DirectManipulationEventHandler>,
+    }
+
+    impl Handler {
+        fn new() -> Self {
+            let requests = Arc::new(VSyncRequests::new().unwrap());
+            let frames = Arc::new(WindowFrames::new(requests));
+            let updates = Rc::new(UpdateDemand::new(frames.clone()));
+            let object = ComObject::new(DirectManipulationEventHandler::new(
+                HWND::default(),
+                Rc::new(Cell::new(1.0)),
+                Rc::new(RefCell::new(Vec::new())),
+                updates.clone(),
+            ));
+            Self {
+                frames,
+                updates,
+                object,
+            }
+        }
+
+        fn status(
+            &self,
+            viewport: Option<&IDirectManipulationViewport>,
+            current: DIRECTMANIPULATION_STATUS,
+            previous: DIRECTMANIPULATION_STATUS,
+        ) {
+            let handler: IDirectManipulationViewportEventHandler = self.object.to_interface();
+            unsafe { handler.OnViewportStatusChanged(viewport, current, previous) }.unwrap();
+        }
+
+        fn interaction(&self, interaction: DIRECTMANIPULATION_INTERACTION_TYPE) {
+            let handler: IDirectManipulationInteractionEventHandler = self.object.to_interface();
+            unsafe { handler.OnInteraction(None, interaction) }.unwrap();
+        }
+    }
+
+    #[test]
+    fn a_gesture_asks_for_frames_until_it_is_ready() {
+        let handler = Handler::new();
+        handler.status(None, DIRECTMANIPULATION_RUNNING, DIRECTMANIPULATION_READY);
+        assert!(handler.frames.take(), "a running gesture asks for a frame");
+        handler.status(None, DIRECTMANIPULATION_INERTIA, DIRECTMANIPULATION_RUNNING);
+        assert!(handler.frames.take(), "inertia asks for a frame");
+        handler.status(None, DIRECTMANIPULATION_READY, DIRECTMANIPULATION_INERTIA);
+        assert!(!handler.updates.needs_updates());
+        assert!(!handler.frames.take(), "a ready viewport asks for no frame");
+    }
+
+    #[test]
+    fn an_interaction_asks_for_frames_until_it_ends() {
+        let handler = Handler::new();
+        handler.interaction(DIRECTMANIPULATION_INTERACTION_BEGIN);
+        assert!(handler.frames.take(), "a touch asks for a frame");
+        assert!(handler.updates.needs_updates());
+        handler.interaction(DIRECTMANIPULATION_INTERACTION_END);
+        assert!(!handler.updates.needs_updates());
+        assert!(!handler.frames.take());
+    }
+
+    #[test]
+    fn a_reset_asks_for_frames_until_its_ready() {
+        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.unwrap();
+        let window = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("STATIC"),
+                None,
+                WS_POPUP,
+                0,
+                0,
+                100,
+                100,
+                None,
+                None,
+                Some(GetModuleHandleW(None).unwrap().into()),
+                None,
+            )
+        }
+        .unwrap();
+        let requests = Arc::new(VSyncRequests::new().unwrap());
+        let manipulation =
+            DirectManipulationHandler::new(window, 1.0, Arc::new(WindowFrames::new(requests)))
+                .unwrap();
+
+        let handler = Handler::new();
+        handler.status(None, DIRECTMANIPULATION_RUNNING, DIRECTMANIPULATION_READY);
+        handler.object.last_y_offset.set(30.0);
+        assert!(handler.frames.take());
+
+        handler.status(
+            Some(&manipulation.viewport),
+            DIRECTMANIPULATION_READY,
+            DIRECTMANIPULATION_RUNNING,
+        );
+        assert!(
+            handler.frames.take(),
+            "the reset of a moved viewport asks for a frame"
+        );
+        assert!(handler.updates.needs_updates());
+
+        handler.status(None, DIRECTMANIPULATION_RUNNING, DIRECTMANIPULATION_READY);
+        handler.status(None, DIRECTMANIPULATION_READY, DIRECTMANIPULATION_RUNNING);
+        assert!(
+            !handler.updates.needs_updates(),
+            "the READY of the reset ends it"
+        );
+
+        drop(manipulation);
+        unsafe { DestroyWindow(window) }.unwrap();
+    }
 }

@@ -55,6 +55,7 @@ pub struct WindowsWindowState {
 
     pub callbacks: Callbacks,
     pub frame_signal: Arc<PlatformFrameSignal>,
+    pub(crate) frames: Arc<WindowFrames>,
     pub input_handler: Cell<Option<PlatformInputHandler>>,
     pub ime_enabled: Cell<bool>,
     pub pending_surrogate: Cell<Option<u16>>,
@@ -81,9 +82,6 @@ pub struct WindowsWindowState {
     pub nc_button_pressed: Cell<Option<u32>>,
 
     pub display: Cell<WindowsDisplay>,
-    /// Flag to instruct the `VSyncProvider` thread to invalidate the directx devices
-    /// as resizing them has failed, causing us to have lost at least the render target.
-    pub invalidate_devices: Arc<AtomicBool>,
     /// Shared with [`WindowsPlatformState::draw_coordinator`] and every other window.
     pub(crate) draw_coordinator: Rc<DrawCoordinator>,
     fullscreen: Cell<Option<StyleAndBounds>>,
@@ -122,8 +120,8 @@ impl WindowsWindowState {
         min_size: Option<Size<Pixels>>,
         appearance: WindowAppearance,
         disable_direct_composition: bool,
-        invalidate_devices: Arc<AtomicBool>,
         draw_coordinator: Rc<DrawCoordinator>,
+        vsync_requests: Arc<VSyncRequests>,
     ) -> Result<Self> {
         let scale_factor = {
             let monitor_dpi = unsafe { GetDpiForWindow(hwnd) } as f32;
@@ -158,8 +156,10 @@ impl WindowsWindowState {
         let fullscreen = None;
         let initial_placement = None;
 
-        let direct_manipulation = DirectManipulationHandler::new(hwnd, scale_factor)
-            .context("initializing Direct Manipulation")?;
+        let frames = Arc::new(WindowFrames::new(vsync_requests));
+        let direct_manipulation =
+            DirectManipulationHandler::new(hwnd, scale_factor, frames.clone())
+                .context("initializing Direct Manipulation")?;
 
         Ok(Self {
             origin: Cell::new(origin),
@@ -173,6 +173,7 @@ impl WindowsWindowState {
             min_size,
             callbacks,
             frame_signal: Arc::new(PlatformFrameSignal::new()),
+            frames,
             input_handler: Cell::new(input_handler),
             ime_enabled: Cell::new(true),
             pending_surrogate: Cell::new(pending_surrogate),
@@ -190,7 +191,6 @@ impl WindowsWindowState {
             fullscreen: Cell::new(fullscreen),
             initial_placement: Cell::new(initial_placement),
             hwnd,
-            invalidate_devices,
             draw_coordinator,
             direct_manipulation,
             a11y: RefCell::new(None),
@@ -282,8 +282,8 @@ impl WindowsWindowInner {
             context.min_size,
             context.appearance,
             context.disable_direct_composition,
-            context.invalidate_devices.clone(),
             context.draw_coordinator.clone(),
+            context.vsync_requests.clone(),
         )?;
 
         Ok(Rc::new(Self {
@@ -433,8 +433,8 @@ struct WindowCreateContext {
     appearance: WindowAppearance,
     disable_direct_composition: bool,
     directx_devices: DirectXDevices,
-    invalidate_devices: Arc<AtomicBool>,
     draw_coordinator: Rc<DrawCoordinator>,
+    vsync_requests: Arc<VSyncRequests>,
     parent_hwnd: Option<HWND>,
 }
 
@@ -461,8 +461,8 @@ impl WindowsWindow {
             platform_window_handle,
             disable_direct_composition,
             directx_devices,
-            invalidate_devices,
             draw_coordinator,
+            vsync_requests,
         } = creation_info;
         register_window_class(icon);
         let parent_hwnd = if params.kind == WindowKind::Dialog {
@@ -546,8 +546,8 @@ impl WindowsWindow {
             appearance,
             disable_direct_composition,
             directx_devices,
-            invalidate_devices,
             draw_coordinator,
+            vsync_requests,
             parent_hwnd,
         };
         let creation_result = gpui_wgpu::time_startup_stage("create-window", || unsafe {
@@ -1058,6 +1058,19 @@ impl PlatformWindow for WindowsWindow {
             .borrow_mut()
             .draw(scene, self.state.background_appearance.get())
             .log_err();
+    }
+
+    fn schedule_frame(&self) {
+        self.state.frames.ask();
+    }
+
+    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
+        let frames = Arc::downgrade(&self.state.frames);
+        Some(Rc::new(move || {
+            if let Some(frames) = frames.upgrade() {
+                frames.ask();
+            }
+        }))
     }
 
     fn render_to_image(&self, scene: &Scene) -> anyhow::Result<image::RgbaImage> {
