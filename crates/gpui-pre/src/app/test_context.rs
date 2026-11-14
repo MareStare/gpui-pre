@@ -925,6 +925,21 @@ impl VisualTestContext {
         self.cx.test_window(self.window).0.lock().title.clone()
     }
 
+    /// Tells if the window asked the platform for a frame that the platform
+    /// has not delivered yet.
+    pub fn frame_scheduled(&mut self) -> bool {
+        self.cx.test_window(self.window).frame_scheduled()
+    }
+
+    /// Delivers the frame that the window asked for, as the frame source of
+    /// the platform does, then runs until parked. Returns false when the
+    /// window asked for no frame.
+    pub fn simulate_scheduled_frame(&mut self) -> bool {
+        let delivered = self.cx.test_window(self.window).simulate_scheduled_frame();
+        self.background_executor.run_until_parked();
+        delivered
+    }
+
     /// Read the document path off the window (set by `Window#set_document_path`)
     pub fn document_path(&mut self) -> Option<std::path::PathBuf> {
         self.cx
