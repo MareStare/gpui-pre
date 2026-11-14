@@ -1007,7 +1007,12 @@ impl MacWindow {
         marker: MainThreadMarker,
     ) -> Result<Self> {
         autoreleasepool(|_| unsafe {
-            let renderer = renderer::new_renderer(renderer_context, false, use_display_p3)?;
+            let renderer = renderer::new_renderer(
+                renderer_context,
+                bounds.size.map(|pixels| pixels.as_f32()),
+                false,
+                use_display_p3,
+            )?;
             let allows_automatic_window_tabbing = tabbing_identifier.is_some();
             if allows_automatic_window_tabbing {
                 let () = msg_send![class!(NSWindow), setAllowsAutomaticWindowTabbing: Bool::YES];
@@ -1108,7 +1113,9 @@ impl MacWindow {
             let native_view: *mut AnyObject = msg_send![native_view, initWithFrame: content_bounds];
             assert!(!native_view.is_null());
 
-            let metal_frames = MetalFrameSource::is_available().then(Rc::<MetalFrames>::default);
+            let metal_frames = (MetalFrameSource::is_available()
+                && renderer.draws_with_display_link_drawables())
+            .then(Rc::<MetalFrames>::default);
             let state = Rc::new(Mutex::new(MacWindowState {
                 handle,
                 foreground_executor,
@@ -2171,6 +2178,10 @@ impl PlatformWindow for MacWindow {
 
     fn gpu_specs(&self) -> Option<gpui::GpuSpecs> {
         None
+    }
+
+    fn draws_custom_surfaces(&self) -> bool {
+        self.0.lock().renderer.draws_custom_surfaces()
     }
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {

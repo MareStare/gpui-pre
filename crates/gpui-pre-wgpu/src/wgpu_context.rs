@@ -462,13 +462,15 @@ impl WgpuContext {
     /// The groups of backends to try in turn. `WGPU_BACKEND` overrides them, e.g. `dx12`
     /// or `vulkan`. On Windows, DX12 comes after Vulkan: a DX12 instance takes 200 to
     /// 400 ms to enumerate its adapters on an Intel UHD iGPU, so it starts only when no
-    /// Vulkan adapter can draw to the window.
+    /// Vulkan adapter can draw to the window. Apple platforms have Metal only.
     #[cfg(not(target_family = "wasm"))]
     pub fn backend_groups() -> Vec<wgpu::Backends> {
         if let Some(backends) = wgpu::Backends::from_env() {
             vec![backends]
         } else if cfg!(windows) {
             vec![wgpu::Backends::VULKAN, wgpu::Backends::DX12]
+        } else if cfg!(target_vendor = "apple") {
+            vec![wgpu::Backends::METAL]
         } else {
             vec![wgpu::Backends::VULKAN | wgpu::Backends::GL]
         }
@@ -605,8 +607,7 @@ impl WgpuContext {
     ///
     /// 1. ZED_DEVICE_ID match — explicit user override
     /// 2. Compositor GPU match — the GPU the display server is rendering on
-    /// 3. Device type (Discrete > Integrated > Other > Virtual > Cpu).
-    ///    "Other" ranks above "Virtual" because OpenGL seems to count as "Other".
+    /// 3. Device type: see `device_type_priority`.
     /// 4. Backend — prefer Vulkan/Metal/Dx12 over GL/etc.
     #[cfg(not(target_family = "wasm"))]
     fn sort_adapters(
@@ -633,13 +634,8 @@ impl WgpuContext {
                 }
                 _ => 1,
             };
-            let type_priority: u8 = match info.device_type {
-                wgpu::DeviceType::DiscreteGpu => 0,
-                wgpu::DeviceType::IntegratedGpu => 1,
-                wgpu::DeviceType::Other => 2,
-                wgpu::DeviceType::VirtualGpu => 3,
-                wgpu::DeviceType::Cpu => 4,
-            };
+            let type_priority =
+                device_type_priority(info.device_type, cfg!(target_vendor = "apple"));
             let backend_priority: u8 = match info.backend {
                 wgpu::Backend::Vulkan | wgpu::Backend::Metal | wgpu::Backend::Dx12 => 0,
                 _ => 1,
@@ -674,8 +670,13 @@ impl WgpuContext {
             Self::create_device(adapter).await?;
         // Test with the configuration the renderer will use, so that it doesn't need to
         // configure the surface a second time.
-        let (surface_config, _, _) =
-            WgpuRenderer::surface_configuration(surface, adapter, &device, config)?;
+        let (surface_config, _, _) = WgpuRenderer::surface_configuration(
+            surface,
+            adapter,
+            &device,
+            config,
+            wgpu::SurfaceColorSpace::Auto,
+        )?;
         let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
 
         surface.configure(&device, &surface_config);
@@ -760,6 +761,24 @@ impl WgpuContext {
 }
 
 #[cfg(not(target_family = "wasm"))]
+/// The rank of an adapter of the given type. A lower rank is tried first.
+///
+/// With `prefer_integrated`, the integrated GPU comes first. The Metal backend
+/// reports a GPU with unified memory as integrated, and the other GPUs, e.g. the
+/// discrete GPU of an Intel Mac or an eGPU, as discrete. The integrated GPU uses
+/// less power, and it cannot be unplugged. Elsewhere the discrete GPU comes
+/// first. "Other" ranks above "Virtual" because OpenGL seems to count as "Other".
+#[cfg(not(target_family = "wasm"))]
+fn device_type_priority(device_type: wgpu::DeviceType, prefer_integrated: bool) -> u8 {
+    match device_type {
+        wgpu::DeviceType::DiscreteGpu => u8::from(prefer_integrated),
+        wgpu::DeviceType::IntegratedGpu => u8::from(!prefer_integrated),
+        wgpu::DeviceType::Other => 2,
+        wgpu::DeviceType::VirtualGpu => 3,
+        wgpu::DeviceType::Cpu => 4,
+    }
+}
+
 fn parse_pci_id(id: &str) -> anyhow::Result<u32> {
     let mut id = id.trim();
 
@@ -778,7 +797,36 @@ fn parse_pci_id(id: &str) -> anyhow::Result<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DeviceErrorState, parse_pci_id};
+    use super::{DeviceErrorState, device_type_priority, parse_pci_id};
+
+    #[test]
+    fn apple_tries_the_integrated_gpu_first() {
+        let order = |prefer_integrated| {
+            let mut types = [
+                wgpu::DeviceType::Cpu,
+                wgpu::DeviceType::DiscreteGpu,
+                wgpu::DeviceType::IntegratedGpu,
+            ];
+            types.sort_by_key(|&device_type| device_type_priority(device_type, prefer_integrated));
+            types
+        };
+        assert_eq!(
+            order(true),
+            [
+                wgpu::DeviceType::IntegratedGpu,
+                wgpu::DeviceType::DiscreteGpu,
+                wgpu::DeviceType::Cpu
+            ]
+        );
+        assert_eq!(
+            order(false),
+            [
+                wgpu::DeviceType::DiscreteGpu,
+                wgpu::DeviceType::IntegratedGpu,
+                wgpu::DeviceType::Cpu
+            ]
+        );
+    }
 
     #[test]
     fn device_errors_are_observed_independently() {

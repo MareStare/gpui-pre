@@ -1,4 +1,5 @@
 mod cosmic_text_system;
+mod renderer_choice;
 mod startup_log;
 mod wgpu_atlas;
 mod wgpu_context;
@@ -6,6 +7,7 @@ mod wgpu_custom_surface;
 mod wgpu_renderer;
 
 pub use cosmic_text_system::*;
+pub use renderer_choice::wgpu_requested;
 pub use startup_log::time_startup_stage;
 pub use wgpu;
 pub use wgpu_atlas::*;
