@@ -925,6 +925,21 @@ impl VisualTestContext {
         self.cx.test_window(self.window).0.lock().title.clone()
     }
 
+    /// Tells if the window asked the platform for a frame that the platform
+    /// has not delivered yet.
+    pub fn frame_scheduled(&mut self) -> bool {
+        self.cx.test_window(self.window).frame_scheduled()
+    }
+
+    /// Delivers the frame that the window asked for, as the frame source of
+    /// the platform does, then runs until parked. Returns false when the
+    /// window asked for no frame.
+    pub fn simulate_scheduled_frame(&mut self) -> bool {
+        let delivered = self.cx.test_window(self.window).simulate_scheduled_frame();
+        self.run_until_parked();
+        delivered
+    }
+
     /// Read the document path off the window (set by `Window#set_document_path`)
     pub fn document_path(&mut self) -> Option<std::path::PathBuf> {
         self.cx
@@ -1358,6 +1373,29 @@ mod tests {
         drop(subscription);
         callback(AppLifecyclePhase::Foreground);
         assert_eq!(phases.borrow().len(), 5);
+    }
+
+    #[gpui::test]
+    fn a_visual_test_context_delivers_the_frame_a_window_asks_for(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        while cx.simulate_scheduled_frame() {}
+        assert!(!cx.frame_scheduled());
+        assert!(!cx.simulate_scheduled_frame());
+
+        // Inactive windows are frame-rate throttled.
+        cx.test_window(cx.window)
+            .simulate_active_status_change(true);
+        while cx.simulate_scheduled_frame() {}
+        let ran = Rc::new(std::cell::Cell::new(false));
+        cx.update(|window, _| {
+            let ran = ran.clone();
+            window.on_next_frame(move |_, _| ran.set(true));
+        });
+        assert!(cx.frame_scheduled());
+        assert!(!ran.get());
+
+        assert!(cx.simulate_scheduled_frame());
+        assert!(ran.get());
     }
 
     #[gpui::test]

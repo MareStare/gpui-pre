@@ -102,6 +102,9 @@ commit, then rebase the patch commits onto it.
   thread wakes on the device removed event of Direct3D 11 to recover from a
   lost device on an idle app. A wgpu renderer that fails to make a new
   device tries again after a delay that grows to 2 s.
+- Frame tests: `VisualTestContext::frame_scheduled` tells if the window
+  asked for a frame, and `VisualTestContext::simulate_scheduled_frame`
+  delivers it.
 
 ## License
 
