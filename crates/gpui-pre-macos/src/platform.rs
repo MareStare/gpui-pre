@@ -32,13 +32,14 @@ use objc2::{
 use objc2_app_kit::{
     NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSAppearanceNameVibrantDark,
     NSAppearanceNameVibrantLight, NSApplication, NSApplicationActivationPolicy,
-    NSControlStateValueOn, NSCursor, NSDocumentController, NSEventModifierFlags, NSMenu,
-    NSMenuItem, NSModalResponse, NSModalResponseOK, NSOpenPanel, NSSavePanel, NSScroller,
-    NSScrollerStyle, NSWorkspace, NSWorkspaceDidWakeNotification, NSWorkspaceWillSleepNotification,
+    NSControlStateValueOn, NSCursor, NSDocumentController, NSEvent, NSEventModifierFlags,
+    NSEventType, NSMenu, NSMenuItem, NSModalResponse, NSModalResponseOK, NSOpenPanel, NSSavePanel,
+    NSScroller, NSScrollerStyle, NSWorkspace, NSWorkspaceDidWakeNotification,
+    NSWorkspaceWillSleepNotification,
 };
 use objc2_foundation::{
-    NSActivityOptions, NSArray, NSBundle, NSError, NSInteger, NSProcessInfo, NSString, NSURL,
-    NSUTF8StringEncoding,
+    NSActivityOptions, NSArray, NSBundle, NSError, NSInteger, NSPoint, NSProcessInfo, NSString,
+    NSURL, NSUTF8StringEncoding,
 };
 use parking_lot::Mutex;
 use semver::Version;
@@ -564,6 +565,14 @@ impl Platform for MacPlatform {
                 let _: () = msg_send![app, run];
             });
 
+            // `quit` stops the run loop. The quit callback runs after it, as on the
+            // platforms that own their event loop, so `run` returns to its caller.
+            let quit = self.0.lock().quit.take();
+            if let Some(mut quit) = quit {
+                quit();
+                self.0.lock().quit.get_or_insert(quit);
+            }
+
             mac_platform_ivar(&*app)
                 .load_ptr::<*mut c_void>(&*app)
                 .write(ptr::null_mut());
@@ -588,10 +597,33 @@ impl Platform for MacPlatform {
         }
 
         extern "C" fn quit(_: *mut c_void) {
-            unsafe {
-                let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
-                let _: () = msg_send![app, terminate: ptr::null_mut::<AnyObject>()];
+            let mtm = main_thread_marker().expect("the main queue runs on the main thread");
+            let app = NSApplication::sharedApplication(mtm);
+            if !app.isRunning() {
+                // A headless platform runs no AppKit run loop to stop.
+                unsafe {
+                    let _: () = msg_send![&*app, terminate: ptr::null_mut::<AnyObject>()];
+                }
+                return;
             }
+            // `terminate:` ends the process with `exit` after the quit callback. `stop:`
+            // makes `run` return instead. A quit that the system asks for, such as at
+            // logout, still goes through `terminate:`.
+            app.stop(None);
+            // The run loop stops only after it handles an event.
+            let event = NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
+                NSEventType::ApplicationDefined,
+                NSPoint::ZERO,
+                NSEventModifierFlags::empty(),
+                0.0,
+                0,
+                None,
+                0,
+                0,
+                0,
+            )
+            .expect("AppKit makes an application-defined event");
+            app.postEvent_atStart(&event, true);
         }
     }
 

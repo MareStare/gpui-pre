@@ -160,6 +160,7 @@ features = [
     "NSDraggingItem",
     "NSEvent",
     "NSGraphics",
+    "NSGraphicsContext",
     "NSImage",
     "NSImageRep",
     "NSMenu",
