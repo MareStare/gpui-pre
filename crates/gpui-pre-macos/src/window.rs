@@ -667,7 +667,7 @@ struct MacWindowState {
     frame_source: FrameSource,
     /// The frames while `frame_source` paces none.
     timer_frames: Rc<TimerFrames>,
-    /// Whether a scene was drawn off the screen and not presented.
+    /// Whether a scene was drawn off the screen and is not presented yet.
     needs_present: bool,
     renderer: renderer::Renderer,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
@@ -910,14 +910,14 @@ impl MacWindowState {
             .contains(NSWindowOcclusionState::Visible)
     }
 
-    /// The options of the next frame. Clears the flags that they take.
+    /// The options of the next frame. Clears the flag of a lost GPU device.
     fn take_frame_options(
         &mut self,
         signal_at: Option<scheduler::Instant>,
         signal_source: FrameRequestSource,
     ) -> RequestFrameOptions {
         RequestFrameOptions {
-            require_presentation: self.is_on_screen() && mem::take(&mut self.needs_present),
+            require_presentation: self.needs_present && self.is_on_screen(),
             force_render: self.renderer.take_force_render(),
             signal_at,
             signal_source,
@@ -2257,6 +2257,7 @@ impl PlatformWindow for MacWindow {
     fn draw(&self, scene: &gpui::Scene) {
         let mut this = self.0.lock();
         if this.is_on_screen() {
+            this.needs_present = false;
             this.renderer.draw(scene);
         } else {
             this.needs_present = true;
@@ -3564,9 +3565,12 @@ extern "C" fn step(view: *mut c_void) {
 /// Gives GPUI a frame of a window that no display link paces.
 fn timer_frame(window_state: &Rc<Mutex<MacWindowState>>, signal_at: Option<scheduler::Instant>) {
     let mut lock = window_state.lock();
-    // GPUI holds the callback while it runs a frame. It wakes the timer again
-    // after that frame if it still needs one.
+    // GPUI holds the callback while it runs a frame. The request waits for the
+    // next interval.
     let Some(mut callback) = lock.request_frame_callback.take() else {
+        let timer_frames = lock.timer_frames.clone();
+        drop(lock);
+        timer_frames.wake();
         return;
     };
     let options = lock.take_frame_options(signal_at, FrameRequestSource::LocalSchedule);
