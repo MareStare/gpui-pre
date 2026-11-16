@@ -356,44 +356,46 @@ impl MetalFrames {
 pub struct TimerFrames {
     foreground_executor: ForegroundExecutor,
     background_executor: BackgroundExecutor,
-    frame: Box<dyn Fn()>,
+    /// Gives GPUI a frame. Takes the time of the request.
+    frame: Box<dyn Fn(Option<Instant>)>,
     /// Whether the window has no display link.
-    active: Cell<bool>,
+    enabled: Cell<bool>,
     /// Whether a frame waits for its timer.
     armed: Cell<bool>,
 }
 
 impl TimerFrames {
-    /// `frame` gives GPUI a frame. The source starts active: a window has no
-    /// display link until it is on the screen.
+    /// The source starts enabled: a window has no display link until it is on
+    /// the screen.
     pub fn new(
         foreground_executor: ForegroundExecutor,
         background_executor: BackgroundExecutor,
-        frame: impl Fn() + 'static,
+        frame: impl Fn(Option<Instant>) + 'static,
     ) -> Self {
         Self {
             foreground_executor,
             background_executor,
             frame: Box::new(frame),
-            active: Cell::new(true),
+            enabled: Cell::new(true),
             armed: Cell::new(false),
         }
     }
 
     /// Sets whether the window has no display link. A window that loses its
     /// link gets one frame, for a request that the link did not serve.
-    pub fn set_active(self: &Rc<Self>, active: bool) {
-        let was_active = self.active.replace(active);
-        if active && !was_active {
+    pub fn set_enabled(self: &Rc<Self>, enabled: bool) {
+        let was_enabled = self.enabled.replace(enabled);
+        if enabled && !was_enabled {
             self.wake();
         }
     }
 
     /// Asks for a frame. Does nothing while a display link paces the window.
     pub fn wake(self: &Rc<Self>) {
-        if !self.active.get() || self.armed.replace(true) {
+        if !self.enabled.get() || self.armed.replace(true) {
             return;
         }
+        let requested_at = PlatformFrameSignal::capture(Instant::now);
         let this = Rc::downgrade(self);
         let timer = self.background_executor.timer(TIMER_FRAME_INTERVAL);
         self.foreground_executor
@@ -401,8 +403,8 @@ impl TimerFrames {
                 timer.await;
                 if let Some(this) = Weak::upgrade(&this) {
                     this.armed.set(false);
-                    if this.active.get() {
-                        (this.frame)();
+                    if this.enabled.get() {
+                        (this.frame)(requested_at);
                     }
                 }
             })
@@ -685,6 +687,45 @@ mod tests {
 
         frames.begin_frame();
         assert!(frames.end_frame(false), "an idle update pauses the link");
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn timer_frames_come_one_per_request_and_only_without_a_display_link() {
+        let dispatcher = gpui::TestDispatcher::new(0);
+        let frames = Rc::new(Cell::new(0));
+        let timer_frames = Rc::new(TimerFrames::new(
+            ForegroundExecutor::new(Arc::new(dispatcher.clone())),
+            BackgroundExecutor::new(Arc::new(dispatcher.clone())),
+            {
+                let frames = frames.clone();
+                move |_| frames.set(frames.get() + 1)
+            },
+        ));
+        let run = || {
+            dispatcher.advance_clock(TIMER_FRAME_INTERVAL);
+            dispatcher.run_until_parked();
+            frames.replace(0)
+        };
+
+        assert_eq!(run(), 0, "no request, no frame");
+
+        timer_frames.wake();
+        timer_frames.wake();
+        dispatcher.run_until_parked();
+        assert_eq!(frames.get(), 0, "a frame waits for its interval");
+        assert_eq!(run(), 1, "requests in one interval share a frame");
+
+        timer_frames.set_enabled(false);
+        timer_frames.wake();
+        assert_eq!(run(), 0, "a display link paces the window");
+
+        timer_frames.set_enabled(true);
+        assert_eq!(run(), 1, "a window that loses its link gets a frame");
+
+        timer_frames.wake();
+        timer_frames.set_enabled(false);
+        assert_eq!(run(), 0, "a link that starts takes the request over");
     }
 
     #[test]

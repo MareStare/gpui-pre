@@ -667,9 +667,8 @@ struct MacWindowState {
     frame_source: FrameSource,
     /// The frames while `frame_source` paces none.
     timer_frames: Rc<TimerFrames>,
-    /// Whether a scene was not presented because the window was off the
-    /// screen.
-    missed_present: bool,
+    /// Whether a scene was drawn off the screen and not presented.
+    needs_present: bool,
     renderer: renderer::Renderer,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
@@ -837,17 +836,23 @@ impl MacWindowState {
         }
     }
 
+    /// Paces the window with a display link while it is on the screen, and
+    /// with timer frames otherwise.
+    ///
     /// `window_state` is the handle this state lives in; a Metal link holds it
     /// weakly to deliver frames.
     fn start_display_link(&mut self, window_state: &Rc<Mutex<MacWindowState>>) {
         self.stop_display_link();
-        if !self.is_on_screen() {
-            return;
-        }
-        let started = match &mut self.frame_source {
+        let attached = self.is_on_screen() && self.attach_display_link(window_state);
+        self.timer_frames.set_enabled(!attached);
+    }
+
+    /// Returns whether a display link paces the window.
+    fn attach_display_link(&mut self, window_state: &Rc<Mutex<MacWindowState>>) -> bool {
+        match &mut self.frame_source {
             FrameSource::Metal(metal_frames) => {
                 let Some(layer) = self.renderer.layer() else {
-                    return;
+                    return false;
                 };
                 let main_thread =
                     crate::main_thread_marker().expect("macOS windows require the main thread");
@@ -869,7 +874,7 @@ impl MacWindowState {
                 let screen: *mut AnyObject = unsafe { msg_send![self.native_window, screen] };
                 let Some(display_id) = display_id_for_screen(screen) else {
                     // AppKit can temporarily report no screen while displays are being reconfigured.
-                    return;
+                    return false;
                 };
                 let data = self.native_view.as_ptr() as *mut c_void;
                 frame_source
@@ -878,8 +883,7 @@ impl MacWindowState {
                     .log_err()
                     .is_some()
             }
-        };
-        self.timer_frames.set_active(!started);
+        }
     }
 
     fn stop_display_link(&mut self) {
@@ -895,7 +899,6 @@ impl MacWindowState {
             FrameSource::DisplayLink(Some(frame_source)) => frame_source.stop(),
             FrameSource::DisplayLink(None) => {}
         }
-        self.timer_frames.set_active(true);
     }
 
     /// Whether a part of the window is on a screen that shows it. AppKit
@@ -907,12 +910,18 @@ impl MacWindowState {
             .contains(NSWindowOcclusionState::Visible)
     }
 
-    /// Whether the next frame must build the scene again: after a lost GPU
-    /// device, or for a window back on the screen that did not present its
-    /// last scene. Clears the flags.
-    fn take_force_render(&mut self) -> bool {
-        let missed_present = self.is_on_screen() && mem::take(&mut self.missed_present);
-        self.renderer.take_force_render() || missed_present
+    /// The options of the next frame. Clears the flags that they take.
+    fn take_frame_options(
+        &mut self,
+        signal_at: Option<scheduler::Instant>,
+        signal_source: FrameRequestSource,
+    ) -> RequestFrameOptions {
+        RequestFrameOptions {
+            require_presentation: self.is_on_screen() && mem::take(&mut self.needs_present),
+            force_render: self.renderer.take_force_render(),
+            signal_at,
+            signal_source,
+        }
     }
 
     fn is_maximized(&self) -> bool {
@@ -1005,15 +1014,24 @@ impl MacWindowState {
     }
 }
 
-pub(crate) struct MacWindow(
-    Rc<Mutex<MacWindowState>>,
-    MainThreadMarker,
-    /// The Metal link's frame waker, kept outside the lock so waking never
-    /// waits on it. `None` when a `CVDisplayLink` paces frames.
-    Option<Rc<MetalFrames>>,
-    /// The frames off the screen, kept outside the lock for the same reason.
-    Rc<TimerFrames>,
-);
+pub(crate) struct MacWindow(Rc<Mutex<MacWindowState>>, MainThreadMarker, Rc<FrameWakers>);
+
+/// The frame sources that GPUI wakes, kept outside the lock of the window so
+/// that a wake never waits on it.
+struct FrameWakers {
+    /// `None` when a `CVDisplayLink` paces frames.
+    metal: Option<Rc<MetalFrames>>,
+    timer: Rc<TimerFrames>,
+}
+
+impl FrameWakers {
+    fn wake(&self) {
+        if let Some(metal) = &self.metal {
+            metal.wake();
+        }
+        self.timer.wake();
+    }
+}
 
 impl MacWindow {
     pub fn open(
@@ -1155,10 +1173,9 @@ impl MacWindow {
                 let timer_frames = TimerFrames::new(
                     foreground_executor.clone(),
                     background_executor.clone(),
-                    move || {
+                    move |signal_at| {
                         if let Some(state) = state.upgrade() {
-                            let signal_at = PlatformFrameSignal::capture(scheduler::Instant::now);
-                            request_frame(&state, signal_at, FrameRequestSource::LocalSchedule);
+                            timer_frame(&state, signal_at);
                         }
                     },
                 );
@@ -1177,7 +1194,7 @@ impl MacWindow {
                         None => FrameSource::DisplayLink(None),
                     },
                     timer_frames: Rc::new(timer_frames),
-                    missed_present: false,
+                    needs_present: false,
                     renderer,
                     request_frame_callback: None,
                     event_callback: None,
@@ -1223,8 +1240,11 @@ impl MacWindow {
                     sheet_parent: None,
                 })
             });
-            let timer_frames = state.lock().timer_frames.clone();
-            let mut window = Self(state, marker, metal_frames, timer_frames);
+            let frame_wakers = Rc::new(FrameWakers {
+                metal: metal_frames,
+                timer: state.lock().timer_frames.clone(),
+            });
+            let mut window = Self(state, marker, frame_wakers);
 
             (*native_window)
                 .class()
@@ -1474,6 +1494,7 @@ impl Drop for MacWindow {
             FrameSource::Metal(metal_frames) => metal_frames.replace(None),
             FrameSource::DisplayLink(frame_source) => drop(frame_source.take()),
         }
+        this.timer_frames.set_enabled(false);
         unsafe {
             let _: () = msg_send![this.native_window, setDelegate: ptr::null_mut::<AnyObject>()];
         }
@@ -2230,36 +2251,29 @@ impl PlatformWindow for MacWindow {
         self.0.as_ref().lock().toggle_tab_bar_callback = Some(callback);
     }
 
-    /// A window off the screen presents nothing: the layer can hold its
-    /// drawables, and a wait for one can block the main thread for a second.
-    /// The scene builds again when the window is back on the screen.
+    /// A window off the screen presents nothing: a wait for a drawable of its
+    /// layer can block the main thread for a second. The first frame back on
+    /// the screen presents the scene.
     fn draw(&self, scene: &gpui::Scene) {
         let mut this = self.0.lock();
         if this.is_on_screen() {
             this.renderer.draw(scene);
         } else {
-            this.missed_present = true;
+            this.needs_present = true;
         }
     }
 
     // GPUI calls this without waking the frame waker when a window only needs
     // a present, so a paused Metal link must resume here too.
     fn schedule_frame(&self) {
-        if let Some(metal_frames) = &self.2 {
-            metal_frames.wake();
-        }
-        self.3.wake();
+        self.2.wake();
     }
 
     fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
-        let metal_frames = self.2.as_ref().map(Rc::downgrade);
-        let timer_frames = Rc::downgrade(&self.3);
+        let frame_wakers = Rc::downgrade(&self.2);
         Some(Rc::new(move || {
-            if let Some(metal_frames) = metal_frames.as_ref().and_then(Weak::upgrade) {
-                metal_frames.wake();
-            }
-            if let Some(timer_frames) = timer_frames.upgrade() {
-                timer_frames.wake();
+            if let Some(frame_wakers) = frame_wakers.upgrade() {
+                frame_wakers.wake();
             }
         }))
     }
@@ -3186,10 +3200,8 @@ extern "C" fn window_did_change_occlusion_state(this: &AnyObject, _: Sel, _: *mu
         .contains(NSWindowOcclusionState::Visible)
     {
         lock.move_traffic_light();
-        lock.start_display_link(&window_state);
-    } else {
-        lock.stop_display_link();
     }
+    lock.start_display_link(&window_state);
     drop(lock);
     // The only visibility source: AppKit posts this for covering, minimizing,
     // hiding, Space switches, and display sleep alike.
@@ -3393,14 +3405,10 @@ extern "C" fn window_did_change_key_status(this: &AnyObject, selector: Sel, _: *
             if let Some(mut callback) = lock.request_frame_callback.take() {
                 lock.renderer.set_presents_with_transaction(true);
                 lock.stop_display_link();
-                let force_render = lock.take_force_render();
+                let options =
+                    lock.take_frame_options(signal_at, FrameRequestSource::NativeCallback);
                 drop(lock);
-                callback(RequestFrameOptions {
-                    force_render,
-                    signal_at,
-                    signal_source: FrameRequestSource::NativeCallback,
-                    ..Default::default()
-                });
+                callback(options);
 
                 let mut lock = window_state.lock();
                 lock.request_frame_callback = Some(callback);
@@ -3521,14 +3529,9 @@ extern "C" fn display_layer(this: &AnyObject, _: Sel, _: *mut AnyObject) {
     if let Some(mut callback) = lock.request_frame_callback.take() {
         lock.renderer.set_presents_with_transaction(true);
         lock.stop_display_link();
-        let force_render = lock.take_force_render();
+        let options = lock.take_frame_options(signal_at, FrameRequestSource::NativeCallback);
         drop(lock);
-        callback(RequestFrameOptions {
-            force_render,
-            signal_at,
-            signal_source: FrameRequestSource::NativeCallback,
-            ..Default::default()
-        });
+        callback(options);
 
         let mut lock = window_state.lock();
         lock.request_frame_callback = Some(callback);
@@ -3540,35 +3543,36 @@ extern "C" fn display_layer(this: &AnyObject, _: Sel, _: *mut AnyObject) {
 extern "C" fn step(view: *mut c_void) {
     let view = view as *mut AnyObject;
     let window_state = unsafe { get_window_state(&*view) };
-    let signal = match &window_state.lock().frame_source {
-        FrameSource::DisplayLink(Some(frame_source)) => frame_source.take_signal(),
-        _ => None,
-    };
-    let (signal_at, signal_source) = signal.map_or(
-        (None, FrameRequestSource::NativeCallback),
-        |(at, source)| (Some(at), source),
-    );
-    request_frame(&window_state, signal_at, signal_source);
-}
-
-/// Gives GPUI a frame of the window.
-fn request_frame(
-    window_state: &Rc<Mutex<MacWindowState>>,
-    signal_at: Option<scheduler::Instant>,
-    signal_source: FrameRequestSource,
-) {
     let mut lock = window_state.lock();
+
     if let Some(mut callback) = lock.request_frame_callback.take() {
-        let force_render = lock.take_force_render();
+        let signal = match &lock.frame_source {
+            FrameSource::DisplayLink(Some(frame_source)) => frame_source.take_signal(),
+            _ => None,
+        };
+        let (signal_at, signal_source) = signal.map_or(
+            (None, FrameRequestSource::NativeCallback),
+            |(at, source)| (Some(at), source),
+        );
+        let options = lock.take_frame_options(signal_at, signal_source);
         drop(lock);
-        callback(RequestFrameOptions {
-            force_render,
-            signal_at,
-            signal_source,
-            ..Default::default()
-        });
+        callback(options);
         window_state.lock().request_frame_callback = Some(callback);
     }
+}
+
+/// Gives GPUI a frame of a window that no display link paces.
+fn timer_frame(window_state: &Rc<Mutex<MacWindowState>>, signal_at: Option<scheduler::Instant>) {
+    let mut lock = window_state.lock();
+    // GPUI holds the callback while it runs a frame. It wakes the timer again
+    // after that frame if it still needs one.
+    let Some(mut callback) = lock.request_frame_callback.take() else {
+        return;
+    };
+    let options = lock.take_frame_options(signal_at, FrameRequestSource::LocalSchedule);
+    drop(lock);
+    callback(options);
+    window_state.lock().request_frame_callback = Some(callback);
 }
 
 fn metal_frame(
@@ -3585,15 +3589,10 @@ fn metal_frame(
         return;
     };
     lock.renderer.set_frame_drawable(Some(update.drawable()));
-    let force_render = lock.take_force_render();
+    let options = lock.take_frame_options(signal_at, FrameRequestSource::NativeCallback);
     drop(lock);
     metal_frames.begin_frame();
-    callback(RequestFrameOptions {
-        force_render,
-        signal_at,
-        signal_source: FrameRequestSource::NativeCallback,
-        ..Default::default()
-    });
+    callback(options);
     let mut lock = window_state.lock();
     lock.request_frame_callback = Some(callback);
     // A frame with nothing to draw leaves its drawable unused; releasing it
