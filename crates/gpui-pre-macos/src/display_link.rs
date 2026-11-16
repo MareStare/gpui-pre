@@ -3,6 +3,8 @@
 //! On macOS 14 and later a window is paced by a `CAMetalDisplayLink` on its
 //! layer ([`gpui_apple::display_link::MetalFrameSource`]). Earlier systems use
 //! the shared `CVDisplayLink` registry described below ([`WindowFrameSource`]).
+//! A window off the screen has no display link. A timer gives it the frames
+//! that GPUI asks for ([`TimerFrames`]).
 //!
 //! CVDisplayLink has no safe teardown: `CVDisplayLinkStop` merely flags the
 //! link's io thread to exit "soon" and returns immediately, and there is no
@@ -60,7 +62,7 @@ use core_graphics::display::CGDirectDisplayID;
 use dispatch2::{
     _dispatch_source_type_data_add, DispatchObject, DispatchQueue, DispatchRetained, DispatchSource,
 };
-use gpui::{FrameRequestSource, PlatformFrameSignal};
+use gpui::{BackgroundExecutor, ForegroundExecutor, FrameRequestSource, PlatformFrameSignal};
 use gpui_apple::display_link::MetalFrameSource;
 use gpui_util::ResultExt;
 use scheduler::Instant;
@@ -68,9 +70,13 @@ use std::{
     cell::{Cell, RefCell},
     collections::{BTreeMap, btree_map},
     ffi::c_void,
+    rc::{Rc, Weak},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::Duration,
 };
+
+/// The interval of the frames of [`TimerFrames`], as on a 60 Hz display.
+const TIMER_FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 
 static REGISTRY: Mutex<Registry> = Mutex::new(Registry::new());
 
@@ -339,6 +345,68 @@ impl MetalFrames {
             source.set_paused(true);
         }
         pause
+    }
+}
+
+/// The frames of a window that no display link paces. AppKit stops the display
+/// link of a window off the screen: covered, on another space, or on a display
+/// that sleeps. Then GPUI still gets each frame that it asks for, so that work
+/// that waits for a frame ends. A frame comes one interval after the request.
+/// Scripts and tests drive windows that nobody sees this way.
+pub struct TimerFrames {
+    foreground_executor: ForegroundExecutor,
+    background_executor: BackgroundExecutor,
+    frame: Box<dyn Fn()>,
+    /// Whether the window has no display link.
+    active: Cell<bool>,
+    /// Whether a frame waits for its timer.
+    armed: Cell<bool>,
+}
+
+impl TimerFrames {
+    /// `frame` gives GPUI a frame. The source starts active: a window has no
+    /// display link until it is on the screen.
+    pub fn new(
+        foreground_executor: ForegroundExecutor,
+        background_executor: BackgroundExecutor,
+        frame: impl Fn() + 'static,
+    ) -> Self {
+        Self {
+            foreground_executor,
+            background_executor,
+            frame: Box::new(frame),
+            active: Cell::new(true),
+            armed: Cell::new(false),
+        }
+    }
+
+    /// Sets whether the window has no display link. A window that loses its
+    /// link gets one frame, for a request that the link did not serve.
+    pub fn set_active(self: &Rc<Self>, active: bool) {
+        let was_active = self.active.replace(active);
+        if active && !was_active {
+            self.wake();
+        }
+    }
+
+    /// Asks for a frame. Does nothing while a display link paces the window.
+    pub fn wake(self: &Rc<Self>) {
+        if !self.active.get() || self.armed.replace(true) {
+            return;
+        }
+        let this = Rc::downgrade(self);
+        let timer = self.background_executor.timer(TIMER_FRAME_INTERVAL);
+        self.foreground_executor
+            .spawn(async move {
+                timer.await;
+                if let Some(this) = Weak::upgrade(&this) {
+                    this.armed.set(false);
+                    if this.active.get() {
+                        (this.frame)();
+                    }
+                }
+            })
+            .detach();
     }
 }
 

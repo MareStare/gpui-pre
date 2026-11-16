@@ -1,8 +1,8 @@
 use crate::{
     BoolExt, MacDisplay, MetalFrames, NSRange, NSStringExt, TISCopyCurrentKeyboardInputSource,
-    TISGetInputSourceProperty, WindowFrameSource, events::platform_input_from_native, image_cursor,
-    kTISPropertyInputSourceIsASCIICapable, kTISPropertyInputSourceType, kTISTypeKeyboardInputMode,
-    ns_string, pen::pen_event, renderer,
+    TISGetInputSourceProperty, TimerFrames, WindowFrameSource, events::platform_input_from_native,
+    image_cursor, kTISPropertyInputSourceIsASCIICapable, kTISPropertyInputSourceType,
+    kTISTypeKeyboardInputMode, ns_string, pen::pen_event, renderer,
 };
 use anyhow::Result;
 use block2::RcBlock;
@@ -665,6 +665,11 @@ struct MacWindowState {
     cursor: CursorRequest,
     cursor_visible: Arc<AtomicBool>,
     frame_source: FrameSource,
+    /// The frames while `frame_source` paces none.
+    timer_frames: Rc<TimerFrames>,
+    /// Whether a scene was not presented because the window was off the
+    /// screen.
+    missed_present: bool,
     renderer: renderer::Renderer,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
@@ -836,14 +841,10 @@ impl MacWindowState {
     /// weakly to deliver frames.
     fn start_display_link(&mut self, window_state: &Rc<Mutex<MacWindowState>>) {
         self.stop_display_link();
-        if !self
-            .native_window()
-            .occlusionState()
-            .contains(NSWindowOcclusionState::Visible)
-        {
+        if !self.is_on_screen() {
             return;
         }
-        match &mut self.frame_source {
+        let started = match &mut self.frame_source {
             FrameSource::Metal(metal_frames) => {
                 let Some(layer) = self.renderer.layer() else {
                     return;
@@ -859,6 +860,9 @@ impl MacWindowState {
                 if let Some(source) = source {
                     metal_frames.replace(Some(source));
                     self.renderer.set_display_link_attached(true);
+                    true
+                } else {
+                    false
                 }
             }
             FrameSource::DisplayLink(frame_source) => {
@@ -871,9 +875,11 @@ impl MacWindowState {
                 frame_source
                     .get_or_insert_with(|| WindowFrameSource::new(data, step))
                     .start(display_id)
-                    .log_err();
+                    .log_err()
+                    .is_some()
             }
-        }
+        };
+        self.timer_frames.set_active(!started);
     }
 
     fn stop_display_link(&mut self) {
@@ -889,6 +895,24 @@ impl MacWindowState {
             FrameSource::DisplayLink(Some(frame_source)) => frame_source.stop(),
             FrameSource::DisplayLink(None) => {}
         }
+        self.timer_frames.set_active(true);
+    }
+
+    /// Whether a part of the window is on a screen that shows it. AppKit
+    /// reports a covered window, a window on another space and a window on a
+    /// display that sleeps as not visible.
+    fn is_on_screen(&self) -> bool {
+        self.native_window()
+            .occlusionState()
+            .contains(NSWindowOcclusionState::Visible)
+    }
+
+    /// Whether the next frame must build the scene again: after a lost GPU
+    /// device, or for a window back on the screen that did not present its
+    /// last scene. Clears the flags.
+    fn take_force_render(&mut self) -> bool {
+        let missed_present = self.is_on_screen() && mem::take(&mut self.missed_present);
+        self.renderer.take_force_render() || missed_present
     }
 
     fn is_maximized(&self) -> bool {
@@ -987,6 +1011,8 @@ pub(crate) struct MacWindow(
     /// The Metal link's frame waker, kept outside the lock so waking never
     /// waits on it. `None` when a `CVDisplayLink` paces frames.
     Option<Rc<MetalFrames>>,
+    /// The frames off the screen, kept outside the lock for the same reason.
+    Rc<TimerFrames>,
 );
 
 impl MacWindow {
@@ -1124,65 +1150,81 @@ impl MacWindow {
             let metal_frames = (MetalFrameSource::is_available()
                 && renderer.draws_with_display_link_drawables())
             .then(Rc::<MetalFrames>::default);
-            let state = Rc::new(Mutex::new(MacWindowState {
-                handle,
-                foreground_executor,
-                background_executor,
-                native_window,
-                native_view: NonNull::new_unchecked(native_view),
-                blurred_view: None,
-                background_appearance: WindowBackgroundAppearance::Opaque,
-                cursor: CursorRequest::default(),
-                cursor_visible,
-                frame_source: match &metal_frames {
-                    Some(metal_frames) => FrameSource::Metal(metal_frames.clone()),
-                    None => FrameSource::DisplayLink(None),
-                },
-                renderer,
-                request_frame_callback: None,
-                event_callback: None,
-                pen_callback: None,
-                activate_callback: None,
-                visibility_callback: None,
-                last_visibility: None,
-                resize_callback: None,
-                moved_callback: None,
-                display_changed_callback: None,
-                should_close_callback: None,
-                close_callback: None,
-                appearance_changed_callback: None,
-                input_handler: None,
-                last_key_equivalent: None,
-                last_left_mouse_down_event: None,
-                synthetic_drag_counter: 0,
-                traffic_light_position: titlebar
-                    .as_ref()
-                    .and_then(|titlebar| titlebar.traffic_light_position),
-                traffic_light_frames: None,
-                pre_fullscreen_traffic_light_frames: None,
-                transparent_titlebar: titlebar
-                    .as_ref()
-                    .is_none_or(|titlebar| titlebar.appears_transparent),
-                previous_modifiers_changed_event: None,
-                keystroke_for_do_command: None,
-                do_command_handled: None,
-                external_files_dragged: false,
-                first_mouse: false,
-                app_owns_titlebar_drag,
-                fullscreen_restore_bounds: Bounds::default(),
-                is_exiting_fullscreen: false,
-                simple_fullscreen_state: None,
-                move_tab_to_new_window_callback: None,
-                merge_all_windows_callback: None,
-                select_next_tab_callback: None,
-                select_previous_tab_callback: None,
-                toggle_tab_bar_callback: None,
-                activated_least_once: false,
-                closed: Arc::new(AtomicBool::new(false)),
-                accesskit_adapter: None,
-                sheet_parent: None,
-            }));
-            let mut window = Self(state, marker, metal_frames);
+            let state = Rc::new_cyclic(|state: &Weak<Mutex<MacWindowState>>| {
+                let state = state.clone();
+                let timer_frames = TimerFrames::new(
+                    foreground_executor.clone(),
+                    background_executor.clone(),
+                    move || {
+                        if let Some(state) = state.upgrade() {
+                            let signal_at = PlatformFrameSignal::capture(scheduler::Instant::now);
+                            request_frame(&state, signal_at, FrameRequestSource::LocalSchedule);
+                        }
+                    },
+                );
+                Mutex::new(MacWindowState {
+                    handle,
+                    foreground_executor,
+                    background_executor,
+                    native_window,
+                    native_view: NonNull::new_unchecked(native_view),
+                    blurred_view: None,
+                    background_appearance: WindowBackgroundAppearance::Opaque,
+                    cursor: CursorRequest::default(),
+                    cursor_visible,
+                    frame_source: match &metal_frames {
+                        Some(metal_frames) => FrameSource::Metal(metal_frames.clone()),
+                        None => FrameSource::DisplayLink(None),
+                    },
+                    timer_frames: Rc::new(timer_frames),
+                    missed_present: false,
+                    renderer,
+                    request_frame_callback: None,
+                    event_callback: None,
+                    pen_callback: None,
+                    activate_callback: None,
+                    visibility_callback: None,
+                    last_visibility: None,
+                    resize_callback: None,
+                    moved_callback: None,
+                    display_changed_callback: None,
+                    should_close_callback: None,
+                    close_callback: None,
+                    appearance_changed_callback: None,
+                    input_handler: None,
+                    last_key_equivalent: None,
+                    last_left_mouse_down_event: None,
+                    synthetic_drag_counter: 0,
+                    traffic_light_position: titlebar
+                        .as_ref()
+                        .and_then(|titlebar| titlebar.traffic_light_position),
+                    traffic_light_frames: None,
+                    pre_fullscreen_traffic_light_frames: None,
+                    transparent_titlebar: titlebar
+                        .as_ref()
+                        .is_none_or(|titlebar| titlebar.appears_transparent),
+                    previous_modifiers_changed_event: None,
+                    keystroke_for_do_command: None,
+                    do_command_handled: None,
+                    external_files_dragged: false,
+                    first_mouse: false,
+                    app_owns_titlebar_drag,
+                    fullscreen_restore_bounds: Bounds::default(),
+                    is_exiting_fullscreen: false,
+                    simple_fullscreen_state: None,
+                    move_tab_to_new_window_callback: None,
+                    merge_all_windows_callback: None,
+                    select_next_tab_callback: None,
+                    select_previous_tab_callback: None,
+                    toggle_tab_bar_callback: None,
+                    activated_least_once: false,
+                    closed: Arc::new(AtomicBool::new(false)),
+                    accesskit_adapter: None,
+                    sheet_parent: None,
+                })
+            });
+            let timer_frames = state.lock().timer_frames.clone();
+            let mut window = Self(state, marker, metal_frames, timer_frames);
 
             (*native_window)
                 .class()
@@ -2188,9 +2230,16 @@ impl PlatformWindow for MacWindow {
         self.0.as_ref().lock().toggle_tab_bar_callback = Some(callback);
     }
 
+    /// A window off the screen presents nothing: the layer can hold its
+    /// drawables, and a wait for one can block the main thread for a second.
+    /// The scene builds again when the window is back on the screen.
     fn draw(&self, scene: &gpui::Scene) {
         let mut this = self.0.lock();
-        this.renderer.draw(scene);
+        if this.is_on_screen() {
+            this.renderer.draw(scene);
+        } else {
+            this.missed_present = true;
+        }
     }
 
     // GPUI calls this without waking the frame waker when a window only needs
@@ -2199,13 +2248,18 @@ impl PlatformWindow for MacWindow {
         if let Some(metal_frames) = &self.2 {
             metal_frames.wake();
         }
+        self.3.wake();
     }
 
     fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
-        let metal_frames = Rc::downgrade(self.2.as_ref()?);
+        let metal_frames = self.2.as_ref().map(Rc::downgrade);
+        let timer_frames = Rc::downgrade(&self.3);
         Some(Rc::new(move || {
-            if let Some(metal_frames) = metal_frames.upgrade() {
+            if let Some(metal_frames) = metal_frames.as_ref().and_then(Weak::upgrade) {
                 metal_frames.wake();
+            }
+            if let Some(timer_frames) = timer_frames.upgrade() {
+                timer_frames.wake();
             }
         }))
     }
@@ -3339,7 +3393,7 @@ extern "C" fn window_did_change_key_status(this: &AnyObject, selector: Sel, _: *
             if let Some(mut callback) = lock.request_frame_callback.take() {
                 lock.renderer.set_presents_with_transaction(true);
                 lock.stop_display_link();
-                let force_render = lock.renderer.take_force_render();
+                let force_render = lock.take_force_render();
                 drop(lock);
                 callback(RequestFrameOptions {
                     force_render,
@@ -3467,7 +3521,7 @@ extern "C" fn display_layer(this: &AnyObject, _: Sel, _: *mut AnyObject) {
     if let Some(mut callback) = lock.request_frame_callback.take() {
         lock.renderer.set_presents_with_transaction(true);
         lock.stop_display_link();
-        let force_render = lock.renderer.take_force_render();
+        let force_render = lock.take_force_render();
         drop(lock);
         callback(RequestFrameOptions {
             force_render,
@@ -3486,18 +3540,26 @@ extern "C" fn display_layer(this: &AnyObject, _: Sel, _: *mut AnyObject) {
 extern "C" fn step(view: *mut c_void) {
     let view = view as *mut AnyObject;
     let window_state = unsafe { get_window_state(&*view) };
-    let mut lock = window_state.lock();
+    let signal = match &window_state.lock().frame_source {
+        FrameSource::DisplayLink(Some(frame_source)) => frame_source.take_signal(),
+        _ => None,
+    };
+    let (signal_at, signal_source) = signal.map_or(
+        (None, FrameRequestSource::NativeCallback),
+        |(at, source)| (Some(at), source),
+    );
+    request_frame(&window_state, signal_at, signal_source);
+}
 
+/// Gives GPUI a frame of the window.
+fn request_frame(
+    window_state: &Rc<Mutex<MacWindowState>>,
+    signal_at: Option<scheduler::Instant>,
+    signal_source: FrameRequestSource,
+) {
+    let mut lock = window_state.lock();
     if let Some(mut callback) = lock.request_frame_callback.take() {
-        let signal = match &lock.frame_source {
-            FrameSource::DisplayLink(Some(frame_source)) => frame_source.take_signal(),
-            _ => None,
-        };
-        let (signal_at, signal_source) = signal.map_or(
-            (None, FrameRequestSource::NativeCallback),
-            |(at, source)| (Some(at), source),
-        );
-        let force_render = lock.renderer.take_force_render();
+        let force_render = lock.take_force_render();
         drop(lock);
         callback(RequestFrameOptions {
             force_render,
@@ -3523,9 +3585,11 @@ fn metal_frame(
         return;
     };
     lock.renderer.set_frame_drawable(Some(update.drawable()));
+    let force_render = lock.take_force_render();
     drop(lock);
     metal_frames.begin_frame();
     callback(RequestFrameOptions {
+        force_render,
         signal_at,
         signal_source: FrameRequestSource::NativeCallback,
         ..Default::default()
