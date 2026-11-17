@@ -53,7 +53,6 @@ use anyhow::{Context as _, Result};
 use async_task::Runnable;
 use collections::FxHashMap;
 use futures::channel::oneshot;
-use image::RgbaImage;
 use image::codecs::{gif::GifDecoder, webp::WebPDecoder};
 use image::{DynamicImage, Frame, Rgba};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -1511,7 +1510,7 @@ pub trait PlatformHeadlessRenderer {
         &mut self,
         scene: &Scene,
         size: Size<DevicePixels>,
-    ) -> Result<RgbaImage> {
+    ) -> Result<image::RgbaImage> {
         self.render_scene_to_pending_image(scene, size)?.wait()
     }
 
