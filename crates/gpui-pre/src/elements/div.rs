@@ -2126,10 +2126,6 @@ impl Element for Div {
             (child_max - child_min).into()
         };
 
-        if let Some(scroll_handle) = self.interactivity.tracked_scroll_handle.as_ref() {
-            scroll_handle.scroll_to_active_item();
-        }
-
         self.interactivity.prepaint(
             global_id,
             inspector_id,
@@ -2569,6 +2565,8 @@ impl Interactivity {
                 .map(|handle| handle.0.borrow_mut());
             if let Some(scroll_handle_state) = tracked_scroll_handle.as_deref_mut() {
                 scroll_handle_state.overflow = style.overflow;
+                scroll_handle_state.bounds = bounds;
+                scroll_handle_state.scroll_to_active_item();
                 scroll_to_bottom = mem::take(&mut scroll_handle_state.scroll_to_bottom);
             }
 
@@ -2605,7 +2603,6 @@ impl Interactivity {
 
             if let Some(mut scroll_handle_state) = tracked_scroll_handle {
                 scroll_handle_state.max_offset = scroll_max;
-                scroll_handle_state.bounds = bounds;
             }
 
             *scroll_offset
@@ -4314,7 +4311,7 @@ where
 }
 
 /// Represents an element that can be scrolled *to* in its parent element.
-/// Contrary to [ScrollHandle::scroll_to_active_item], an anchored element does not have to be an immediate child of the parent.
+/// Contrary to [ScrollHandle::scroll_to_item], an anchored element does not have to be an immediate child of the parent.
 #[derive(Clone)]
 pub struct ScrollAnchor {
     handle: ScrollHandle,
@@ -4351,6 +4348,57 @@ struct ScrollHandleState {
     scroll_to_bottom: bool,
     overflow: Point<Overflow>,
     active_item: Option<ScrollActiveItem>,
+}
+
+impl ScrollHandleState {
+    /// Scrolls the least distance that shows the whole active item, or puts
+    /// the item at the top when the request asks for that. Keeps the request
+    /// while the item has no bounds.
+    fn scroll_to_active_item(&mut self) {
+        let Some(active_item) = self.active_item else {
+            return;
+        };
+
+        let active_item = match self.child_bounds.get(active_item.index) {
+            Some(bounds) => {
+                let mut scroll_offset = self.offset.borrow_mut();
+
+                match active_item.strategy {
+                    ScrollStrategy::FirstVisible => {
+                        if self.overflow.y == Overflow::Scroll {
+                            let child_height = bounds.size.height;
+                            let viewport_height = self.bounds.size.height;
+                            if child_height > viewport_height {
+                                scroll_offset.y = self.bounds.top() - bounds.top();
+                            } else if bounds.top() + scroll_offset.y < self.bounds.top() {
+                                scroll_offset.y = self.bounds.top() - bounds.top();
+                            } else if bounds.bottom() + scroll_offset.y > self.bounds.bottom() {
+                                scroll_offset.y = self.bounds.bottom() - bounds.bottom();
+                            }
+                        }
+                    }
+                    ScrollStrategy::Top => {
+                        scroll_offset.y = self.bounds.top() - bounds.top();
+                    }
+                }
+
+                if self.overflow.x == Overflow::Scroll {
+                    let child_width = bounds.size.width;
+                    let viewport_width = self.bounds.size.width;
+                    if child_width > viewport_width {
+                        scroll_offset.x = self.bounds.left() - bounds.left();
+                    } else if bounds.left() + scroll_offset.x < self.bounds.left() {
+                        scroll_offset.x = self.bounds.left() - bounds.left();
+                    } else if bounds.right() + scroll_offset.x > self.bounds.right() {
+                        scroll_offset.x = self.bounds.right() - bounds.right();
+                    }
+                }
+                None
+            }
+            None => Some(active_item),
+        };
+        self.active_item = active_item;
+    }
 }
 
 #[derive(Default, Debug, Clone, Copy)]
@@ -4461,57 +4509,6 @@ impl ScrollHandle {
         });
     }
 
-    /// Scrolls the minimal amount to either ensure that the child is
-    /// fully visible or the top element of the view depends on the
-    /// scroll strategy
-    fn scroll_to_active_item(&self) {
-        let mut state = self.0.borrow_mut();
-
-        let Some(active_item) = state.active_item else {
-            return;
-        };
-
-        let active_item = match state.child_bounds.get(active_item.index) {
-            Some(bounds) => {
-                let mut scroll_offset = state.offset.borrow_mut();
-
-                match active_item.strategy {
-                    ScrollStrategy::FirstVisible => {
-                        if state.overflow.y == Overflow::Scroll {
-                            let child_height = bounds.size.height;
-                            let viewport_height = state.bounds.size.height;
-                            if child_height > viewport_height {
-                                scroll_offset.y = state.bounds.top() - bounds.top();
-                            } else if bounds.top() + scroll_offset.y < state.bounds.top() {
-                                scroll_offset.y = state.bounds.top() - bounds.top();
-                            } else if bounds.bottom() + scroll_offset.y > state.bounds.bottom() {
-                                scroll_offset.y = state.bounds.bottom() - bounds.bottom();
-                            }
-                        }
-                    }
-                    ScrollStrategy::Top => {
-                        scroll_offset.y = state.bounds.top() - bounds.top();
-                    }
-                }
-
-                if state.overflow.x == Overflow::Scroll {
-                    let child_width = bounds.size.width;
-                    let viewport_width = state.bounds.size.width;
-                    if child_width > viewport_width {
-                        scroll_offset.x = state.bounds.left() - bounds.left();
-                    } else if bounds.left() + scroll_offset.x < state.bounds.left() {
-                        scroll_offset.x = state.bounds.left() - bounds.left();
-                    } else if bounds.right() + scroll_offset.x > state.bounds.right() {
-                        scroll_offset.x = state.bounds.right() - bounds.right();
-                    }
-                }
-                None
-            }
-            None => Some(active_item),
-        };
-        state.active_item = active_item;
-    }
-
     /// Scrolls to the bottom.
     pub fn scroll_to_bottom(&self) {
         let mut state = self.0.borrow_mut();
@@ -4567,7 +4564,8 @@ mod tests {
     use super::*;
     use crate::{
         AnyWindowHandle, AppContext as _, Context, GestureTuning, InputEvent, Keystroke,
-        MouseMoveEvent, TestAppContext, TouchEvent, TouchId, canvas, util::FluentBuilder as _,
+        MouseMoveEvent, TestAppContext, TouchEvent, TouchId, WindowHandle, canvas,
+        util::FluentBuilder as _,
     };
     use std::{cell::Cell, rc::Weak};
 
@@ -5018,7 +5016,7 @@ mod tests {
             });
         }
 
-        handle.scroll_to_active_item();
+        handle.0.borrow_mut().scroll_to_active_item();
 
         assert_eq!(handle.offset().x, px(-25.));
     }
@@ -5037,7 +5035,7 @@ mod tests {
             });
         }
 
-        handle.scroll_to_active_item();
+        handle.0.borrow_mut().scroll_to_active_item();
 
         assert_eq!(handle.offset().y, px(-25.));
     }
@@ -5813,6 +5811,113 @@ mod tests {
             .unwrap();
 
         assert_eq!(scroll_handle.max_offset().y, px(0.));
+    }
+
+    const STRIP_ROW_WIDTH: Pixels = px(100.);
+    const STRIP_BUTTON_WIDTH: Pixels = px(36.);
+    const STRIP_ITEM_WIDTH: Pixels = px(50.);
+    const STRIP_ITEM_COUNT: usize = 10;
+
+    /// A horizontal scroll box of fixed items. A button after the box takes
+    /// part of its row while `with_button` is set.
+    struct ItemStrip {
+        scroll_handle: ScrollHandle,
+        with_button: bool,
+    }
+
+    impl Render for ItemStrip {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().pl(px(30.)).pt(px(40.)).child(
+                div()
+                    .flex()
+                    .w(STRIP_ROW_WIDTH)
+                    .h(px(20.))
+                    .child(
+                        div()
+                            .id("strip")
+                            .flex()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .overflow_x_scroll()
+                            .track_scroll(&self.scroll_handle)
+                            .children(
+                                (0..STRIP_ITEM_COUNT)
+                                    .map(|_| div().flex_none().w(STRIP_ITEM_WIDTH).h_full()),
+                            ),
+                    )
+                    .when(self.with_button, |row| {
+                        row.child(div().flex_none().w(STRIP_BUTTON_WIDTH).h_full())
+                    }),
+            )
+        }
+    }
+
+    /// Opens a window with the strip. The window draws its first frame.
+    fn add_item_strip(
+        cx: &mut TestAppContext,
+        with_button: bool,
+        scroll_to: Option<usize>,
+    ) -> (WindowHandle<ItemStrip>, ScrollHandle) {
+        let scroll_handle = ScrollHandle::new();
+        if let Some(ix) = scroll_to {
+            scroll_handle.scroll_to_item(ix);
+        }
+        let window = cx.add_window({
+            let scroll_handle = scroll_handle.clone();
+            move |_, _| ItemStrip {
+                scroll_handle,
+                with_button,
+            }
+        });
+        (window, scroll_handle)
+    }
+
+    /// The item lies inside the viewport of the strip after the scroll.
+    #[track_caller]
+    fn assert_item_shown(scroll_handle: &ScrollHandle, ix: usize) {
+        let viewport = scroll_handle.bounds();
+        let item = scroll_handle.bounds_for_item(ix).unwrap();
+        let offset = scroll_handle.offset();
+        let left = item.left() + offset.x;
+        let right = item.right() + offset.x;
+        assert!(
+            viewport.left() <= left && right <= viewport.right(),
+            "item {ix} spans {left:?}..{right:?} outside the viewport {:?}..{:?}",
+            viewport.left(),
+            viewport.right(),
+        );
+    }
+
+    #[gpui::test]
+    fn scroll_to_item_uses_the_viewport_of_its_frame(cx: &mut TestAppContext) {
+        let (window, scroll_handle) = add_item_strip(cx, false, None);
+        assert_eq!(scroll_handle.bounds().size.width, STRIP_ROW_WIDTH);
+
+        let last = STRIP_ITEM_COUNT - 1;
+        window
+            .update(cx, |strip, _, cx| {
+                strip.with_button = true;
+                strip.scroll_handle.scroll_to_item(last);
+                cx.notify();
+            })
+            .unwrap();
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+
+        let viewport_width = STRIP_ROW_WIDTH - STRIP_BUTTON_WIDTH;
+        assert_eq!(scroll_handle.bounds().size.width, viewport_width);
+        let content_width = STRIP_ITEM_WIDTH * STRIP_ITEM_COUNT as f32;
+        assert_eq!(scroll_handle.offset().x, viewport_width - content_width);
+        assert_item_shown(&scroll_handle, last);
+    }
+
+    #[gpui::test]
+    fn scroll_to_item_before_the_first_frame_scrolls(cx: &mut TestAppContext) {
+        let last = STRIP_ITEM_COUNT - 1;
+        let (_, scroll_handle) = add_item_strip(cx, true, Some(last));
+
+        assert_item_shown(&scroll_handle, last);
     }
 
     struct ContentSizedGrid;

@@ -157,6 +157,10 @@ commit, then rebase the patch commits onto it.
   Adding fonts keeps the font ids of the fonts that resolve to the same
   faces. `all_font_names` lists the typographic names. The text system
   needs Windows 10 version 1709 or later.
+- Scroll to an item in its frame: `ScrollHandle::scroll_to_item` scrolls
+  with the viewport bounds, the overflow and the child bounds of the frame
+  that shows the scroll. A box that changes its size in that frame shows
+  the whole item, and a request before the first frame scrolls too.
 
 ## License
 
