@@ -23,8 +23,8 @@ its copy here: `cargo build -p gpui-pre-wgpu`.
 The unit tests of a crate need its `test-support` feature. The tests of
 `gpui-pre-wgpu` also need `font-kit`, which `gpui-pre-linux` turns on:
 `cargo test -p gpui-pre-wgpu --features test-support,font-kit`.
-The tests of `gpui-pre-wgpu` and `gpui-pre-apple` read fonts of Zed
-from `assets/fonts`.
+The tests of `gpui-pre-wgpu`, `gpui-pre-apple` and `gpui-pre-windows`
+read fonts of Zed from `assets/fonts`.
 
 ## Layout of the history
 

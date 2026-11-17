@@ -1066,6 +1066,42 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn a_variable_face_draws_each_requested_weight() -> Result<()> {
+        gpui::weight_conformance::draws_each_requested_weight(&DirectWriteTextSystem::new()?)
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn a_variable_face_draws_the_nearest_weight_of_its_axis() -> Result<()> {
+        gpui::weight_conformance::draws_the_nearest_weight_of_the_axis(
+            &DirectWriteTextSystem::new()?
+        )
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn a_face_draws_the_nearest_whole_weight() -> Result<()> {
+        gpui::weight_conformance::draws_the_nearest_whole_weight(Arc::new(
+            DirectWriteTextSystem::new()?,
+        ))
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn a_fallback_face_draws_at_the_weight_of_its_run() -> Result<()> {
+        gpui::weight_conformance::fallback_draws_at_the_weight_of_its_run(
+            &DirectWriteTextSystem::new()?,
+        )
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn many_weights_in_many_sizes_load_one_font_per_drawn_weight() -> Result<()> {
+        gpui::weight_conformance::loads_one_font_per_drawn_weight(&DirectWriteTextSystem::new()?)
+    }
+
     #[test]
     fn adding_fonts_keeps_the_ids_of_unchanged_fonts() -> Result<()> {
         let text_system = DirectWriteTextSystem::new()?;
