@@ -238,7 +238,7 @@ impl LineLayout {
             .dedup_by(|(_, previous_index, ..), (_, index, ..)| previous_index == index)
             .peekable();
 
-        while let Some((boundary, index, x)) = glyphs.next() {
+        'glyphs: while let Some((boundary, index, x)) = glyphs.next() {
             let byte = text.as_bytes()[index];
             if byte == b'\n' {
                 continue;
@@ -267,14 +267,22 @@ impl LineLayout {
             }
 
             let next_x = glyphs.peek().map_or(self.width, |(_, _, x)| *x);
-            let width = next_x - last_boundary_x;
 
-            if width > wrap_width && boundary > last_boundary {
+            // A row that is still too wide after a break at the candidate
+            // breaks again before this glyph. The spaces at the end of a
+            // row hang past the edge, as in CSS.
+            loop {
+                let width = next_x - last_boundary_x;
+                let overflows = byte != b' ' && width > wrap_width && boundary > last_boundary;
+                if !overflows {
+                    break;
+                }
+
                 // When used line_clamp, we should limit the number of lines.
                 if let Some(max_lines) = max_lines
                     && boundaries.len() >= max_lines.saturating_sub(1)
                 {
-                    break;
+                    break 'glyphs;
                 }
 
                 if let Some(last_candidate_ix) = last_candidate_ix.take() {
@@ -1053,5 +1061,95 @@ mod tests {
 
         let positions = glyph_x_positions(&layout);
         assert_eq!(positions, vec![0.5, 0.5]);
+    }
+
+    /// Lays out `text` with fixed advances: 4 for a space, 3 for `i`, 12 for
+    /// `m` and 8 for other characters.
+    fn layout_with_advances(text: &str) -> LineLayout {
+        let mut x = 0.;
+        let mut glyphs = Vec::new();
+        for (index, ch) in text.char_indices() {
+            glyphs.push(glyph_at(x, index));
+            x += match ch {
+                ' ' => 4.,
+                'i' => 3.,
+                'm' => 12.,
+                _ => 8.,
+            };
+        }
+        LineLayout {
+            width: px(x),
+            len: text.len(),
+            ..make_layout(glyphs)
+        }
+    }
+
+    /// The rows of `text` wrapped at `wrap_width`.
+    fn rows(text: &str, wrap_width: Pixels) -> Vec<&str> {
+        let layout = layout_with_advances(text);
+        let glyphs = &layout.runs[0].glyphs;
+        let mut starts = vec![0];
+        starts.extend(
+            layout
+                .compute_wrap_boundaries(text, wrap_width, None, &mut WrapScratch::default())
+                .iter()
+                .map(|boundary| glyphs[boundary.glyph_ix].index),
+        );
+        let mut ends = starts[1..].to_vec();
+        ends.push(text.len());
+        starts
+            .iter()
+            .zip(ends)
+            .map(|(&start, end)| &text[start..end])
+            .collect()
+    }
+
+    #[test]
+    fn test_no_row_is_wider_than_a_wrap_width_of_at_least_the_widest_glyph() {
+        for text in [
+            "aaa bbb cc",
+            "the quick brown fox jumps over the lazy dog",
+            "mmm iii mmm iii",
+            "i mmmm",
+            "ii i m mmmm",
+            "minimum maximum i i i",
+            "  leading spaces",
+            "trailing spaces   ",
+            "two  spaces",
+            "path/to/some/file_name.mart",
+            "Hello world你好世界",
+        ] {
+            let widest_glyph = text
+                .chars()
+                .map(|ch| layout_with_advances(&ch.to_string()).width)
+                .fold(px(0.), Pixels::max);
+            let layout = layout_with_advances(text);
+            for extra in [0., 1., 5., 13., 30.] {
+                let wrap_width = widest_glyph + px(extra);
+                let wrap = |max_lines| {
+                    let mut scratch = WrapScratch::default();
+                    layout.compute_wrap_boundaries(text, wrap_width, max_lines, &mut scratch)
+                };
+                let all = wrap(None);
+                for max_lines in 1..=3 {
+                    let clamped = wrap(Some(max_lines));
+                    assert_eq!(
+                        clamped[..],
+                        all[..all.len().min(max_lines - 1)],
+                        "{text:?} wrapped at {wrap_width:?} in {max_lines} lines"
+                    );
+                }
+                for row in rows(text, wrap_width) {
+                    // The spaces at the end of a row hang past the edge.
+                    let width = layout_with_advances(row.trim_end_matches(' ')).width;
+                    assert!(
+                        width <= wrap_width,
+                        "{text:?} wrapped at {wrap_width:?} got a row {row:?} {width:?} wide"
+                    );
+                }
+            }
+        }
+        assert_eq!(rows("aaa bbb", px(24.)), ["aaa ", "bbb"]);
+        assert_eq!(rows("aaa  bbb", px(24.)), ["aaa  ", "bbb"]);
     }
 }
