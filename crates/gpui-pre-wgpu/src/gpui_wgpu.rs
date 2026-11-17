@@ -11,7 +11,7 @@ mod window_renderer;
 
 pub use cosmic_text_system::*;
 pub use renderer_choice::wgpu_requested;
-pub use startup_log::time_startup_stage;
+pub use startup_log::{time_startup_stage, time_window_renderer};
 pub use wgpu;
 pub use wgpu_atlas::*;
 pub use wgpu_context::*;

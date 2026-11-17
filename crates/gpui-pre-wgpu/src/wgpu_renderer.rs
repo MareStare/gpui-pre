@@ -1,5 +1,7 @@
 // Modified for gpui-pre (snapshot of zed@d2a4fb6): adapt device queues and sRGB detection to wgpu 30.0.1.
 use crate::frame_failures::{FrameCheck, FrameFailures};
+#[cfg(not(target_family = "wasm"))]
+use crate::time_window_renderer;
 use crate::wgpu_custom_surface::as_wgpu_surface;
 use crate::{
     CompositorGpuHint, DeviceErrorState, WgpuAtlas, WgpuContext, WgpuSurfaceFrame,
@@ -369,15 +371,18 @@ impl WgpuRenderer {
         W: HasWindowHandle + HasDisplayHandle + std::fmt::Debug + Send + Sync + Clone + 'static,
     {
         let source = WindowSource(window.clone());
-        time_startup_stage("window-renderer", || {
-            Self::new_from_source(
-                gpu_context,
-                &source,
-                config,
-                wgpu::SurfaceColorSpace::Auto,
-                compositor_gpu,
-            )
-        })
+        time_window_renderer(
+            || {
+                Self::new_from_source(
+                    gpu_context,
+                    &source,
+                    config,
+                    wgpu::SurfaceColorSpace::Auto,
+                    compositor_gpu,
+                )
+            },
+            Self::backend_name,
+        )
     }
 
     #[cfg(not(target_family = "wasm"))]
@@ -1219,6 +1224,13 @@ impl WgpuRenderer {
             driver_name: adapter_info.driver.clone(),
             driver_info: adapter_info.driver_info.clone(),
         })
+    }
+
+    /// The name of the wgpu backend, e.g. `vulkan`. It is `released` once its GPU resources
+    /// are released.
+    pub fn backend_name(&self) -> &'static str {
+        self.core()
+            .map_or("released", |core| core.adapter_info.backend.to_str())
     }
 
     pub fn max_texture_size(&self) -> u32 {

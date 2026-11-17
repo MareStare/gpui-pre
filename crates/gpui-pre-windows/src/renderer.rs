@@ -8,7 +8,7 @@ use anyhow::{Context as _, Result};
 use gpui::{
     DevicePixels, GpuFailure, GpuSpecs, PlatformAtlas, Scene, Size, WindowBackgroundAppearance,
 };
-use gpui_wgpu::{TextContrast, WgpuWindowRenderer, time_startup_stage, wgpu_requested};
+use gpui_wgpu::{TextContrast, WgpuWindowRenderer, time_window_renderer, wgpu_requested};
 use raw_window_handle as rwh;
 
 use crate::{DirectXDevices, DirectXRenderer, HWND};
@@ -25,9 +25,13 @@ impl WindowRenderer {
         disable_direct_composition: bool,
         size: Size<DevicePixels>,
     ) -> Result<Self> {
-        time_startup_stage("window-renderer", || {
-            Self::new_inner(hwnd, directx_devices, disable_direct_composition, size)
-        })
+        time_window_renderer(
+            || Self::new_inner(hwnd, directx_devices, disable_direct_composition, size),
+            |renderer| match renderer {
+                Self::DirectX(_) => "native:dx11",
+                Self::Wgpu(window) => window.renderer().backend_name(),
+            },
+        )
     }
 
     fn new_inner(

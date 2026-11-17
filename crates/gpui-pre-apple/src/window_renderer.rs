@@ -6,7 +6,7 @@ use std::{ffi::c_void, ptr::NonNull, sync::Arc};
 
 use anyhow::Result;
 use gpui::{DevicePixels, PlatformAtlas, Scene, Size};
-use gpui_wgpu::{TextContrast, WgpuWindowRenderer, time_startup_stage, wgpu, wgpu_requested};
+use gpui_wgpu::{TextContrast, WgpuWindowRenderer, time_window_renderer, wgpu, wgpu_requested};
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
@@ -31,15 +31,21 @@ pub fn new_renderer(
     transparent: bool,
     use_display_p3: bool,
 ) -> anyhow::Result<Renderer> {
-    time_startup_stage("window-renderer", || {
-        if wgpu_requested("metal") {
-            match WgpuLayerRenderer::new(bounds, transparent, use_display_p3) {
-                Ok(renderer) => return Ok(Renderer::Wgpu(renderer)),
-                Err(error) => log::error!("Using the Metal renderer: {error:#}"),
+    time_window_renderer(
+        || {
+            if wgpu_requested("metal") {
+                match WgpuLayerRenderer::new(bounds, transparent, use_display_p3) {
+                    Ok(renderer) => return Ok(Renderer::Wgpu(renderer)),
+                    Err(error) => log::error!("Using the Metal renderer: {error:#}"),
+                }
             }
-        }
-        MetalRenderer::new(context, transparent, use_display_p3).map(Renderer::Metal)
-    })
+            MetalRenderer::new(context, transparent, use_display_p3).map(Renderer::Metal)
+        },
+        |renderer| match renderer {
+            Renderer::Metal(_) => "native:metal",
+            Renderer::Wgpu(layer) => layer.renderer.renderer().backend_name(),
+        },
+    )
 }
 
 impl WgpuLayerRenderer {
