@@ -101,7 +101,9 @@ pub(crate) fn has_default_optical_size(font: &CTFont) -> bool {
     value
         .as_deref()
         .and_then(|value| value.downcast_ref::<objc2_core_foundation::CFString>())
-        .is_some_and(|value| value.to_string() == DEFAULT_OPTICAL_SIZE)
+        .is_some_and(|value| {
+            *value == *objc2_core_foundation::CFString::from_static_str(DEFAULT_OPTICAL_SIZE)
+        })
 }
 
 /// The same Core Text font, with the API of objc2.

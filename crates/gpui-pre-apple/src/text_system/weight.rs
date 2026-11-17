@@ -157,7 +157,8 @@ impl AppleTextSystemState {
 #[cfg(all(test, feature = "test-support"))]
 mod tests {
     use crate::AppleTextSystem;
-    use anyhow::{Result, bail};
+    use anyhow::{Context as _, Result, bail};
+    use core_text::font::kCTFontSystemFontType;
     use gpui::{
         Bounds, DevicePixels, Font, FontFallbacks, FontRun, FontWeight, PlatformTextSystem as _,
         font, px,
@@ -280,8 +281,15 @@ mod tests {
         Ok(())
     }
 
-    /// The file of the system font.
-    const SYSTEM_FONT_FILE: &str = "/System/Library/Fonts/SFNS.ttf";
+    /// The data of the file of the system font.
+    fn system_font_file() -> Result<Vec<u8>> {
+        let system_font = core_text::font::new_ui_font_for_language(kCTFontSystemFontType, 0.0, None);
+        let path = system_font
+            .url()
+            .and_then(|url| url.to_path())
+            .context("the system font has no file")?;
+        std::fs::read(&path).with_context(|| format!("cannot read {}", path.display()))
+    }
 
     /// How a test loads the system font before it lays out a fallback to it.
     #[derive(Clone, Copy, Debug)]
@@ -296,7 +304,7 @@ mod tests {
     fn fallback_rasters(load: SystemFontLoad) -> Result<Vec<Bounds<DevicePixels>>> {
         let fonts = AppleTextSystem::new();
         variable_font_conformance::add_fonts(&fonts)?;
-        let bytes = std::fs::read(SYSTEM_FONT_FILE)?;
+        let bytes = system_font_file()?;
         let family = font_kit::font::Font::from_bytes(Arc::new(bytes.clone()), 0)?.family_name();
         match load {
             SystemFontLoad::None => {}

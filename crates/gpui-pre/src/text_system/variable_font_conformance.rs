@@ -1,6 +1,6 @@
 //! Checks of the weights and the optical sizes of a variable font that the
-//! text system of each platform must pass. Each check takes a text system with no added fonts and
-//! adds the test fonts to it.
+//! text system of each platform must pass. Each check takes a text system
+//! with no added fonts and adds the test fonts to it.
 
 use crate::{
     Font, FontFallbacks, FontId, FontRun, FontWeight, PlatformTextSystem, RenderGlyphParams,

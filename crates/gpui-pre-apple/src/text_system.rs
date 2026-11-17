@@ -431,9 +431,13 @@ impl AppleTextSystemState {
         }
         let mut font =
             font_kit::font::Font::from_core_graphics_font(requested_font.copy_to_CGFont());
-        // A copy of the font through `CGFont` loses the variation.
+        // A copy of the font through `CGFont` loses the variation and the
+        // optical size attribute.
         if let Some(weight) = weight_variation(&requested_font) {
             font = with_weight(&font, weight.round() as u16);
+        }
+        if key.default_optical_size {
+            apply_font_attributes(&mut font, &FontFeatures::default(), None, true);
         }
         // The copy may report other values than the requested font, so it
         // draws only the face of the request.
