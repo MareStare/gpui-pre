@@ -634,6 +634,16 @@ impl FocusHandle {
         self.id.contains(other.id, window)
     }
 
+    /// Obtains whether an element of the most recently rendered frame tracks this handle. In a
+    /// focus-lost listener, that frame is the one that lost the focus.
+    pub fn is_rendered(&self, window: &Window) -> bool {
+        window
+            .rendered_frame
+            .dispatch_tree
+            .focusable_node_id(self.id)
+            .is_some()
+    }
+
     /// Dispatch an action on the element that rendered this focus handle
     pub fn dispatch_action(&self, action: &dyn Action, window: &mut Window, cx: &mut App) {
         if let Some(node_id) = window
@@ -9741,6 +9751,57 @@ mod tests {
             cx.test_window(failed.window).external_drag_files(),
             [(failed_path, true)]
         );
+    }
+
+    struct HidingView {
+        shown: FocusHandle,
+        hidden: FocusHandle,
+        show_hidden: bool,
+    }
+
+    impl Render for HidingView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .child(div().w(px(50.)).h(px(50.)).track_focus(&self.shown))
+                .children(
+                    self.show_hidden
+                        .then(|| div().w(px(50.)).h(px(50.)).track_focus(&self.hidden)),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn test_focus_handle_is_rendered_in_the_last_frame(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, cx| HidingView {
+            shown: cx.focus_handle(),
+            hidden: cx.focus_handle(),
+            show_hidden: true,
+        });
+        let untracked = cx.update(|cx| cx.focus_handle());
+        cx.executor().run_until_parked();
+        window
+            .update(cx, |this, window, _| {
+                assert!(this.shown.is_rendered(window));
+                assert!(this.hidden.is_rendered(window));
+                assert!(!untracked.is_rendered(window));
+            })
+            .unwrap();
+
+        window
+            .update(cx, |this, window, cx| {
+                this.show_hidden = false;
+                cx.notify();
+                assert!(this.hidden.is_rendered(window), "no frame drew the change");
+            })
+            .unwrap();
+        cx.executor().run_until_parked();
+        window
+            .update(cx, |this, window, _| {
+                assert!(this.shown.is_rendered(window));
+                assert!(!this.hidden.is_rendered(window));
+            })
+            .unwrap();
     }
 
     struct FocusForwarder {

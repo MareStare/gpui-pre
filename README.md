@@ -161,6 +161,10 @@ commit, then rebase the patch commits onto it.
   with the viewport bounds, the overflow and the child bounds of the frame
   that shows the scroll. A box that changes its size in that frame shows
   the whole item, and a request before the first frame scrolls too.
+- Rendered focus handles: `FocusHandle::is_rendered` tells whether an
+  element of the last rendered frame tracks the handle. A focus-lost
+  listener moves the focus with no new frame, so it checks that the place
+  it picks is drawn.
 
 ## License
 
