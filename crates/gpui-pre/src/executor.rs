@@ -210,7 +210,9 @@ impl BackgroundExecutor {
         self.dispatcher.as_test().unwrap().simulate_random_delay()
     }
 
-    /// In tests, move time forward. This does not run any tasks, but does make `timer`s ready.
+    /// In tests, move time forward. This runs the ready tasks, then moves the
+    /// clock to each timer that expires within `duration` and runs the tasks
+    /// that it wakes. It ends with the clock `duration` ahead.
     #[cfg(any(test, feature = "test-support"))]
     pub fn advance_clock(&self, duration: Duration) {
         self.dispatcher.as_test().unwrap().advance_clock(duration)
