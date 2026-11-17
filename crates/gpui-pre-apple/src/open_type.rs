@@ -2,7 +2,7 @@ use core_foundation::{
     array::{
         CFArray, CFArrayAppendValue, CFArrayCreateMutable, CFMutableArrayRef, kCFTypeArrayCallBacks,
     },
-    base::{CFRelease, TCFType, kCFAllocatorDefault},
+    base::{CFRelease, CFType, TCFType, kCFAllocatorDefault},
     dictionary::{
         CFDictionary, CFDictionaryCreate, kCFTypeDictionaryKeyCallBacks,
         kCFTypeDictionaryValueCallBacks,
@@ -24,42 +24,58 @@ use core_text::{
 };
 use font_kit::font::Font as FontKitFont;
 use gpui::{FontFallbacks, FontFeatures};
-use objc2_core_text::{kCTFontOpenTypeFeatureTag, kCTFontOpenTypeFeatureValue};
+use objc2_core_text::{
+    kCTFontOpenTypeFeatureTag, kCTFontOpenTypeFeatureValue, kCTFontOpticalSizeAttribute,
+};
 
-pub fn apply_features_and_fallbacks(
+/// The value of the optical size attribute that makes a font draw the
+/// default of its optical size axis at each size.
+const DEFAULT_OPTICAL_SIZE: &str = "none";
+
+/// Applies the features and the fallbacks to the font. With
+/// `default_optical_size`, the font draws at the default of its optical size
+/// axis at each size. Core Text otherwise sets the optical size to the font
+/// size, and the text systems of the other platforms do not.
+pub fn apply_font_attributes(
     font: &mut FontKitFont,
     features: &FontFeatures,
     fallbacks: Option<&FontFallbacks>,
-) -> anyhow::Result<()> {
-    unsafe {
-        let mut keys = vec![kCTFontFeatureSettingsAttribute];
-        let mut values = vec![generate_feature_array(features)];
-        if let Some(fallbacks) = fallbacks
-            && !fallbacks.fallback_list().is_empty()
-        {
-            keys.push(kCTFontCascadeListAttribute);
-            values.push(generate_fallback_array(fallbacks, font));
-        }
-        let attrs = CFDictionaryCreate(
-            kCFAllocatorDefault,
-            keys.as_ptr() as _,
-            values.as_ptr() as _,
-            keys.len() as isize,
-            &kCFTypeDictionaryKeyCallBacks,
-            &kCFTypeDictionaryValueCallBacks,
-        );
-
-        for value in &values {
-            CFRelease(*value as _);
-        }
-
-        let new_descriptor = CTFontDescriptorCreateWithAttributes(attrs);
-        CFRelease(attrs as _);
-        let new_descriptor = CTFontDescriptor::wrap_under_create_rule(new_descriptor);
-        *font = copy_with_descriptor(font, &new_descriptor);
-
-        Ok(())
+    default_optical_size: bool,
+) {
+    // SAFETY: Each key is a constant of Core Text. Each array is a new array
+    // that its wrapper takes ownership of.
+    let mut attributes = unsafe {
+        vec![(
+            CFString::wrap_under_get_rule(kCTFontFeatureSettingsAttribute),
+            CFArray::<CFType>::wrap_under_create_rule(generate_feature_array(features)).as_CFType(),
+        )]
+    };
+    if default_optical_size {
+        // SAFETY: The key is a constant of Core Text.
+        attributes.push(unsafe {
+            (
+                CFString::wrap_under_get_rule(
+                    std::ptr::from_ref(kCTFontOpticalSizeAttribute).cast(),
+                ),
+                CFString::from_static_string(DEFAULT_OPTICAL_SIZE).as_CFType(),
+            )
+        });
     }
+    if let Some(fallbacks) = fallbacks
+        && !fallbacks.fallback_list().is_empty()
+    {
+        // SAFETY: As above.
+        attributes.push(unsafe {
+            (
+                CFString::wrap_under_get_rule(kCTFontCascadeListAttribute),
+                CFArray::<CFType>::wrap_under_create_rule(generate_fallback_array(fallbacks, font))
+                    .as_CFType(),
+            )
+        });
+    }
+    let attributes = CFDictionary::from_CFType_pairs(&attributes);
+    let descriptor = core_text::font_descriptor::new_from_attributes(&attributes);
+    *font = copy_with_descriptor(font, &descriptor);
 }
 
 /// The 'wght' tag as a number, which keys the weight axis in Core Text.
@@ -76,6 +92,18 @@ pub(crate) fn with_weight(font: &FontKitFont, weight: u16) -> FontKitFont {
     let attributes = CFDictionary::from_CFType_pairs(&[(key, variation.as_CFType())]);
     let descriptor = core_text::font_descriptor::new_from_attributes(&attributes);
     copy_with_descriptor(font, &descriptor)
+}
+
+/// Whether the font draws the default of its optical size axis at each size.
+pub(crate) fn has_default_optical_size(font: &CTFont) -> bool {
+    // SAFETY: The key is a constant of Core Text.
+    let value = unsafe { objc2_font(font).attribute(kCTFontOpticalSizeAttribute) };
+    let default: &objc2_core_foundation::CFString =
+        objc2_foundation::ns_string!(DEFAULT_OPTICAL_SIZE).as_ref();
+    value
+        .as_deref()
+        .and_then(|value| value.downcast_ref::<objc2_core_foundation::CFString>())
+        .is_some_and(|value| value == default)
 }
 
 /// The same Core Text font, with the API of objc2.
