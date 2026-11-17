@@ -6,7 +6,9 @@ use std::{ffi::c_void, ptr::NonNull, sync::Arc};
 
 use anyhow::Result;
 use gpui::{DevicePixels, PlatformAtlas, Scene, Size};
-use gpui_wgpu::{TextContrast, WgpuWindowRenderer, time_window_renderer, wgpu, wgpu_requested};
+use gpui_wgpu::{
+    StartedRenderer, TextContrast, WgpuWindowRenderer, time_window_renderer, wgpu, wgpu_requested,
+};
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
@@ -42,8 +44,10 @@ pub fn new_renderer(
             MetalRenderer::new(context, transparent, use_display_p3).map(Renderer::Metal)
         },
         |renderer| match renderer {
-            Renderer::Metal(_) => "native:metal",
-            Renderer::Wgpu(layer) => layer.renderer.renderer().backend_name(),
+            Renderer::Metal(_) => StartedRenderer::Native("metal"),
+            Renderer::Wgpu(layer) => {
+                StartedRenderer::Wgpu(layer.renderer.renderer().backend_name())
+            }
         },
     )
 }
