@@ -154,24 +154,22 @@ pub enum GridTemplateMinSize {
 
 /// A simplified representation of the grid-template-* value
 #[derive(
-    Copy,
-    Clone,
-    Refineable,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Debug,
-    Default,
-    JsonSchema,
-    Serialize,
-    Deserialize,
+    Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, JsonSchema, Serialize, Deserialize,
 )]
-pub struct GridTemplate {
-    /// How this template directive should be repeated
-    pub repeat: u16,
-    /// The minimum size in the repeat(<>, minmax(_, 1fr)) equation
-    pub min_size: GridTemplateMinSize,
+pub enum GridTemplate {
+    /// A fixed number of tracks, as `repeat(<count>, minmax(_, 1fr))` in CSS
+    Repeat {
+        /// How this template directive should be repeated
+        count: u16,
+        /// The minimum size in the repeat(<>, minmax(_, 1fr)) equation
+        min_size: GridTemplateMinSize,
+    },
+    /// As many tracks as fit, as `repeat(auto-fill, minmax(<min>, 1fr))` in CSS.
+    /// The tracks share the space that is left over.
+    AutoFill {
+        /// The least size of a track
+        min: Pixels,
+    },
 }
 
 /// The CSS styling that can be applied to an element via the `Styled` trait
