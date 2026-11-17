@@ -3,6 +3,8 @@ mod font_features;
 mod line;
 mod line_layout;
 mod line_wrapper;
+#[cfg(any(test, feature = "test-support"))]
+pub mod weight_conformance;
 
 pub use font_fallbacks::*;
 pub use font_features::*;
@@ -567,7 +569,18 @@ impl TextSystem {
     }
 
     fn resolve_font_uncached(&self, font: &Font) -> FontId {
+        // The platform text systems match a whole weight, so that near weights
+        // draw the same face on each platform. A NaN weight is not rounded.
+        let weight = font.weight.0.round();
+        let rounded = (weight != font.weight.0 && !weight.is_nan()).then(|| Font {
+            weight: FontWeight(weight),
+            ..font.clone()
+        });
+        let platform_font = rounded.as_ref().unwrap_or(font);
         let mut font_error = None;
+        // One lock scope covers the lookups and the inserts. When fonts are
+        // added at the same time, the cache clear removes all of the inserts
+        // or none of them.
         let font_id = {
             let mut font_ids = self.font_ids_by_font.upgradable_read();
             if let Some(CachedFont::Direct(font_id) | CachedFont::Fallback(font_id)) =
@@ -593,7 +606,7 @@ impl TextSystem {
                     CachedFont::Direct(font_id) => Some(font_id),
                     CachedFont::Fallback(_) => None,
                     CachedFont::Missing(error) => {
-                        if candidate == font {
+                        if candidate == platform_font {
                             font_error = Some(error);
                         }
                         None
@@ -601,17 +614,21 @@ impl TextSystem {
                 }
             };
 
-            if let Some(font_id) = lookup_font(font) {
+            let font_id = if let Some(font_id) = lookup_font(platform_font) {
                 Some(font_id)
             } else {
-                let font_id = self.fallback_font_stack.iter().find_map(lookup_font);
-                if let Some(font_id) = font_id {
-                    font_ids.with_upgraded(|font_ids| {
-                        font_ids.insert(font.clone(), CachedFont::Fallback(font_id));
-                    });
-                }
-                font_id
+                self.fallback_font_stack.iter().find_map(lookup_font)
+            };
+            if let Some(font_id) = font_id {
+                font_ids.with_upgraded(|font_ids| {
+                    for alias in [Some(font), rounded.as_ref()].into_iter().flatten() {
+                        if !matches!(font_ids.get(alias), Some(CachedFont::Direct(_))) {
+                            font_ids.insert(alias.clone(), CachedFont::Fallback(font_id));
+                        }
+                    }
+                });
             }
+            font_id
         };
         if let Some(error) = font_error {
             log::warn!("failed to load font {font:?}: {error:#}");
@@ -994,7 +1011,8 @@ impl Default for FontWeight {
 
 impl Hash for FontWeight {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        state.write_u32(u32::from_be_bytes(self.0.to_be_bytes()));
+        // -0.0 equals 0.0, so it must hash the same. Adding 0.0 turns -0.0 into 0.0.
+        state.write_u32((self.0 + 0.0).to_bits());
     }
 }
 
@@ -1314,8 +1332,30 @@ mod font_resolution_tests {
         assert_eq!(text_system.resolve_font(&requested), FontId(42));
         assert_eq!(text_system.get_font_for_id(FontId(42)), Some(font("Arial")));
 
+        let fractional = Font {
+            weight: FontWeight(700.4),
+            ..requested.clone()
+        };
+        assert_eq!(text_system.resolve_font(&fractional), FontId(42));
+        assert!(matches!(
+            text_system.font_ids_by_font.read().get(&fractional),
+            Some(CachedFont::Fallback(FontId(42)))
+        ));
+        assert_eq!(text_system.get_font_for_id(FontId(42)), Some(font("Arial")));
+
+        let zero = |weight| Font {
+            weight: FontWeight(weight),
+            ..font("Zero")
+        };
+        text_system
+            .font_ids_by_font
+            .write()
+            .insert(zero(0.0), CachedFont::Direct(FontId(7)));
+        assert_eq!(text_system.resolve_font(&zero(-0.0)), FontId(7));
+
         text_system.fallback_font_stack.clear();
         assert_eq!(text_system.resolve_font(&requested), FontId(42));
+        assert_eq!(text_system.resolve_font(&fractional), FontId(42));
     }
 }
 
