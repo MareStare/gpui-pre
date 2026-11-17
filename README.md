@@ -39,6 +39,13 @@ commit, then rebase the patch commits onto it.
 
 ## Patches
 
+- No examples: `gpui-pre` has no examples. It keeps the image of the
+  examples that a unit test reads. A rebase deletes the examples that a
+  later version adds. A dev-dependency on `gpui-pre-platform` from
+  crates.io, with the platform crates of Linux, macOS and Windows patched
+  to the copies here, builds the doc tests. It takes the runtime shaders,
+  so the doc tests build on macOS with no Metal compiler. Its version pin
+  equals the gpui-pre version: a rebase bumps it.
 - Image sprite filter: an image sprite samples its texture with a filter
   that keeps thin lines when it is drawn smaller. The filter reads no
   texels of the images next to the sprite in the atlas.
