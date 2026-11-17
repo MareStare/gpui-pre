@@ -118,6 +118,32 @@ commit, then rebase the patch commits onto it.
   when each glyph fits. The spaces at the end of a row hang past the edge,
   as in CSS. They get no row of their own and take no part in the alignment
   of the row.
+- Typographic font families on Windows: DirectWrite groups the added fonts
+  and the system fonts into typographic families. A lookup finds a family
+  by its typographic, weight-stretch-style or GDI name, or a face by its
+  full name, in the added fonts first. A name finds only the faces of its
+  own family. It matches the weight and the style through the font axes,
+  so a variable font takes any weight of its range. A variable font with
+  an optical size axis, such as Inter 4, has a weight-stretch-style family
+  name for each optical size, and its typographic name finds it. Of the
+  matching fonts, the width nearest to the first font goes first. Then the
+  style of the face, in the order of CSS, and a simulated oblique comes
+  after each real slanted face. Then a bold request takes a bold face or a
+  bold simulation, then the fewest simulations win, then the weight in the
+  order of CSS. Each font id has a font collection with only its face,
+  under a family name of its own, so a layout draws the face that the
+  lookup picked, and each run gives back its own font id. Fonts with the
+  same features and the same faces share a font id, also when they ask
+  for other weights of one simulated face. Fallback fonts use the same
+  lookup, with the weight and the style of the font. Each run of a layout
+  draws the fallback faces that its own font matched, in the order of its
+  fallbacks, with the simulations of each match. A variable fallback face
+  can get a simulation when the run asks for a weight or a slant outside
+  the range of its axes. A face in no collection gets a font id from the
+  face itself.
+  Adding fonts keeps the font ids of the fonts that resolve to the same
+  faces. `all_font_names` lists the typographic names. The text system
+  needs Windows 10 version 1709 or later.
 
 ## License
 
