@@ -4,7 +4,8 @@ use core_foundation::{
     },
     base::{CFRelease, TCFType, kCFAllocatorDefault},
     dictionary::{
-        CFDictionaryCreate, kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks,
+        CFDictionary, CFDictionaryCreate, kCFTypeDictionaryKeyCallBacks,
+        kCFTypeDictionaryValueCallBacks,
     },
     number::CFNumber,
     string::CFString,
@@ -18,7 +19,7 @@ use core_text::{
     font::{CTFont, cascade_list_for_languages},
     font_descriptor::{
         CTFontDescriptor, CTFontDescriptorCreateWithAttributes, kCTFontCascadeListAttribute,
-        kCTFontFeatureSettingsAttribute,
+        kCTFontFeatureSettingsAttribute, kCTFontVariationAttribute,
     },
 };
 use font_kit::font::Font as FontKitFont;
@@ -55,13 +56,43 @@ pub fn apply_features_and_fallbacks(
         let new_descriptor = CTFontDescriptorCreateWithAttributes(attrs);
         CFRelease(attrs as _);
         let new_descriptor = CTFontDescriptor::wrap_under_create_rule(new_descriptor);
+        *font = copy_with_descriptor(font, &new_descriptor);
+
+        Ok(())
+    }
+}
+
+/// The 'wght' tag as a number, which keys the weight axis in Core Text.
+pub(crate) const WEIGHT_AXIS: i64 = 0x7767_6874;
+
+/// A copy of a variable font at `weight` on its weight axis.
+pub(crate) fn with_weight(font: &FontKitFont, weight: u16) -> FontKitFont {
+    let variation = CFDictionary::from_CFType_pairs(&[(
+        CFNumber::from(WEIGHT_AXIS),
+        CFNumber::from(i32::from(weight)),
+    )]);
+    // SAFETY: The key is a constant of Core Text.
+    let key = unsafe { CFString::wrap_under_get_rule(kCTFontVariationAttribute) };
+    let attributes = CFDictionary::from_CFType_pairs(&[(key, variation.as_CFType())]);
+    let descriptor = core_text::font_descriptor::new_from_attributes(&attributes);
+    copy_with_descriptor(font, &descriptor)
+}
+
+/// The same Core Text font, with the API of objc2.
+pub(crate) fn objc2_font(font: &CTFont) -> &objc2_core_text::CTFont {
+    // SAFETY: Both types wrap a `CTFontRef`. The borrow keeps the font alive.
+    unsafe { &*font.as_concrete_TypeRef().cast() }
+}
+
+/// A copy of the font with the attributes of the descriptor added. The copy
+/// merges its variation and its features with those of the font.
+fn copy_with_descriptor(font: &FontKitFont, descriptor: &CTFontDescriptor) -> FontKitFont {
+    unsafe {
         // font-kit uses the older core-text wrappers. Borrow the same CF objects
         // for the generated API, then transfer its create-rule ownership back.
         let native_font = font.native_font();
-        let generated_font = &*native_font
-            .as_concrete_TypeRef()
-            .cast::<objc2_core_text::CTFont>();
-        let descriptor = &*new_descriptor
+        let generated_font = objc2_font(&native_font);
+        let descriptor = &*descriptor
             .as_concrete_TypeRef()
             .cast::<objc2_core_text::CTFontDescriptor>();
         let new_font = generated_font.copy_with_attributes(0.0, std::ptr::null(), Some(descriptor));
@@ -70,9 +101,7 @@ pub fn apply_features_and_fallbacks(
                 .as_ptr()
                 .cast(),
         );
-        *font = font_kit::font::Font::from_native_font(&new_font);
-
-        Ok(())
+        font_kit::font::Font::from_native_font(&new_font)
     }
 }
 

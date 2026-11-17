@@ -54,7 +54,10 @@ use {
     std::sync::OnceLock,
 };
 
-use crate::open_type::apply_features_and_fallbacks;
+use crate::open_type::{apply_features_and_fallbacks, with_weight};
+use weight::{drawn_weight, weight_variation};
+
+mod weight;
 
 #[allow(non_upper_case_globals)]
 const kCGImageAlphaOnly: u32 = 7;
@@ -69,13 +72,32 @@ struct FontKey {
     font_fallbacks: Option<FontFallbacks>,
 }
 
+/// A face, and the weight that it draws.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct FaceKey {
+    postscript_name: String,
+    weight: Option<u16>,
+}
+
+impl FaceKey {
+    fn new(font: &CTFont) -> Self {
+        Self {
+            postscript_name: font.postscript_name(),
+            weight: drawn_weight(font),
+        }
+    }
+}
+
 struct AppleTextSystemState {
     memory_source: MemSource,
     system_source: SystemSource,
     fonts: Vec<FontKitFont>,
     font_selections: HashMap<Font, FontId>,
-    font_ids_by_postscript_name: HashMap<String, FontId>,
+    font_ids_by_face: HashMap<FaceKey, FontId>,
     font_ids_by_font_key: HashMap<FontKey, SmallVec<[FontId; 4]>>,
+    /// The font that draws a variable face at a weight other than its own,
+    /// by the `FontId` of the face and the weight.
+    font_ids_by_weight: HashMap<(FontId, u16), FontId>,
     postscript_names_by_font_id: HashMap<FontId, String>,
 }
 
@@ -87,8 +109,9 @@ impl AppleTextSystem {
             system_source: SystemSource::new(),
             fonts: Vec::new(),
             font_selections: HashMap::default(),
-            font_ids_by_postscript_name: HashMap::default(),
+            font_ids_by_face: HashMap::default(),
             font_ids_by_font_key: HashMap::default(),
+            font_ids_by_weight: HashMap::default(),
             postscript_names_by_font_id: HashMap::default(),
         }))
     }
@@ -150,30 +173,16 @@ impl PlatformTextSystem for AppleTextSystem {
                 font_features: font.features.clone(),
                 font_fallbacks: font.fallbacks.clone(),
             };
-            let candidates = if let Some(font_ids) = lock.font_ids_by_font_key.get(&font_key) {
-                font_ids.as_slice()
-            } else {
-                let font_ids =
-                    lock.load_family(&font.family, &font.features, font.fallbacks.as_ref())?;
-                lock.font_ids_by_font_key.insert(font_key.clone(), font_ids);
-                lock.font_ids_by_font_key[&font_key].as_ref()
+            let candidates = match lock.font_ids_by_font_key.get(&font_key) {
+                Some(font_ids) => font_ids.clone(),
+                None => {
+                    let font_ids =
+                        lock.load_family(&font.family, &font.features, font.fallbacks.as_ref())?;
+                    lock.font_ids_by_font_key.insert(font_key, font_ids.clone());
+                    font_ids
+                }
             };
-
-            let candidate_properties = candidates
-                .iter()
-                .map(|font_id| lock.fonts[font_id.0].properties())
-                .collect::<SmallVec<[_; 4]>>();
-
-            let ix = font_kit::matching::find_best_match(
-                &candidate_properties,
-                &font_kit::properties::Properties {
-                    style: fontkit_style(font.style),
-                    weight: fontkit_weight(font.weight),
-                    stretch: Default::default(),
-                },
-            )?;
-
-            let font_id = candidates[ix];
+            let font_id = lock.best_match(&candidates, font)?;
             lock.font_selections.insert(font.clone(), font_id);
             Ok(font_id)
         }
@@ -367,7 +376,7 @@ impl AppleTextSystemState {
             // Dedup is scoped to this single `load_family` call (issue #55472).
             // The same family can be reloaded later under a different `FontKey`
             // (different features/fallbacks); a global check against
-            // `font_ids_by_postscript_name` would skip every already-registered
+            // `font_ids_by_face` would skip every already-registered
             // font and leave the second call's `font_ids` empty.
             if !postscript_names_seen.insert(postscript_name.clone()) {
                 log::warn!(
@@ -379,15 +388,24 @@ impl AppleTextSystemState {
                 );
                 continue;
             }
-            let font_id = FontId(self.fonts.len());
-            font_ids.push(font_id);
-            self.font_ids_by_postscript_name
-                .insert(postscript_name.clone(), font_id);
-            self.postscript_names_by_font_id
-                .insert(font_id, postscript_name);
-            self.fonts.push(font);
+            font_ids.push(self.push_font(font));
         }
         Ok(font_ids)
+    }
+
+    fn push_font(&mut self, font: FontKitFont) -> FontId {
+        let key = FaceKey::new(&font.native_font());
+        self.push_font_as(font, key)
+    }
+
+    /// Adds `font` as the font that draws the face of `key`.
+    fn push_font_as(&mut self, font: FontKitFont, key: FaceKey) -> FontId {
+        let font_id = FontId(self.fonts.len());
+        self.postscript_names_by_font_id
+            .insert(font_id, key.postscript_name.clone());
+        self.font_ids_by_face.insert(key, font_id);
+        self.fonts.push(font);
+        font_id
     }
 
     fn advance(&self, font_id: FontId, glyph_id: GlyphId) -> Result<Size<f32>> {
@@ -401,21 +419,19 @@ impl AppleTextSystemState {
     }
 
     fn id_for_native_font(&mut self, requested_font: CTFont) -> FontId {
-        let postscript_name = requested_font.postscript_name();
-        if let Some(font_id) = self.font_ids_by_postscript_name.get(&postscript_name) {
-            *font_id
-        } else {
-            let font_id = FontId(self.fonts.len());
-            self.font_ids_by_postscript_name
-                .insert(postscript_name.clone(), font_id);
-            self.postscript_names_by_font_id
-                .insert(font_id, postscript_name);
-            self.fonts
-                .push(font_kit::font::Font::from_core_graphics_font(
-                    requested_font.copy_to_CGFont(),
-                ));
-            font_id
+        let key = FaceKey::new(&requested_font);
+        if let Some(font_id) = self.font_ids_by_face.get(&key) {
+            return *font_id;
         }
+        let mut font =
+            font_kit::font::Font::from_core_graphics_font(requested_font.copy_to_CGFont());
+        // A copy of the font through `CGFont` loses the variation.
+        if let Some(weight) = weight_variation(&requested_font) {
+            font = with_weight(&font, weight.round() as u16);
+        }
+        // The copy may report other values than the requested font, so it
+        // draws only the face of the request.
+        self.push_font_as(font, key)
     }
 
     fn is_emoji(&self, font_id: FontId) -> bool {
@@ -542,6 +558,9 @@ impl AppleTextSystemState {
         let mut string = CFMutableAttributedString::new();
         let mut max_ascent = 0.0f32;
         let mut max_descent = 0.0f32;
+        // The font set on the text of each run. A glyph run that Core Text
+        // draws with one of them takes the `FontId` of its run.
+        let mut fonts_of_runs = SmallVec::<[(CTFont, FontId); 4]>::with_capacity(font_runs.len());
 
         {
             let mut text = text;
@@ -574,13 +593,11 @@ impl AppleTextSystemState {
                 } else {
                     font_size
                 };
+                let sized_font = font.native_font().clone_with_font_size(font_size.into());
                 unsafe {
-                    string.set_attribute(
-                        cf_range,
-                        kCTFontAttributeName,
-                        &font.native_font().clone_with_font_size(font_size.into()),
-                    );
+                    string.set_attribute(cf_range, kCTFontAttributeName, &sized_font);
                 }
+                fonts_of_runs.push((sized_font, run.font_id));
                 if length > 0 {
                     break_ligature = !break_ligature;
                 }
@@ -599,7 +616,13 @@ impl AppleTextSystemState {
                     .downcast::<CTFont>()
                     .unwrap()
             };
-            let font_id = self.id_for_native_font(font);
+            let font_of_run = fonts_of_runs
+                .iter()
+                .find(|(set_font, _)| set_font.as_concrete_TypeRef() == font.as_concrete_TypeRef());
+            let font_id = match font_of_run {
+                Some(&(_, font_id)) => font_id,
+                None => self.id_for_native_font(font),
+            };
 
             let glyphs = match runs.last_mut() {
                 Some(run) if run.font_id == font_id => &mut run.glyphs,
@@ -808,6 +831,18 @@ mod tests {
         );
         assert_eq!(layout.len, 6);
         assert!(!layout.runs.is_empty());
+
+        // Both fonts draw one face. The runs of each font report that font.
+        let font_ids_of_runs = |font_id| {
+            fonts
+                .layout_line("office", px(16.), &[FontRun { font_id, len: 6 }])
+                .runs
+                .iter()
+                .map(|run| run.font_id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(font_ids_of_runs(original_id), [original_id]);
+        assert_eq!(font_ids_of_runs(configured_id), [configured_id]);
     }
 
     #[test]
