@@ -626,9 +626,9 @@ impl AppleTextSystemState {
                     .downcast::<CTFont>()
                     .unwrap()
             };
-            let font_of_run = fonts_of_runs.iter().find(|(set_font, _)| {
-                set_font.as_concrete_TypeRef() == font.as_concrete_TypeRef()
-            });
+            let font_of_run = fonts_of_runs
+                .iter()
+                .find(|(set_font, _)| set_font.as_concrete_TypeRef() == font.as_concrete_TypeRef());
             let font_id = match font_of_run {
                 Some(&(_, font_id)) => font_id,
                 None => self.id_for_native_font(font),
