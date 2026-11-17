@@ -30,6 +30,9 @@ The unit tests of a crate need its `test-support` feature:
    changes.
 2. Each patch is one commit on top of it, so each one rebases on its own
    onto a later gpui-pre version.
+3. A commit with a `(cherry picked from commit <sha>)` line takes the
+   change of that Zed commit, with the paths of the crates here. Drop it
+   in a rebase onto a gpui-pre version that holds that Zed commit.
 
 To move to a later version, add its published sources in a new base
 commit, then rebase the patch commits onto it.
