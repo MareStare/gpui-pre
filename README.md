@@ -113,6 +113,10 @@ commit, then rebase the patch commits onto it.
   calls the quit callback after it and returns, as on Linux and Windows.
   A quit that the system asks for, such as at logout, still ends the
   process with `exit` in `terminate:`.
+- Wrapped rows fit: a row that is still too wide after a break at a
+  break opportunity breaks again, so no row is wider than the wrap width
+  when each glyph fits. The spaces at the end of a row hang past the edge,
+  as in CSS, and get no row of their own.
 
 ## License
 
