@@ -1069,21 +1069,21 @@ mod tests {
     #[cfg(feature = "test-support")]
     #[test]
     fn a_variable_face_draws_each_requested_weight() -> Result<()> {
-        gpui::weight_conformance::draws_each_requested_weight(&DirectWriteTextSystem::new()?)
+        gpui::variable_font_conformance::draws_each_requested_weight(&DirectWriteTextSystem::new()?)
     }
 
     #[cfg(feature = "test-support")]
     #[test]
     fn a_variable_face_draws_the_nearest_weight_of_its_axis() -> Result<()> {
-        gpui::weight_conformance::draws_the_nearest_weight_of_the_axis(
-            &DirectWriteTextSystem::new()?
+        gpui::variable_font_conformance::draws_the_nearest_weight_of_the_axis(
+            &DirectWriteTextSystem::new()?,
         )
     }
 
     #[cfg(feature = "test-support")]
     #[test]
     fn a_face_draws_the_nearest_whole_weight() -> Result<()> {
-        gpui::weight_conformance::draws_the_nearest_whole_weight(Arc::new(
+        gpui::variable_font_conformance::draws_the_nearest_whole_weight(Arc::new(
             DirectWriteTextSystem::new()?,
         ))
     }
@@ -1091,7 +1091,15 @@ mod tests {
     #[cfg(feature = "test-support")]
     #[test]
     fn a_fallback_face_draws_at_the_weight_of_its_run() -> Result<()> {
-        gpui::weight_conformance::fallback_draws_at_the_weight_of_its_run(
+        gpui::variable_font_conformance::fallback_draws_at_the_weight_of_its_run(
+            &DirectWriteTextSystem::new()?,
+        )
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn a_variable_face_draws_the_default_optical_size_at_each_size() -> Result<()> {
+        gpui::variable_font_conformance::draws_the_default_optical_size(
             &DirectWriteTextSystem::new()?,
         )
     }
@@ -1099,7 +1107,9 @@ mod tests {
     #[cfg(feature = "test-support")]
     #[test]
     fn many_weights_in_many_sizes_load_one_font_per_drawn_weight() -> Result<()> {
-        gpui::weight_conformance::loads_one_font_per_drawn_weight(&DirectWriteTextSystem::new()?)
+        gpui::variable_font_conformance::loads_one_font_per_drawn_weight(
+            &DirectWriteTextSystem::new()?,
+        )
     }
 
     #[test]

@@ -159,24 +159,32 @@ mod tests {
     use crate::AppleTextSystem;
     use anyhow::{Result, bail};
     use gpui::{
-        FontRun, FontWeight, PlatformTextSystem as _, font, px,
-        weight_conformance::{self, VARIABLE_FAMILY, ink, weighted},
+        Bounds, DevicePixels, Font, FontFallbacks, FontRun, FontWeight, PlatformTextSystem as _,
+        font, px,
+        variable_font_conformance::{
+            self, STATIC_FAMILY, VARIABLE_FAMILY, glyph_params, ink, weighted,
+        },
     };
-    use std::sync::Arc;
+    use std::{borrow::Cow, sync::Arc};
 
     #[test]
     fn a_variable_face_draws_each_requested_weight() -> Result<()> {
-        weight_conformance::draws_each_requested_weight(&AppleTextSystem::new())
+        variable_font_conformance::draws_each_requested_weight(&AppleTextSystem::new())
     }
 
     #[test]
     fn a_variable_face_draws_the_nearest_weight_of_its_axis() -> Result<()> {
-        weight_conformance::draws_the_nearest_weight_of_the_axis(&AppleTextSystem::new())
+        variable_font_conformance::draws_the_nearest_weight_of_the_axis(&AppleTextSystem::new())
     }
 
     #[test]
     fn a_face_draws_the_nearest_whole_weight() -> Result<()> {
-        weight_conformance::draws_the_nearest_whole_weight(Arc::new(AppleTextSystem::new()))
+        variable_font_conformance::draws_the_nearest_whole_weight(Arc::new(AppleTextSystem::new()))
+    }
+
+    #[test]
+    fn a_variable_face_draws_the_default_optical_size_at_each_size() -> Result<()> {
+        variable_font_conformance::draws_the_default_optical_size(&AppleTextSystem::new())
     }
 
     /// Core Text picks a system face for a glyph that a variable face has
@@ -185,7 +193,7 @@ mod tests {
     #[test]
     fn a_fallback_face_draws_at_the_weight_of_its_run() -> Result<()> {
         let fonts = AppleTextSystem::new();
-        weight_conformance::add_fonts(&fonts)?;
+        variable_font_conformance::add_fonts(&fonts)?;
         let inks = [400.0, 700.0]
             .into_iter()
             .map(|weight| {
@@ -210,7 +218,7 @@ mod tests {
     #[test]
     fn many_weights_in_many_sizes_load_one_font_per_drawn_weight() -> Result<()> {
         let fonts = AppleTextSystem::new();
-        weight_conformance::loads_one_font_per_drawn_weight(&fonts)?;
+        variable_font_conformance::loads_one_font_per_drawn_weight(&fonts)?;
         assert_eq!(fonts.0.read().fonts.len(), 801);
         Ok(())
     }
@@ -251,6 +259,86 @@ mod tests {
             super::drawn_weight(&state.fonts[bold.0].native_font()),
             Some(700)
         );
+        Ok(())
+    }
+
+    /// Core Text sets the optical size of the system font from the font size,
+    /// as in each other app of the platform. Its text gets narrower relative
+    /// to its size as the size grows.
+    #[test]
+    fn the_system_font_draws_the_optical_size_of_each_size() -> Result<()> {
+        let fonts = AppleTextSystem::new();
+        let font_id = system_font(&fonts, 400.0)?;
+        let text = "mmmmiiii";
+        let runs = [FontRun {
+            len: text.len(),
+            font_id,
+        }];
+        let widths = [11.0, 17.0, 28.0, 64.0]
+            .map(|size| f32::from(fonts.layout_line(text, px(size), &runs).width) / size);
+        assert!(widths.is_sorted_by(|a, b| a > b), "{widths:?}");
+        Ok(())
+    }
+
+    /// The file of the system font.
+    const SYSTEM_FONT_FILE: &str = "/System/Library/Fonts/SFNS.ttf";
+
+    /// How a test loads the system font before it lays out a fallback to it.
+    #[derive(Clone, Copy, Debug)]
+    enum SystemFontLoad {
+        None,
+        System,
+        AddedCopy,
+    }
+
+    /// The raster bounds of a glyph that a font takes from its fallback to
+    /// the system font, at 11 and at 64 pixels.
+    fn fallback_rasters(load: SystemFontLoad) -> Result<Vec<Bounds<DevicePixels>>> {
+        let fonts = AppleTextSystem::new();
+        variable_font_conformance::add_fonts(&fonts)?;
+        let bytes = std::fs::read(SYSTEM_FONT_FILE)?;
+        let family = font_kit::font::Font::from_bytes(Arc::new(bytes.clone()), 0)?.family_name();
+        match load {
+            SystemFontLoad::None => {}
+            SystemFontLoad::System => {
+                system_font(&fonts, 400.0)?;
+            }
+            SystemFontLoad::AddedCopy => {
+                fonts.add_fonts(vec![Cow::Owned(bytes)])?;
+                fonts.font_id(&font(family.clone()))?;
+            }
+        }
+        let font_id = fonts.font_id(&Font {
+            fallbacks: Some(FontFallbacks::from_fonts(vec![family])),
+            ..font(STATIC_FAMILY)
+        })?;
+        let text = "m\u{1c4}";
+        let runs = [FontRun {
+            len: text.len(),
+            font_id,
+        }];
+        [11.0, 64.0]
+            .into_iter()
+            .map(|size| {
+                let layout = fonts.layout_line(text, px(size), &runs);
+                let [run, fallback] = layout.runs.as_slice() else {
+                    bail!("{load:?}: expected two runs, got {:?}", layout.runs);
+                };
+                assert_eq!(run.font_id, font_id, "{load:?}");
+                let params = glyph_params(&fonts, fallback.font_id, '\u{1c4}', size)?;
+                fonts.glyph_raster_bounds(&params)
+            })
+            .collect()
+    }
+
+    /// A face that Core Text picks from a cascade list draws the optical size
+    /// of its font size. It draws the same when the system font or an added
+    /// copy of it loaded before.
+    #[test]
+    fn a_cascade_face_draws_the_same_after_a_load_of_its_font() -> Result<()> {
+        let alone = fallback_rasters(SystemFontLoad::None)?;
+        assert_eq!(fallback_rasters(SystemFontLoad::System)?, alone);
+        assert_eq!(fallback_rasters(SystemFontLoad::AddedCopy)?, alone);
         Ok(())
     }
 }

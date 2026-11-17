@@ -171,9 +171,11 @@ commit, then rebase the patch commits onto it.
   by the font id covers the weight. On Linux, a fallback face draws at the
   weight of its run. On macOS, a named instance of a variable font, such
   as a face of the system font, matches as a face of its own weight, and a
-  copy of the nearest face draws each other weight.
-  `gpui::weight_conformance` holds the checks that the text system of each
-  platform runs.
+  copy of the nearest face draws each other weight. Each platform draws a
+  variable font that the app adds at the default of its optical size axis
+  at each size. On macOS, a system font keeps the optical size that Core
+  Text picks for its size. `gpui::variable_font_conformance` holds the
+  checks that the text system of each platform runs.
 
 ## License
 
