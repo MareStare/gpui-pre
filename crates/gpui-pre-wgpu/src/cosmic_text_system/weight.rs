@@ -61,6 +61,14 @@ impl CosmicTextSystemState {
             .context("the font face is not in the database")?;
         let own = face.weight;
         let is_known_emoji_font = check_is_known_emoji_font(&face.post_script_name);
+        let family_name = face
+            .families
+            .first()
+            .context("the font face has no family name")?
+            .0
+            .clone()
+            .into();
+        let (stretch, style) = (face.stretch, face.style);
         let weight_axis = db
             .with_face_data(id, |data, index| {
                 weight_axis(FontRef::from_index(data, index as usize)?)
@@ -81,6 +89,9 @@ impl CosmicTextSystemState {
         };
         Ok(LoadedFont {
             font,
+            family_name,
+            stretch,
+            style,
             weight,
             weight_axis,
             coords,
@@ -130,8 +141,8 @@ impl CosmicTextSystemState {
         Ok(font_id)
     }
 
-    /// Resolves the user fallbacks of each font of `font_key` again, for the
-    /// fonts that the database has now.
+    /// Resolves the user fallbacks of each font of `font_key` against the
+    /// fonts of the database.
     pub(super) fn resolve_user_fallback_chains(&mut self, font_key: &FontKey) -> Result<()> {
         if font_key.fallbacks.is_none() {
             return Ok(());
@@ -165,13 +176,7 @@ impl CosmicTextSystemState {
         };
         let loaded_font = self.loaded_font(font_id);
         let weight = loaded_font.weight;
-        let style = gpui_style(
-            self.font_system
-                .db()
-                .face(loaded_font.font.id())
-                .context("the font face is not in the database")?
-                .style,
-        );
+        let style = gpui_style(loaded_font.style);
         let mut chain = Vec::new();
         for family in fallbacks.fallback_list() {
             // A fallback family has no fallbacks of its own.
@@ -189,13 +194,10 @@ impl CosmicTextSystemState {
     /// The font that draws a glyph that cosmic-text shaped with face `id` at
     /// `weight`. This happens when cosmic-text picks a fallback font for some
     /// unicode characters, or a weight that differs from the one of the
-    /// requested `FontId`. A face that is not loaded yet gets a new entry.
+    /// requested `FontId`. A face that is not loaded yet is loaded here.
     ///
-    /// Callers shouldn't use this `FontId` somewhere that will retrieve the
-    /// corresponding `LoadedFont.features`, as it may have an arbitrarily
-    /// chosen or empty value. The only current use of this field is for the
-    /// *input* of `layout_line`, and so it's fine to use this when computing
-    /// the *output* of `layout_line`.
+    /// The font has no features, or the features of an earlier load of the
+    /// face. It serves only the output of a layout.
     pub(super) fn font_id_for_shaped_face(
         &mut self,
         id: fontdb::ID,
@@ -217,14 +219,14 @@ impl CosmicTextSystemState {
 #[cfg(all(test, feature = "test-support"))]
 mod tests {
     use super::super::CosmicTextSystem;
-    use anyhow::Result;
+    use anyhow::{Context as _, Result};
     use cosmic_text::{Fallback, FontSystem, fontdb};
     use gpui::{
         Font, FontFallbacks, FontRun, FontStyle, FontWeight, PlatformTextSystem as _, font, px,
         variable_font_conformance::{self, STATIC_FAMILY, VARIABLE_FAMILY, weighted},
     };
     use itertools::Itertools as _;
-    use std::{borrow::Cow, sync::Arc};
+    use std::{borrow::Cow, path::Path, sync::Arc};
     use unicode_script::Script;
 
     fn text_system() -> CosmicTextSystem {
@@ -361,6 +363,33 @@ mod tests {
         let layout = text_system.layout_line(text, px(16.0), &runs);
         let font_ids = layout.runs.iter().map(|run| run.font_id).collect_vec();
         assert_eq!(font_ids, [bold, regular]);
+        Ok(())
+    }
+
+    /// A family that the app adds draws each weight with a face of the app,
+    /// also where the system has a copy of the family.
+    #[test]
+    fn an_added_family_draws_no_face_of_the_system() -> Result<()> {
+        let text_system = text_system();
+        let file = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/fonts/inter/InterVariable-subset.ttf");
+        text_system
+            .0
+            .write()
+            .font_system
+            .db_mut()
+            .load_font_file(&file)?;
+        text_system.add_fonts(vec![Cow::Owned(std::fs::read(&file)?)])?;
+        for weight in [400.0, 500.0, 700.0] {
+            let font_id = text_system.font_id(&weighted(VARIABLE_FAMILY, weight))?;
+            let state = text_system.0.read();
+            let face = state
+                .font_system
+                .db()
+                .face(state.loaded_font(font_id).font.id())
+                .context("the font face is not in the database")?;
+            assert!(matches!(face.source, fontdb::Source::Binary(_)), "{weight}");
+        }
         Ok(())
     }
 }
