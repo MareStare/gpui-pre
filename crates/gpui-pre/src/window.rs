@@ -52,7 +52,6 @@ use std::{
     any::{Any, TypeId},
     borrow::Cow,
     cell::{Cell, RefCell},
-    cmp,
     fmt::{Debug, Display},
     hash::{Hash, Hasher},
     marker::PhantomData,
@@ -70,6 +69,7 @@ use uuid::Uuid;
 
 pub(crate) mod a11y;
 mod prompts;
+mod tooltip_place;
 
 pub use a11y::A11ySubtreeBuilder;
 
@@ -4109,36 +4109,12 @@ impl Window {
             let mouse_position = tooltip_request.tooltip.mouse_position;
             let tooltip_size = element.layout_as_root(AvailableSpace::min_size(), self, cx);
 
-            let mut tooltip_bounds =
-                Bounds::new(mouse_position + point(px(1.), px(1.)), tooltip_size);
-            let window_bounds = Bounds {
-                origin: Point::default(),
-                size: self.viewport_size(),
-            };
-
-            if tooltip_bounds.right() > window_bounds.right() {
-                let new_x = mouse_position.x - tooltip_bounds.size.width - px(1.);
-                if new_x >= Pixels::ZERO {
-                    tooltip_bounds.origin.x = new_x;
-                } else {
-                    tooltip_bounds.origin.x = cmp::max(
-                        Pixels::ZERO,
-                        tooltip_bounds.origin.x - tooltip_bounds.right() - window_bounds.right(),
-                    );
-                }
-            }
-
-            if tooltip_bounds.bottom() > window_bounds.bottom() {
-                let new_y = mouse_position.y - tooltip_bounds.size.height - px(1.);
-                if new_y >= Pixels::ZERO {
-                    tooltip_bounds.origin.y = new_y;
-                } else {
-                    tooltip_bounds.origin.y = cmp::max(
-                        Pixels::ZERO,
-                        tooltip_bounds.origin.y - tooltip_bounds.bottom() - window_bounds.bottom(),
-                    );
-                }
-            }
+            let area = tooltip_place::visible_area(
+                self.viewport_size(),
+                self.window_decorations(),
+                self.client_inset,
+            );
+            let tooltip_bounds = tooltip_place::tooltip_bounds(mouse_position, tooltip_size, area);
 
             // It's possible for an element to have an active tooltip while not being painted (e.g.
             // via the `visible_on_hover` method). Since mouse listeners are not active in this
