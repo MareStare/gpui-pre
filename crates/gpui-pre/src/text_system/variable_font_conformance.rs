@@ -1,6 +1,6 @@
-//! Checks of the weights of a variable font that the text system of each
-//! platform must pass. Each check takes a text system with no added fonts and
-//! adds the test fonts to it.
+//! Checks of the weights and the optical sizes of a variable font that the
+//! text system of each platform must pass. Each check takes a text system
+//! with no added fonts and adds the test fonts to it.
 
 use crate::{
     Font, FontFallbacks, FontId, FontRun, FontWeight, PlatformTextSystem, RenderGlyphParams,
@@ -10,7 +10,8 @@ use anyhow::{Context as _, Result};
 use itertools::Itertools as _;
 use std::{borrow::Cow, path::Path, sync::Arc};
 
-/// The family of a variable test font with a weight axis from 100 to 900.
+/// The family of a variable test font with a weight axis from 100 to 900 and
+/// an optical size axis from 14 to 32.
 pub const VARIABLE_FAMILY: &str = "Inter Variable";
 
 /// The family of two static test fonts, a regular one and a bold one, with no
@@ -191,5 +192,23 @@ pub fn fallback_draws_at_the_weight_of_its_run(text_system: &dyn PlatformTextSys
     let layout = text_system.layout_line(text, px(16.0), &runs);
     let font_ids = layout.runs.iter().map(|run| run.font_id).collect_vec();
     assert_eq!(font_ids, [static_bold, variable_bold]);
+    Ok(())
+}
+
+/// A variable font draws the default of its optical size axis at each size.
+/// The width of a layout then grows in proportion to its size.
+pub fn draws_the_default_optical_size(text_system: &dyn PlatformTextSystem) -> Result<()> {
+    add_fonts(text_system)?;
+    for weight in [400.0, 600.0] {
+        let font_id = text_system.font_id(&weighted(VARIABLE_FAMILY, weight))?;
+        let text = "mmmm";
+        let runs = [FontRun {
+            len: text.len(),
+            font_id,
+        }];
+        let widths = [14.0, 32.0]
+            .map(|size| f32::from(text_system.layout_line(text, px(size), &runs).width) / size);
+        assert!((widths[0] - widths[1]).abs() < 1e-3, "{weight}: {widths:?}");
+    }
     Ok(())
 }

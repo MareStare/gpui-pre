@@ -166,11 +166,6 @@ impl CosmicTextSystemState {
     /// so a static family that lacks the weight of `font_id` must get the
     /// weight of its own face. A missing family is left out, so that a typo
     /// in the settings still lets the font load.
-    ///
-    /// The chain belongs to `font_id`, which the requests of all the weights
-    /// that draw it share. So the families match the weight that `font_id`
-    /// draws, not the requested weight. A static font that draws 400 for a
-    /// request of 500 gets the faces of its fallback families at 400.
     fn user_fallback_chain(
         &mut self,
         font_key: &FontKey,
@@ -228,7 +223,7 @@ mod tests {
     use cosmic_text::{Fallback, FontSystem, fontdb};
     use gpui::{
         Font, FontFallbacks, FontRun, FontStyle, FontWeight, PlatformTextSystem as _, font, px,
-        weight_conformance::{self, STATIC_FAMILY, VARIABLE_FAMILY, weighted},
+        variable_font_conformance::{self, STATIC_FAMILY, VARIABLE_FAMILY, weighted},
     };
     use itertools::Itertools as _;
     use std::{borrow::Cow, path::Path, sync::Arc};
@@ -240,22 +235,27 @@ mod tests {
 
     #[test]
     fn a_variable_face_draws_each_requested_weight() -> Result<()> {
-        weight_conformance::draws_each_requested_weight(&text_system())
+        variable_font_conformance::draws_each_requested_weight(&text_system())
     }
 
     #[test]
     fn a_variable_face_draws_the_nearest_weight_of_its_axis() -> Result<()> {
-        weight_conformance::draws_the_nearest_weight_of_the_axis(&text_system())
+        variable_font_conformance::draws_the_nearest_weight_of_the_axis(&text_system())
     }
 
     #[test]
     fn a_fallback_face_draws_at_the_weight_of_its_run() -> Result<()> {
-        weight_conformance::fallback_draws_at_the_weight_of_its_run(&text_system())
+        variable_font_conformance::fallback_draws_at_the_weight_of_its_run(&text_system())
     }
 
     #[test]
     fn a_face_draws_the_nearest_whole_weight() -> Result<()> {
-        weight_conformance::draws_the_nearest_whole_weight(Arc::new(text_system()))
+        variable_font_conformance::draws_the_nearest_whole_weight(Arc::new(text_system()))
+    }
+
+    #[test]
+    fn a_variable_face_draws_the_default_optical_size_at_each_size() -> Result<()> {
+        variable_font_conformance::draws_the_default_optical_size(&text_system())
     }
 
     /// The fonts and the glyph images of many weights in many sizes stay
@@ -263,7 +263,7 @@ mod tests {
     #[test]
     fn many_weights_in_many_sizes_load_one_font_per_drawn_weight() -> Result<()> {
         let text_system = text_system();
-        weight_conformance::loads_one_font_per_drawn_weight(&text_system)?;
+        variable_font_conformance::loads_one_font_per_drawn_weight(&text_system)?;
         let state = text_system.0.read();
         assert_eq!(state.loaded_fonts.len(), 801);
         assert!(state.pending_glyph_images.is_empty());
@@ -273,7 +273,7 @@ mod tests {
     #[test]
     fn each_font_reports_the_weight_that_it_draws() -> Result<()> {
         let text_system = text_system();
-        weight_conformance::add_fonts(&text_system)?;
+        variable_font_conformance::add_fonts(&text_system)?;
         for (requested, drawn) in [
             (50.0, 100.0),
             (550.0, 550.0),
@@ -299,7 +299,7 @@ mod tests {
     #[test]
     fn a_fallback_face_of_the_database_draws_at_the_weight_of_its_run() -> Result<()> {
         let text_system = text_system();
-        weight_conformance::add_fonts(&text_system)?;
+        variable_font_conformance::add_fonts(&text_system)?;
         let variable_bold = text_system.font_id(&weighted(VARIABLE_FAMILY, 700.0))?;
         let static_bold = text_system.font_id(&weighted(STATIC_FAMILY, 700.0))?;
         let text = "m\u{2318}";
@@ -343,7 +343,7 @@ mod tests {
             StaticFamilyFallback,
         );
         let text_system = CosmicTextSystem::with_font_system(font_system, VARIABLE_FAMILY);
-        weight_conformance::add_fonts(&text_system)?;
+        variable_font_conformance::add_fonts(&text_system)?;
         text_system.add_fonts(vec![Cow::Borrowed(include_bytes!(
             "../../../../assets/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf"
         ))])?;

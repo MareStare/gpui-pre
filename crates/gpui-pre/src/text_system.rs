@@ -4,7 +4,7 @@ mod line;
 mod line_layout;
 mod line_wrapper;
 #[cfg(any(test, feature = "test-support"))]
-pub mod weight_conformance;
+pub mod variable_font_conformance;
 
 pub use font_fallbacks::*;
 pub use font_features::*;
