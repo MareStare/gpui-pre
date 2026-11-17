@@ -283,7 +283,8 @@ mod tests {
 
     /// The data of the file of the system font.
     fn system_font_file() -> Result<Vec<u8>> {
-        let system_font = core_text::font::new_ui_font_for_language(kCTFontSystemFontType, 0.0, None);
+        let system_font =
+            core_text::font::new_ui_font_for_language(kCTFontSystemFontType, 0.0, None);
         let path = system_font
             .url()
             .and_then(|url| url.to_path())
