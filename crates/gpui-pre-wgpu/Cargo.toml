@@ -163,6 +163,9 @@ features = ["html_reports"]
 version = "30.0.1"
 features = ["wgsl-in"]
 
+[dev-dependencies.unicode-script]
+version = "0.5.9"
+
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.wgpu]
 version = "30.0.1"
 features = [
