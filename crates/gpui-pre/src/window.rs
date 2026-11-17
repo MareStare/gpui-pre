@@ -8736,6 +8736,22 @@ mod tests {
     }
 
     #[gpui::test]
+    fn test_resize_updates_layout_viewport(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| EmptyView);
+        let new_size = size(px(320.), px(240.));
+        window
+            .update(cx, |_, window, _| window.resize(new_size))
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |_, window, _| {
+                assert_eq!(window.viewport_size(), new_size);
+                assert_eq!(window.bounds().size, new_size);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
     fn test_fully_visible_bounds_preserve_layout_viewport(cx: &mut TestAppContext) {
         let window = cx.add_window(|_, _| EmptyView);
         let mut platform_window = cx.test_window(window.into());

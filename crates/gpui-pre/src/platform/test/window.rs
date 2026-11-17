@@ -1,10 +1,10 @@
 use crate::{
     AnyWindowHandle, Bounds, DevicePixels, DispatchEventResult, DisplayId, GpuSpecs, HeadlessAtlas,
-    PendingImage, Pixels, PlatformAtlas, PlatformDisplay, PlatformHeadlessRenderer, PlatformInput,
-    PlatformInputHandler, PlatformWindow, Point, PromptButton, RequestFrameOptions, Scene, Size,
-    TestDisplay, TestPlatform, TextInputConfiguration, TextInputStateChange, WindowAppearance,
-    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowInsets, WindowParams,
-    WindowVisibility,
+    PendingImage, Pixels, Platform as _, PlatformAtlas, PlatformDisplay, PlatformHeadlessRenderer,
+    PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton, RequestFrameOptions,
+    Scene, Size, TestDisplay, TestPlatform, TextInputConfiguration, TextInputStateChange,
+    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowInsets,
+    WindowParams, WindowVisibility,
 };
 use gpui_util::ResultExt as _;
 use parking_lot::Mutex;
@@ -374,9 +374,25 @@ impl PlatformWindow for TestWindow {
         self.bounds().size
     }
 
+    /// Resizes the window in a later task, as a platform delivers the
+    /// resize as a window event. The caller updates the window, so the
+    /// resize callback cannot run inside this call.
     fn resize(&mut self, size: Size<Pixels>) {
-        let mut lock = self.0.lock();
-        lock.bounds.size = size;
+        let executor = self
+            .0
+            .lock()
+            .platform
+            .upgrade()
+            .expect("platform dropped")
+            .foreground_executor();
+        let window = Rc::downgrade(&self.0);
+        executor
+            .spawn(async move {
+                if let Some(window) = window.upgrade() {
+                    TestWindow(window).simulate_resize(size);
+                }
+            })
+            .detach();
     }
 
     fn scale_factor(&self) -> f32 {

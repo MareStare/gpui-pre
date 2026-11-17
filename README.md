@@ -86,6 +86,9 @@ commit, then rebase the patch commits onto it.
   element. `Window::render_to_image` works in every build: the wgpu
   renderer draws the scene to an offscreen texture and reads it back, also
   for X11 and Wayland windows.
+- Resize on the test platform: `Window::resize` resizes a test window in a
+  later task, through its resize callback, as a platform delivers a resize
+  as a window event. The layout of the window then takes the size.
 - Screenshots off the UI thread: `Window::render_to_pending_image` submits
   the render of the frame and returns a `PendingImage`. Its `wait` waits
   for the GPU and reads the pixels on any thread. The wgpu and Metal
