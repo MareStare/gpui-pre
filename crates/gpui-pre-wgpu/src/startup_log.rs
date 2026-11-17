@@ -50,7 +50,8 @@ pub fn time_window_renderer<R>(
 ) -> anyhow::Result<R> {
     let (started, time) = timed(start);
     if let Some(time) = time {
-        eprintln!("{}", window_renderer_line(&started, name_of, &time));
+        let renderer = started.as_ref().ok().map(name_of);
+        eprintln!("{}", time.window_renderer_line(renderer));
     }
     started
 }
@@ -66,6 +67,14 @@ impl StageTime {
     fn line(&self, stage: &str) -> String {
         let Self { ms, end } = self;
         format!("proto startup-{stage} {ms:.3} {end:.1}")
+    }
+
+    /// The line of a window renderer start. It has no renderer when the start failed.
+    fn window_renderer_line(&self, started: Option<StartedRenderer>) -> String {
+        match started {
+            Some(started) => format!("{} {started}", self.line("window-renderer")),
+            None => self.line("window-renderer-failed"),
+        }
     }
 }
 
@@ -83,35 +92,23 @@ fn timed<T>(work: impl FnOnce() -> T) -> (T, Option<StageTime>) {
     (result, Some(StageTime { ms, end }))
 }
 
-fn window_renderer_line<R>(
-    started: &anyhow::Result<R>,
-    name_of: impl FnOnce(&R) -> StartedRenderer,
-    time: &StageTime,
-) -> String {
-    match started {
-        Ok(started) => format!("{} {}", time.line("window-renderer"), name_of(started)),
-        Err(_) => time.line("window-renderer-failed"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{StageTime, StartedRenderer, window_renderer_line};
+    use super::{StageTime, StartedRenderer};
 
     const TIME: StageTime = StageTime { ms: 1.5, end: 2.0 };
 
     #[test]
     fn a_window_renderer_logs_the_renderer_that_started() {
-        let line = window_renderer_line(&Ok(()), |()| StartedRenderer::Wgpu("vulkan"), &TIME);
+        let line = TIME.window_renderer_line(Some(StartedRenderer::Wgpu("vulkan")));
         assert_eq!(line, "proto startup-window-renderer 1.500 2.0 vulkan");
-        let line = window_renderer_line(&Ok(()), |()| StartedRenderer::Native("dx11"), &TIME);
+        let line = TIME.window_renderer_line(Some(StartedRenderer::Native("dx11")));
         assert_eq!(line, "proto startup-window-renderer 1.500 2.0 native:dx11");
     }
 
     #[test]
     fn a_failed_window_renderer_logs_its_own_stage() {
-        let started: anyhow::Result<()> = Err(anyhow::anyhow!("no adapter"));
-        let line = window_renderer_line(&started, |()| StartedRenderer::Wgpu("vulkan"), &TIME);
+        let line = TIME.window_renderer_line(None);
         assert_eq!(line, "proto startup-window-renderer-failed 1.500 2.0");
     }
 }
