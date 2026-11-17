@@ -1921,7 +1921,7 @@ impl PlatformWindow for X11Window {
         let mut state = self.0.state.borrow_mut();
 
         let shadow = state.tiling().shadow(inset);
-        let dp = |side: Pixels| (f32::from(side) * state.scale_factor) as u32;
+        let dp = |side: Pixels| (f32::from(side) * state.scale_factor).round() as u32;
         let insets = [
             dp(shadow.left),
             dp(shadow.right),
