@@ -191,6 +191,28 @@ impl LineLayout {
         (left, right)
     }
 
+    /// The width of the widest glyph cluster of this line. Wrapping breaks a
+    /// word that does not fit on a row between its clusters, so no row of
+    /// this line wrapped at this width or wider is wider than the wrap width.
+    pub fn min_content_width(&self) -> Pixels {
+        let mut clusters = self
+            .runs
+            .iter()
+            .flat_map(|run| {
+                run.glyphs
+                    .iter()
+                    .map(|glyph| (glyph.index, glyph.position.x))
+            })
+            .dedup_by(|(previous_index, _), (index, _)| previous_index == index)
+            .peekable();
+        let mut widest = px(0.);
+        while let Some((_, x)) = clusters.next() {
+            let next_x = clusters.peek().map_or(self.width, |(_, x)| *x);
+            widest = widest.max(next_x - x);
+        }
+        widest
+    }
+
     fn compute_wrap_boundaries(
         &self,
         text: &str,
@@ -280,10 +302,20 @@ impl LineLayout {
                 if let Some(last_candidate_ix) = last_candidate_ix.take() {
                     last_boundary = last_candidate_ix;
                     last_boundary_x = last_candidate_x;
-                } else {
-                    last_boundary = boundary;
-                    last_boundary_x = x;
+                    boundaries.push(last_boundary);
+                    // The row from the candidate can still be too wide with
+                    // this glyph. Then the glyph starts the next row.
+                    if next_x - last_boundary_x <= wrap_width || boundary == last_boundary {
+                        continue;
+                    }
+                    if let Some(max_lines) = max_lines
+                        && boundaries.len() >= max_lines.saturating_sub(1)
+                    {
+                        break;
+                    }
                 }
+                last_boundary = boundary;
+                last_boundary_x = x;
                 boundaries.push(last_boundary);
             }
         }
@@ -1053,5 +1085,88 @@ mod tests {
 
         let positions = glyph_x_positions(&layout);
         assert_eq!(positions, vec![0.5, 0.5]);
+    }
+
+    /// Lays out `text` with fixed advances: 4 for a space, 3 for `i`, 12 for
+    /// `m` and 8 for other characters.
+    fn layout_with_advances(text: &str) -> LineLayout {
+        let mut x = 0.;
+        let mut glyphs = Vec::new();
+        for (index, ch) in text.char_indices() {
+            glyphs.push(glyph_at(x, index));
+            x += match ch {
+                ' ' => 4.,
+                'i' => 3.,
+                'm' => 12.,
+                _ => 8.,
+            };
+        }
+        LineLayout {
+            width: px(x),
+            len: text.len(),
+            ..make_layout(glyphs)
+        }
+    }
+
+    /// The widths of the rows of `text` wrapped at `wrap_width`.
+    fn row_widths(text: &str, wrap_width: Pixels) -> Vec<Pixels> {
+        let layout = layout_with_advances(text);
+        let glyphs = &layout.runs[0].glyphs;
+        let mut starts = vec![px(0.)];
+        starts.extend(
+            layout
+                .compute_wrap_boundaries(text, wrap_width, None, &mut WrapScratch::default())
+                .iter()
+                .map(|boundary| glyphs[boundary.glyph_ix].position.x),
+        );
+        let mut ends = starts[1..].to_vec();
+        ends.push(layout.width);
+        starts
+            .iter()
+            .zip(ends)
+            .map(|(&start, end)| end - start)
+            .collect()
+    }
+
+    #[test]
+    fn test_min_content_width_is_the_widest_glyph_cluster() {
+        let min_content_width = |text| layout_with_advances(text).min_content_width();
+        assert_eq!(min_content_width(""), px(0.));
+        assert_eq!(min_content_width("iii"), px(3.));
+        assert_eq!(min_content_width("aim iii"), px(12.));
+        assert_eq!(min_content_width("你好"), px(8.));
+
+        // Two glyphs of one cluster count as one.
+        let mut layout = make_layout(vec![glyph_at(0., 0), glyph_at(5., 0), glyph_at(10., 3)]);
+        layout.width = px(14.);
+        assert_eq!(layout.min_content_width(), px(10.));
+    }
+
+    #[test]
+    fn test_no_row_is_wider_than_a_wrap_width_of_at_least_the_min_content_width() {
+        for text in [
+            "aaa bbb cc",
+            "the quick brown fox jumps over the lazy dog",
+            "mmm iii mmm iii",
+            "i mmmm",
+            "ii i m mmmm",
+            "minimum maximum i i i",
+            "  leading spaces",
+            "trailing spaces   ",
+            "two  spaces",
+            "path/to/some/file_name.mart",
+            "Hello world你好世界",
+        ] {
+            let min_content_width = layout_with_advances(text).min_content_width();
+            for extra in [0., 1., 5., 13., 30.] {
+                let wrap_width = min_content_width + px(extra);
+                for width in row_widths(text, wrap_width) {
+                    assert!(
+                        width <= wrap_width,
+                        "{text:?} wrapped at {wrap_width:?} got a row {width:?} wide"
+                    );
+                }
+            }
+        }
     }
 }

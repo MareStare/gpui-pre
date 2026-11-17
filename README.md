@@ -113,6 +113,11 @@ commit, then rebase the patch commits onto it.
   calls the quit callback after it and returns, as on Linux and Windows.
   A quit that the system asks for, such as at logout, still ends the
   process with `exit` in `terminate:`.
+- Min-content width of a text: a text measured for its min-content width
+  gives the width of its widest glyph cluster, as CSS
+  `overflow-wrap: anywhere` does. Wrapping already breaks a word that does
+  not fit between its clusters. A flex item with text can then shrink to
+  the width of its container and wrap the text.
 
 ## License
 
