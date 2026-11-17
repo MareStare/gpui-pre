@@ -23,7 +23,8 @@ its copy here: `cargo build -p gpui-pre-wgpu`.
 The unit tests of a crate need its `test-support` feature. The tests of
 `gpui-pre-wgpu` also need `font-kit`, which `gpui-pre-linux` turns on:
 `cargo test -p gpui-pre-wgpu --features test-support,font-kit`.
-The tests of `gpui-pre-wgpu` read fonts of Zed from `assets/fonts`.
+The tests of `gpui-pre-wgpu` and `gpui-pre-apple` read fonts of Zed
+from `assets/fonts`.
 
 ## Layout of the history
 
@@ -162,14 +163,17 @@ commit, then rebase the patch commits onto it.
   with the viewport bounds, the overflow and the child bounds of the frame
   that shows the scroll. A box that changes its size in that frame shows
   the whole item, and a request before the first frame scrolls too.
-- Variable font weights on Linux: the text system rounds each requested
-  weight to a whole number before a platform matches it, so near weights
-  draw the same face on each platform. A variable face draws the weight
-  clamped to its weight axis. A static face draws its own weight. Each
-  weight that a face draws gets its own font id, so each cache keyed by
-  the font id covers the weight. A fallback face draws at the weight of
-  its run. `gpui::weight_conformance` holds the checks that the text
-  system of each platform runs.
+- Variable font weights on Linux and macOS: the text system rounds each
+  requested weight to a whole number before a platform matches it, so near
+  weights draw the same face on each platform. A variable face draws the
+  weight clamped to its weight axis. A static face draws its own weight.
+  Each weight that a face draws gets its own font id, so each cache keyed
+  by the font id covers the weight. On Linux, a fallback face draws at the
+  weight of its run. On macOS, a named instance of a variable font, such
+  as a face of the system font, matches as a face of its own weight, and a
+  copy of the nearest face draws each other weight.
+  `gpui::weight_conformance` holds the checks that the text system of each
+  platform runs.
 
 ## License
 
