@@ -400,8 +400,13 @@ impl AppleTextSystemState {
     }
 
     fn push_font(&mut self, font: FontKitFont) -> FontId {
-        let font_id = FontId(self.fonts.len());
         let key = FaceKey::new(&font.native_font());
+        self.push_font_as(font, key)
+    }
+
+    /// Adds `font` as the font that draws the face of `key`.
+    fn push_font_as(&mut self, font: FontKitFont, key: FaceKey) -> FontId {
+        let font_id = FontId(self.fonts.len());
         self.postscript_names_by_font_id
             .insert(font_id, key.postscript_name.clone());
         self.font_ids_by_face.insert(key, font_id);
@@ -430,10 +435,9 @@ impl AppleTextSystemState {
         if let Some(weight) = weight_variation(&requested_font) {
             font = with_weight(&font, weight.round() as u16);
         }
-        let font_id = self.push_font(font);
-        // The copy may report other values than the requested font.
-        self.font_ids_by_face.insert(key, font_id);
-        font_id
+        // The copy may report other values than the requested font, so it
+        // draws only the face of the request.
+        self.push_font_as(font, key)
     }
 
     fn is_emoji(&self, font_id: FontId) -> bool {
@@ -560,6 +564,9 @@ impl AppleTextSystemState {
         let mut string = CFMutableAttributedString::new();
         let mut max_ascent = 0.0f32;
         let mut max_descent = 0.0f32;
+        // The font set on the text of each run. A glyph run that Core Text
+        // draws with one of them takes the `FontId` of its run.
+        let mut fonts_of_runs = SmallVec::<[(CTFont, FontId); 4]>::with_capacity(font_runs.len());
 
         {
             let mut text = text;
@@ -592,13 +599,11 @@ impl AppleTextSystemState {
                 } else {
                     font_size
                 };
+                let sized_font = font.native_font().clone_with_font_size(font_size.into());
                 unsafe {
-                    string.set_attribute(
-                        cf_range,
-                        kCTFontAttributeName,
-                        &font.native_font().clone_with_font_size(font_size.into()),
-                    );
+                    string.set_attribute(cf_range, kCTFontAttributeName, &sized_font);
                 }
+                fonts_of_runs.push((sized_font, run.font_id));
                 if length > 0 {
                     break_ligature = !break_ligature;
                 }
@@ -617,7 +622,13 @@ impl AppleTextSystemState {
                     .downcast::<CTFont>()
                     .unwrap()
             };
-            let font_id = self.id_for_native_font(font);
+            let font_of_run = fonts_of_runs.iter().find(|(set_font, _)| {
+                set_font.as_concrete_TypeRef() == font.as_concrete_TypeRef()
+            });
+            let font_id = match font_of_run {
+                Some(&(_, font_id)) => font_id,
+                None => self.id_for_native_font(font),
+            };
 
             let glyphs = match runs.last_mut() {
                 Some(run) if run.font_id == font_id => &mut run.glyphs,
@@ -826,6 +837,18 @@ mod tests {
         );
         assert_eq!(layout.len, 6);
         assert!(!layout.runs.is_empty());
+
+        // Both fonts draw one face. The runs of each font report that font.
+        let font_ids_of_runs = |font_id| {
+            fonts
+                .layout_line("office", px(16.), &[FontRun { font_id, len: 6 }])
+                .runs
+                .iter()
+                .map(|run| run.font_id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(font_ids_of_runs(original_id), [original_id]);
+        assert_eq!(font_ids_of_runs(configured_id), [configured_id]);
     }
 
     #[test]
