@@ -369,13 +369,15 @@ impl WgpuRenderer {
         W: HasWindowHandle + HasDisplayHandle + std::fmt::Debug + Send + Sync + Clone + 'static,
     {
         let source = WindowSource(window.clone());
-        Self::new_from_source(
-            gpu_context,
-            &source,
-            config,
-            wgpu::SurfaceColorSpace::Auto,
-            compositor_gpu,
-        )
+        time_startup_stage("window-renderer", || {
+            Self::new_from_source(
+                gpu_context,
+                &source,
+                config,
+                wgpu::SurfaceColorSpace::Auto,
+                compositor_gpu,
+            )
+        })
     }
 
     #[cfg(not(target_family = "wasm"))]

@@ -1,6 +1,8 @@
 //! `GPUI_STARTUP_LOG=1` prints the time of each startup stage of the renderers to stderr.
 //! A line is `proto startup-<stage> <ms> <end>`. `<end>` is the Unix time in ms at the end
 //! of the stage, so a launcher can put the stages on the timeline of the process.
+//! On each platform, the stage `window-renderer` spans the start of the renderer of a
+//! window, and holds the other stages of that start.
 
 use std::sync::LazyLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
