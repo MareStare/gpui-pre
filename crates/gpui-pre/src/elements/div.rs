@@ -4563,9 +4563,9 @@ impl ScrollHandle {
 mod tests {
     use super::*;
     use crate::{
-        AnyWindowHandle, AppContext as _, Context, GestureTuning, InputEvent, Keystroke,
-        MouseMoveEvent, TestAppContext, TouchEvent, TouchId, WindowHandle, canvas,
-        util::FluentBuilder as _,
+        AnyWindowHandle, AppContext as _, Context, Decorations, GestureTuning, InputEvent,
+        Keystroke, MouseMoveEvent, TestAppContext, Tiling, TouchEvent, TouchId, WindowHandle,
+        canvas, size, util::FluentBuilder as _,
     };
     use std::{cell::Cell, rc::Weak};
 
@@ -5289,6 +5289,67 @@ mod tests {
             .unwrap();
 
         assert!(active_tooltip.borrow().is_none());
+    }
+
+    /// A window that shows a tooltip anywhere in it.
+    struct WindowTooltipOwner;
+
+    impl Render for WindowTooltipOwner {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .id("window")
+                .size_full()
+                .tooltip(|_, cx| cx.new(|_| TestTooltipView).into())
+        }
+    }
+
+    #[test]
+    fn a_tooltip_stays_in_the_frame_of_a_window_with_a_shadow() {
+        let mut test_app = TestAppContext::single();
+        let any_window: AnyWindowHandle = test_app.add_window(|_, _| WindowTooltipOwner).into();
+        test_app
+            .test_window(any_window)
+            .simulate_decorations(Decorations::Client {
+                tiling: Tiling::default(),
+            });
+        let (surface, frame) = test_app
+            .update_window(any_window, |_, window, cx| {
+                window.set_client_inset(px(20.));
+                window.draw(cx).clear(cx);
+                // 8px left of the right side of the frame, 12px above its bottom.
+                let frame = window.frame_bounds();
+                window.dispatch_event(
+                    MouseMoveEvent {
+                        position: point(frame.right() - px(8.), frame.bottom() - px(12.)),
+                        modifiers: Default::default(),
+                        pressed_button: None,
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                window.draw(cx).clear(cx);
+                (window.viewport_size(), frame)
+            })
+            .unwrap();
+        assert_eq!(
+            frame,
+            Bounds::new(
+                point(px(20.), px(20.)),
+                size(surface.width - px(40.), surface.height - px(40.))
+            )
+        );
+        test_app
+            .dispatcher
+            .advance_clock(DEFAULT_TOOLTIP_SHOW_DELAY);
+        test_app.run_until_parked();
+        let tooltip = test_app
+            .update_window(any_window, |_, window, cx| {
+                window.draw(cx).clear(cx);
+                window.tooltip_bounds.as_ref().map(|tooltip| tooltip.bounds)
+            })
+            .unwrap()
+            .expect("the tooltip shows");
+        assert!(tooltip.is_contained_within(&frame), "{tooltip:?} {frame:?}");
     }
 
     struct MouseDownOutOwner {

@@ -965,7 +965,7 @@ impl TooltipId {
 
 pub(crate) struct TooltipBounds {
     id: TooltipId,
-    bounds: Bounds<Pixels>,
+    pub(crate) bounds: Bounds<Pixels>,
 }
 
 #[derive(Clone)]
@@ -3300,6 +3300,18 @@ impl Window {
         self.platform_window.window_decorations()
     }
 
+    /// The part of the surface that the user sees as the window. A window
+    /// with client decorations draws a shadow of [`Self::client_inset`] on
+    /// each side that is not tiled. The shadow is part of the surface, but
+    /// not of the window. With no client inset, the frame is the surface.
+    pub fn frame_bounds(&self) -> Bounds<Pixels> {
+        let surface = Bounds::new(Point::default(), self.viewport_size());
+        match (self.window_decorations(), self.client_inset) {
+            (Decorations::Client { tiling }, Some(inset)) => tiling.inset(surface, inset),
+            _ => surface,
+        }
+    }
+
     /// Returns whether this window is resizable.
     pub fn is_resizable(&self) -> bool {
         self.is_resizable
@@ -4109,12 +4121,8 @@ impl Window {
             let mouse_position = tooltip_request.tooltip.mouse_position;
             let tooltip_size = element.layout_as_root(AvailableSpace::min_size(), self, cx);
 
-            let area = tooltip_place::visible_area(
-                self.viewport_size(),
-                self.window_decorations(),
-                self.client_inset,
-            );
-            let tooltip_bounds = tooltip_place::tooltip_bounds(mouse_position, tooltip_size, area);
+            let tooltip_bounds =
+                tooltip_place::tooltip_bounds(mouse_position, tooltip_size, self.frame_bounds());
 
             // It's possible for an element to have an active tooltip while not being painted (e.g.
             // via the `visible_on_hover` method). Since mouse listeners are not active in this

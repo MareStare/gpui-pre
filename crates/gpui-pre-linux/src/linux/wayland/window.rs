@@ -925,11 +925,9 @@ impl WaylandWindowStatePtr {
     /// rectangles are relative to it, while gpui coordinates are surface-local.
     pub fn window_geometry(&self) -> Bounds<Pixels> {
         let state = self.state.borrow();
-        inset_by_tiling(
-            state.bounds.map_origin(|_| px(0.0)),
-            state.inset(),
-            state.tiling,
-        )
+        state
+            .tiling
+            .inset(state.bounds.map_origin(|_| px(0.0)), state.inset())
     }
 
     pub fn ptr_eq(&self, other: &Self) -> bool {
@@ -1157,13 +1155,11 @@ impl WaylandWindowStatePtr {
             let state = self.state.borrow_mut();
             state.surface_state.ack_configure(serial);
 
-            let window_geometry = inset_by_tiling(
-                state.bounds.map_origin(|_| px(0.0)),
-                state.inset(),
-                state.tiling,
-            )
-            .map(|v| f32::from(v) as i32)
-            .map_size(|v| if v <= 0 { 1 } else { v });
+            let window_geometry = state
+                .tiling
+                .inset(state.bounds.map_origin(|_| px(0.0)), state.inset())
+                .map(|v| f32::from(v) as i32)
+                .map_size(|v| if v <= 0 { 1 } else { v });
 
             state.surface_state.set_geometry(
                 window_geometry.origin.x,
@@ -1789,16 +1785,17 @@ impl PlatformWindow for WaylandWindow {
         // Keep window geometry consistent with configure handling. On Wayland, window geometry is
         // surface-local: resizing should not attempt to translate the window; the compositor
         // controls placement. We also account for client-side decoration insets and tiling.
-        let window_geometry = inset_by_tiling(
-            Bounds {
-                origin: Point::default(),
-                size,
-            },
-            state.inset(),
-            state.tiling,
-        )
-        .map(|v| f32::from(v) as i32)
-        .map_size(|v| if v <= 0 { 1 } else { v });
+        let window_geometry = state
+            .tiling
+            .inset(
+                Bounds {
+                    origin: Point::default(),
+                    size,
+                },
+                state.inset(),
+            )
+            .map(|v| f32::from(v) as i32)
+            .map_size(|v| if v <= 0 { 1 } else { v });
 
         state.surface_state.set_geometry(
             window_geometry.origin.x,
@@ -2473,13 +2470,11 @@ fn update_window(mut state: RefMut<WaylandWindowState>) {
         renderer.update_transparency(!opaque);
     }
 
-    let area = inset_by_tiling(
-        state.bounds.map_origin(|_| px(0.0)),
-        state.inset(),
-        state.tiling,
-    )
-    .map(|value| value.to_i32())
-    .map_size(|value| value.max(0));
+    let area = state
+        .tiling
+        .inset(state.bounds.map_origin(|_| px(0.0)), state.inset())
+        .map(|value| value.to_i32())
+        .map_size(|value| value.max(0));
 
     let region = state
         .globals
@@ -2593,39 +2588,9 @@ fn compute_outer_size(
     new_size: Option<Size<Pixels>>,
     tiling: Tiling,
 ) -> Option<Size<Pixels>> {
-    new_size.map(|mut new_size| {
-        if !tiling.top {
-            new_size.height += inset;
-        }
-        if !tiling.bottom {
-            new_size.height += inset;
-        }
-        if !tiling.left {
-            new_size.width += inset;
-        }
-        if !tiling.right {
-            new_size.width += inset;
-        }
-
-        new_size
+    new_size.map(|new_size| {
+        Bounds::new(Point::default(), new_size)
+            .extend(tiling.shadow(inset))
+            .size
     })
-}
-
-fn inset_by_tiling(mut bounds: Bounds<Pixels>, inset: Pixels, tiling: Tiling) -> Bounds<Pixels> {
-    if !tiling.top {
-        bounds.origin.y += inset;
-        bounds.size.height -= inset;
-    }
-    if !tiling.bottom {
-        bounds.size.height -= inset;
-    }
-    if !tiling.left {
-        bounds.origin.x += inset;
-        bounds.size.width -= inset;
-    }
-    if !tiling.right {
-        bounds.size.width -= inset;
-    }
-
-    bounds
 }

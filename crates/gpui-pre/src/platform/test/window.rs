@@ -1,10 +1,10 @@
 use crate::{
-    AnyWindowHandle, Bounds, DevicePixels, DispatchEventResult, DisplayId, GpuSpecs, HeadlessAtlas,
-    PendingImage, Pixels, Platform as _, PlatformAtlas, PlatformDisplay, PlatformHeadlessRenderer,
-    PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton, RequestFrameOptions,
-    Scene, Size, TestDisplay, TestPlatform, TextInputConfiguration, TextInputStateChange,
-    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowInsets,
-    WindowParams, WindowVisibility,
+    AnyWindowHandle, Bounds, Decorations, DevicePixels, DispatchEventResult, DisplayId, GpuSpecs,
+    HeadlessAtlas, PendingImage, Pixels, Platform as _, PlatformAtlas, PlatformDisplay,
+    PlatformHeadlessRenderer, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
+    PromptButton, RequestFrameOptions, Scene, Size, TestDisplay, TestPlatform,
+    TextInputConfiguration, TextInputStateChange, WindowAppearance, WindowBackgroundAppearance,
+    WindowBounds, WindowControlArea, WindowInsets, WindowParams, WindowVisibility,
 };
 use gpui_util::ResultExt as _;
 use parking_lot::Mutex;
@@ -42,6 +42,7 @@ pub(crate) struct TestWindowState {
     visual_viewport: Option<Bounds<Pixels>>,
     visual_viewport_callback: Option<Box<dyn FnMut()>>,
     insets: WindowInsets,
+    decorations: Decorations,
 
     /// Where the window put the mouse cursor of the system last.
     pub(crate) mouse_position: Point<Pixels>,
@@ -123,6 +124,7 @@ impl TestWindow {
             visual_viewport: None,
             visual_viewport_callback: None,
             insets: WindowInsets::default(),
+            decorations: Decorations::Server,
             mouse_position: Point::default(),
             insets_callback: None,
             virtual_keyboard_requests: 0,
@@ -209,6 +211,12 @@ impl TestWindow {
             callback();
             self.0.lock().visual_viewport_callback = Some(callback);
         }
+    }
+
+    /// Makes the window report `decorations`, as a platform does when the
+    /// window draws its own frame or when the window manager tiles it.
+    pub fn simulate_decorations(&self, decorations: Decorations) {
+        self.0.lock().decorations = decorations;
     }
 
     pub fn simulate_insets_change(&self, insets: WindowInsets) {
@@ -331,6 +339,10 @@ impl TestWindow {
 }
 
 impl PlatformWindow for TestWindow {
+    fn window_decorations(&self) -> Decorations {
+        self.0.lock().decorations
+    }
+
     fn visual_viewport_bounds(&self) -> Bounds<Pixels> {
         let state = self.0.lock();
         state

@@ -307,6 +307,24 @@ impl X11WindowState {
             renderer.update_transparency(is_transparent);
         }
     }
+
+    /// The sides of the window that touch a screen edge or another window.
+    /// A tiled side draws no shadow.
+    fn tiling(&self) -> Tiling {
+        if self.fullscreen {
+            Tiling::tiled()
+        } else if let Some(edge_constraints) = &self.edge_constraints {
+            edge_constraints.to_tiling()
+        } else {
+            // https://source.chromium.org/chromium/chromium/src/+/main:ui/ozone/platform/x11/x11_window.cc;l=2519;drc=1f14cc876cc5bf899d13284a12c451498219bb2d
+            Tiling {
+                top: self.maximized_vertical,
+                bottom: self.maximized_vertical,
+                left: self.maximized_horizontal,
+                right: self.maximized_horizontal,
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1893,52 +1911,23 @@ impl PlatformWindow for X11Window {
 
         match state.decorations {
             WindowDecorations::Server => Decorations::Server,
-            WindowDecorations::Client => {
-                let tiling = if state.fullscreen {
-                    Tiling::tiled()
-                } else if let Some(edge_constraints) = &state.edge_constraints {
-                    edge_constraints.to_tiling()
-                } else {
-                    // https://source.chromium.org/chromium/chromium/src/+/main:ui/ozone/platform/x11/x11_window.cc;l=2519;drc=1f14cc876cc5bf899d13284a12c451498219bb2d
-                    Tiling {
-                        top: state.maximized_vertical,
-                        bottom: state.maximized_vertical,
-                        left: state.maximized_horizontal,
-                        right: state.maximized_horizontal,
-                    }
-                };
-                Decorations::Client { tiling }
-            }
+            WindowDecorations::Client => Decorations::Client {
+                tiling: state.tiling(),
+            },
         }
     }
 
     fn set_client_inset(&self, inset: Pixels) {
         let mut state = self.0.state.borrow_mut();
 
-        let dp = (f32::from(inset) * state.scale_factor) as u32;
-
-        let insets = if state.fullscreen {
-            [0, 0, 0, 0]
-        } else if let Some(edge_constraints) = &state.edge_constraints {
-            let left = if edge_constraints.left_tiled { 0 } else { dp };
-            let top = if edge_constraints.top_tiled { 0 } else { dp };
-            let right = if edge_constraints.right_tiled { 0 } else { dp };
-            let bottom = if edge_constraints.bottom_tiled { 0 } else { dp };
-
-            [left, right, top, bottom]
-        } else {
-            let (left, right) = if state.maximized_horizontal {
-                (0, 0)
-            } else {
-                (dp, dp)
-            };
-            let (top, bottom) = if state.maximized_vertical {
-                (0, 0)
-            } else {
-                (dp, dp)
-            };
-            [left, right, top, bottom]
-        };
+        let shadow = state.tiling().shadow(inset);
+        let dp = |side: Pixels| (f32::from(side) * state.scale_factor) as u32;
+        let insets = [
+            dp(shadow.left),
+            dp(shadow.right),
+            dp(shadow.top),
+            dp(shadow.bottom),
+        ];
 
         if state.last_insets != insets {
             state.last_insets = insets;

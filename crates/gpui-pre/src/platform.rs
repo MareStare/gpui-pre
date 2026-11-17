@@ -1050,6 +1050,25 @@ impl Tiling {
     pub fn is_tiled(&self) -> bool {
         self.top || self.left || self.right || self.bottom
     }
+
+    /// The shadow that a window with client decorations draws around its
+    /// frame: `inset` on each side that is not tiled, and none on a tiled
+    /// side.
+    pub fn shadow(self, inset: Pixels) -> Edges<Pixels> {
+        let side = |tiled: bool| if tiled { px(0.) } else { inset };
+        Edges {
+            top: side(self.top),
+            right: side(self.right),
+            bottom: side(self.bottom),
+            left: side(self.left),
+        }
+    }
+
+    /// The frame inside a surface of `bounds`, with the shadow of `inset`
+    /// left out.
+    pub fn inset(self, bounds: Bounds<Pixels>, inset: Pixels) -> Bounds<Pixels> {
+        bounds.extend(self.shadow(inset).map(|side| -*side))
+    }
 }
 
 /// Callbacks for the accessibility adapter.
@@ -4062,5 +4081,33 @@ mod tests {
     #[test]
     fn test_window_button_layout_parse_all_invalid() {
         assert!(WindowButtonLayout::parse("asdfghjkl").is_err());
+    }
+}
+
+#[cfg(test)]
+mod tiling_tests {
+    use super::*;
+
+    #[test]
+    fn a_frame_leaves_out_the_shadow_on_each_side_that_is_not_tiled() {
+        let surface = Bounds::new(point(px(300.), px(200.)), size(px(1040.), px(840.)));
+        let frame = Tiling::default().inset(surface, px(20.));
+        assert_eq!(
+            frame,
+            Bounds::new(point(px(320.), px(220.)), size(px(1000.), px(800.)))
+        );
+        let right_free = Tiling {
+            top: true,
+            left: true,
+            bottom: true,
+            right: false,
+        };
+        let frame = right_free.inset(surface, px(20.));
+        assert_eq!(
+            frame,
+            Bounds::new(point(px(300.), px(200.)), size(px(1020.), px(840.)))
+        );
+        assert_eq!(Tiling::tiled().inset(surface, px(20.)), surface);
+        assert_eq!(frame.extend(right_free.shadow(px(20.))), surface);
     }
 }
