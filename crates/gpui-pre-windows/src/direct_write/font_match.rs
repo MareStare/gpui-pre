@@ -9,7 +9,7 @@ use windows::{
     core::{HSTRING, Interface as _, PCWSTR, w},
 };
 
-use super::{DirectWriteComponents, get_name};
+use super::get_name;
 
 pub(super) type FontAxisValues = SmallVec<[DWRITE_FONT_AXIS_VALUE; 4]>;
 
@@ -55,17 +55,17 @@ impl FontMatch {
     pub(super) fn new(
         face: IDWriteFontFace3,
         requested: &FontAxisValues,
-        components: &DirectWriteComponents,
+        locale: &HSTRING,
     ) -> Result<Self> {
         let face_values = face_axis_values(&face)?;
-        Self::with_values(face, face_values, requested, components)
+        Self::with_values(face, face_values, requested, locale)
     }
 
     fn with_values(
         face: IDWriteFontFace3,
         face_values: FontAxisValues,
         requested: &FontAxisValues,
-        components: &DirectWriteComponents,
+        locale: &HSTRING,
     ) -> Result<Self> {
         let simulations = unsafe { face.GetSimulations() };
         let mut axis_values = face_values.clone();
@@ -83,7 +83,7 @@ impl FontMatch {
         }
         let family = HSTRING::from(get_name(
             unsafe { face.GetFamilyNames()? },
-            &components.locale,
+            locale,
         )?);
         let resource = unsafe { face.cast::<IDWriteFontFace5>()?.GetFontResource()? };
         let ranges = read_array::<DWRITE_FONT_AXIS_RANGE>(
@@ -278,7 +278,7 @@ pub(super) fn find_font(
     family: &HSTRING,
     weight: FontWeight,
     style: FontStyle,
-    components: &DirectWriteComponents,
+    locale: &HSTRING,
 ) -> Option<FontMatch> {
     let axis_values = font_axis_values(weight, style);
     collections.iter().find_map(|&collection| {
@@ -286,7 +286,7 @@ pub(super) fn find_font(
         let fonts = unsafe { collection.GetMatchingFonts(family, &axis_values) }.log_err()?;
         ranked_candidates(&fonts, weight.0, style)
             .into_iter()
-            .find_map(|candidate| candidate.into_match(&axis_values, components).log_err())
+            .find_map(|candidate| candidate.into_match(&axis_values, locale).log_err())
     })
 }
 
@@ -406,13 +406,13 @@ impl Candidate {
     fn into_match(
         self,
         requested: &FontAxisValues,
-        components: &DirectWriteComponents,
+        locale: &HSTRING,
     ) -> Result<FontMatch> {
         let face = unsafe {
             self.reference
                 .CreateFontFaceWithSimulations(self.simulations)?
         };
-        FontMatch::with_values(face, self.face_values, requested, components)
+        FontMatch::with_values(face, self.face_values, requested, locale)
     }
 
     fn is_bold(&self) -> bool {

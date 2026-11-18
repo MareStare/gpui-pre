@@ -414,7 +414,7 @@ impl DirectWriteState {
         let font_id = requested()
             .and_then(|requested| {
                 let matches = FontMatches {
-                    font: FontMatch::new(face.clone(), &requested, components)?,
+                    font: FontMatch::new(face.clone(), &requested, &components.locale)?,
                     fallbacks: Vec::new(),
                 };
                 self.push_font(components, FontFeatures::default(), matches)
@@ -506,7 +506,7 @@ impl DirectWriteState {
                 &HSTRING::from(family),
                 *weight,
                 *style,
-                components,
+                &components.locale,
             )
         };
         let font = find(family)?;
