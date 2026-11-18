@@ -1066,7 +1066,7 @@ pub(crate) struct Frame {
     pub(crate) input_handlers: Vec<Option<PlatformInputHandler>>,
     pub(crate) tooltip_requests: Vec<Option<TooltipRequest>>,
     pub(crate) cursor_styles: Vec<CursorStyleRequest>,
-    /// The frame draws a one-shot animation before its end.
+    /// The frame draws a one-shot animation or a spring before its end.
     pub(crate) animating: bool,
     #[cfg(any(test, feature = "headless"))]
     pub(crate) debug_bounds: FxHashMap<String, Bounds<Pixels>>,
@@ -2985,10 +2985,11 @@ impl Window {
         self.on_next_frame(move |_, cx| cx.notify(entity));
     }
 
-    /// Whether the last frame drew a one-shot animation before its end. Such
-    /// an animation draws more frames until it ends. A repeating animation,
-    /// and the repeating part of a chain, do not count. A cached view that
-    /// draws from its cache counts as it did when it last rendered.
+    /// Whether the last frame drew a one-shot animation or a spring before
+    /// its end. Such an animation draws more frames until it ends. A
+    /// repeating animation, and the repeating part of a chain, do not count.
+    /// A cached view that draws from its cache counts as it did when it last
+    /// rendered.
     pub fn animating(&self) -> bool {
         self.rendered_frame.animating
     }

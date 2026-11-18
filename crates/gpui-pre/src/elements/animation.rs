@@ -378,6 +378,7 @@ impl<E: IntoElement + 'static> Element for SpringAnimationElement<E> {
             let mut element = animator(element, &positions).into_any_element();
 
             if !done {
+                window.next_frame.animating = true;
                 window.request_animation_frame();
             }
 
@@ -949,6 +950,15 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(*rendered.borrow(), vec![Position(0.0, 0.0)]);
+        let animating = |cx: &mut TestAppContext| {
+            window
+                .update(cx, |_, window, _| window.animating())
+                .unwrap()
+        };
+        assert!(
+            animating(cx),
+            "a moving spring is an animation of the frame"
+        );
 
         cx.executor().advance_clock(Duration::from_millis(50));
         assert!(simulate_next_frame(&window, cx) > 0);
@@ -983,6 +993,7 @@ mod tests {
         }
         assert_eq!(*rendered.borrow().last().unwrap(), Position(0.0, -50.0));
         assert_eq!(simulate_next_frame(&window, cx), 0);
+        assert!(!animating(cx));
     }
 
     #[gpui::test]
