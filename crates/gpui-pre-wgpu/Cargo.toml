@@ -55,10 +55,6 @@ path = "benches/layout_line.rs"
 harness = false
 
 [[test]]
-name = "device_identity"
-path = "tests/device_identity.rs"
-
-[[test]]
 name = "headless_platform"
 path = "tests/headless_platform.rs"
 required-features = ["test-support"]

@@ -2446,10 +2446,7 @@ impl WgpuRenderer {
 
             // Drop old resources to release Arc<Device>/Arc<Queue> and GPU resources
             self.state = RendererState::Released;
-            let instance = gpu_context
-                .borrow_mut()
-                .take()
-                .map(|context| context.instance);
+            *gpu_context.borrow_mut() = None;
 
             // Wait briefly for the GPU driver to stabilize, then try to
             // recreate the context without software renderers. If this fails
@@ -2458,7 +2455,7 @@ impl WgpuRenderer {
             std::thread::sleep(std::time::Duration::from_millis(350));
 
             let (new_context, surface) =
-                recreate_context_and_surface(source, instance, self.compositor_gpu, &config)?;
+                create_context_and_surface(source, self.compositor_gpu, &config, true)?;
             *gpu_context.borrow_mut() = Some(new_context);
             surface
         } else {
@@ -2677,30 +2674,6 @@ fn create_context_and_surface(
         panic!("{error:#}");
     }
     Err(error)
-}
-
-/// Creates the context after a lost device. It tries the instance of the lost device
-/// first: there, the new device gets an id that differs from the id of the lost one.
-#[cfg(not(target_family = "wasm"))]
-fn recreate_context_and_surface(
-    source: &(impl SurfaceSource + ?Sized),
-    instance: Option<wgpu::Instance>,
-    compositor_gpu: Option<CompositorGpuHint>,
-    config: &WgpuSurfaceConfig,
-) -> anyhow::Result<(WgpuContext, wgpu::Surface<'static>)> {
-    if let Some(instance) = instance {
-        let created = source.create_surface(&instance).and_then(|surface| {
-            let context = WgpuContext::new(instance, &surface, config, compositor_gpu, true)?;
-            Ok((context, surface))
-        });
-        match created {
-            Ok(created) => return Ok(created),
-            Err(error) => {
-                log::info!("The instance of the lost device has no adapter: {error:#}")
-            }
-        }
-    }
-    create_context_and_surface(source, compositor_gpu, config, true)
 }
 
 fn create_surface(

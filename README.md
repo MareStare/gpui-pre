@@ -62,8 +62,9 @@ gpui-pre version goes.
 - Backends from the environment: `WGPU_BACKEND` and the wgpu backend
   options override the default, Vulkan and then DX12 on Windows.
 - Device loss recovery: the wgpu window renderer of macOS and Windows makes
-  a new device after a lost one, with a new identity, and asks the next
-  frame to build the scene again. `Window::gpu_failure` gives the GPU
+  a new device after a lost one, and asks the next frame to build the scene
+  again. `WgpuSurfaceFrame::device_generation` tells the new device from the
+  lost one: wgpu can compare them as equal. `Window::gpu_failure` gives the GPU
   error of a wgpu window that stays after the renderer dropped its GPU
   caches to recover. The renderer keeps trying to recover and does not
   panic.
