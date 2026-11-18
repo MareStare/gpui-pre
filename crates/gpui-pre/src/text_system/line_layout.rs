@@ -914,7 +914,7 @@ mod tests {
     fn text_wraps_only_at_its_break_points() {
         let text_system =
             WindowTextSystem::new(Arc::new(TextSystem::new(Arc::new(NoopTextSystem::new()))));
-        let text = SharedString::from("ab/cd efgh\nxy/zw");
+        let text = SharedString::from("ab/cd efgh\nxy/zw\np/qrst");
         let runs = [TextRun {
             len: text.len(),
             font: font(".ZedMono"),
@@ -922,7 +922,14 @@ mod tests {
         }];
         // Each glyph is 6 px wide, so a row holds four glyphs.
         let lines = text_system
-            .shape_text_with_break_points(text, px(10.), &runs, Some(px(24.)), None, Some(&[3, 14]))
+            .shape_text_with_break_points(
+                text,
+                px(10.),
+                &runs,
+                Some(px(24.)),
+                None,
+                Some(&[3, 14, 19]),
+            )
             .unwrap();
         let wraps = |line: &WrappedLine| -> Vec<usize> {
             line.layout
@@ -935,6 +942,8 @@ mod tests {
         assert_eq!(wraps(&lines[0]), [3, 7]);
         // A break point of the second line counts from the start of the line.
         assert_eq!(wraps(&lines[1]), [3]);
+        // A line after a shorter line counts from its own start too.
+        assert_eq!(wraps(&lines[2]), [2]);
     }
 
     fn glyph_at(x: f32, index: usize) -> ShapedGlyph {
