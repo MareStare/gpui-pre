@@ -1066,6 +1066,8 @@ pub(crate) struct Frame {
     pub(crate) input_handlers: Vec<Option<PlatformInputHandler>>,
     pub(crate) tooltip_requests: Vec<Option<TooltipRequest>>,
     pub(crate) cursor_styles: Vec<CursorStyleRequest>,
+    /// The frame draws a one-shot animation before its end.
+    pub(crate) animating: bool,
     #[cfg(any(test, feature = "headless"))]
     pub(crate) debug_bounds: FxHashMap<String, Bounds<Pixels>>,
     #[cfg(any(test, feature = "headless"))]
@@ -1142,6 +1144,7 @@ impl Frame {
             input_handlers: Vec::new(),
             tooltip_requests: Vec::new(),
             cursor_styles: Vec::new(),
+            animating: false,
 
             #[cfg(any(test, feature = "headless"))]
             debug_bounds: FxHashMap::default(),
@@ -1171,6 +1174,7 @@ impl Frame {
         self.deferred_draws.clear();
         self.tab_stops.clear();
         self.focus = None;
+        self.animating = false;
 
         #[cfg(any(test, feature = "headless"))]
         {
@@ -2979,6 +2983,13 @@ impl Window {
     pub fn request_animation_frame(&self) {
         let entity = self.current_view();
         self.on_next_frame(move |_, cx| cx.notify(entity));
+    }
+
+    /// Whether the last frame drew a one-shot animation before its end. Such
+    /// an animation draws more frames until it ends. A repeating animation
+    /// does not count.
+    pub fn animating(&self) -> bool {
+        self.rendered_frame.animating
     }
 
     /// Runs all callbacks scheduled via [`Self::on_next_frame`], returning how many ran.

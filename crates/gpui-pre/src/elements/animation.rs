@@ -449,6 +449,12 @@ impl<E: IntoElement + 'static> Element for AnimationElement<E> {
             let mut element = (self.animator)(element, animation_ix, delta).into_any_element();
 
             if !done {
+                if self.animations[animation_ix..]
+                    .iter()
+                    .all(|animation| animation.oneshot)
+                {
+                    window.next_frame.animating = true;
+                }
                 match self.animations[animation_ix].max_fps {
                     Some(max_fps) if max_fps.is_finite() && max_fps > 0.0 => {
                         if !state.delayed_frame_pending.get() {
@@ -623,6 +629,26 @@ mod tests {
                         record_deltas(self.second_deltas.clone()),
                     ))
                 })
+        }
+    }
+
+    /// A one-shot animation beside a repeating one.
+    struct OneShotTestView;
+
+    impl Render for OneShotTestView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .child(div().with_animation(
+                    "one-shot-animation",
+                    Animation::new(Duration::from_secs(1)),
+                    |this, _| this,
+                ))
+                .child(div().with_animation(
+                    "repeating-animation",
+                    Animation::new(Duration::from_secs(1)).repeat(),
+                    |this, _| this,
+                ))
         }
     }
 
@@ -1013,6 +1039,31 @@ mod tests {
             .advance_clock(Duration::from_secs(300 * 24 * 60 * 60) + Duration::from_millis(500));
         simulate_next_frame(&window, cx);
         assert_eq!(*first_deltas.borrow().last().unwrap(), 0.25);
+    }
+
+    #[gpui::test]
+    fn test_a_frame_is_animating_until_its_one_shot_animations_end(cx: &mut TestAppContext) {
+        let window = cx.open_window(size(px(100.), px(100.)), |_, _| OneShotTestView);
+        cx.run_until_parked();
+        let animating = |cx: &mut TestAppContext| {
+            window
+                .update(cx, |_, window, _| window.animating())
+                .unwrap()
+        };
+        assert!(animating(cx));
+
+        cx.executor().advance_clock(Duration::from_millis(500));
+        simulate_next_frame(&window, cx);
+        assert!(animating(cx));
+
+        cx.executor().advance_clock(Duration::from_millis(600));
+        simulate_next_frame(&window, cx);
+        assert!(!animating(cx));
+        assert!(
+            simulate_next_frame(&window, cx) > 0,
+            "the repeating animation asks for frames"
+        );
+        assert!(!animating(cx));
     }
 
     #[gpui::test]
