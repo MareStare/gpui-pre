@@ -145,7 +145,7 @@ impl ShapedLine {
         paint_line(
             origin,
             &self.layout,
-            &self.text,
+            Some(&self.text),
             line_height,
             align,
             align_width,
@@ -173,7 +173,7 @@ impl ShapedLine {
         paint_line_background(
             origin,
             &self.layout,
-            &self.text,
+            Some(&self.text),
             line_height,
             align,
             align_width,
@@ -403,7 +403,7 @@ impl LineLayout {
         paint_line(
             origin,
             self,
-            "",
+            None,
             line_height,
             align,
             align_width,
@@ -436,7 +436,7 @@ impl LineLayout {
         paint_line_background(
             origin,
             self,
-            "",
+            None,
             line_height,
             align,
             align_width,
@@ -484,7 +484,7 @@ impl WrappedLine {
         paint_line(
             origin,
             &self.layout.unwrapped_layout,
-            &self.text,
+            Some(&self.text),
             line_height,
             align,
             align_width,
@@ -519,7 +519,7 @@ impl WrappedLine {
         paint_line_background(
             origin,
             &self.layout.unwrapped_layout,
-            &self.text,
+            Some(&self.text),
             line_height,
             align,
             align_width,
@@ -536,7 +536,7 @@ impl WrappedLine {
 fn paint_line(
     origin: Point<Pixels>,
     layout: &LineLayout,
-    text: &str,
+    text: Option<&str>,
     line_height: Pixels,
     align: TextAlign,
     align_width: Option<Pixels>,
@@ -818,7 +818,7 @@ fn has_background(decoration_runs: &[DecorationRun]) -> bool {
 fn paint_line_background(
     origin: Point<Pixels>,
     layout: &LineLayout,
-    text: &str,
+    text: Option<&str>,
     line_height: Pixels,
     align: TextAlign,
     align_width: Option<Pixels>,
@@ -972,7 +972,7 @@ fn paint_line_background(
 fn line_paint_bounds(
     origin: Point<Pixels>,
     layout: &LineLayout,
-    text: &str,
+    text: Option<&str>,
     line_height: Pixels,
     align: TextAlign,
     align_width: Option<Pixels>,
@@ -1019,7 +1019,7 @@ fn aligned_origin_x(
     last_glyph_x: Pixels,
     align: &TextAlign,
     layout: &LineLayout,
-    text: &str,
+    text: Option<&str>,
     wrap_boundary: Option<&&WrapBoundary>,
 ) -> Pixels {
     let end_of_line = row_content_end(layout, text, last_glyph_x, wrap_boundary.copied());
@@ -1036,10 +1036,10 @@ fn aligned_origin_x(
 /// The x where the content of a row ends. The row starts at `row_start` and
 /// ends at `wrap_boundary`, or at the end of the line. The spaces at the end
 /// of a wrapped row hang past the edge and take no part in the alignment, as
-/// in CSS.
+/// in CSS. With no `text`, the spaces count as content.
 fn row_content_end(
     layout: &LineLayout,
-    text: &str,
+    text: Option<&str>,
     row_start: Pixels,
     wrap_boundary: Option<&WrapBoundary>,
 ) -> Pixels {
@@ -1047,6 +1047,9 @@ fn row_content_end(
         return layout.width;
     };
     let mut end = layout.runs[run_ix].glyphs[glyph_ix].position.x;
+    let Some(text) = text else {
+        return end;
+    };
     let row = layout.runs[..run_ix]
         .iter()
         .flat_map(|run| &run.glyphs)
@@ -1137,7 +1140,7 @@ mod tests {
                     line_paint_bounds(
                         origin,
                         &line.layout,
-                        &line.text,
+                        Some(&line.text),
                         line_height,
                         align,
                         align_width.map(px),
@@ -1157,7 +1160,7 @@ mod tests {
                 line_paint_bounds(
                     origin,
                     &empty.layout,
-                    &empty.text,
+                    Some(&empty.text),
                     line_height,
                     align,
                     Some(px(100.)),
@@ -1184,7 +1187,7 @@ mod tests {
                 line_paint_bounds(
                     origin,
                     &spaced.layout,
-                    &spaced.text,
+                    Some(&spaced.text),
                     line_height,
                     align,
                     Some(px(20.)),
@@ -1475,7 +1478,7 @@ mod tests {
                 paint_line(
                     origin,
                     &wrapped.unwrapped_layout,
-                    &wrapped.text,
+                    Some(&wrapped.text),
                     line_height,
                     TextAlign::Left,
                     Some(px(16.)),
