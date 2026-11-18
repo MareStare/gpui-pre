@@ -413,7 +413,7 @@ impl Outline {
     /// The bounds and the corner radii of the outer edge of the line around
     /// an element of `bounds` and `corner_radii`. A sharp corner stays
     /// sharp.
-    pub fn outer(
+    fn outer(
         &self,
         bounds: Bounds<Pixels>,
         corner_radii: Corners<Pixels>,
