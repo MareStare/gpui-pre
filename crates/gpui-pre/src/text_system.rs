@@ -742,7 +742,7 @@ impl WindowTextSystem {
     }
 
     /// Shapes the text as [`Self::shape_text`] does. When `break_points` is given, the text
-    /// wraps only at its sorted byte offsets, in place of the Unicode line break rules.
+    /// wraps only at them, in place of the Unicode line break rules.
     pub(crate) fn shape_text_with_break_points(
         &self,
         text: SharedString,
@@ -750,7 +750,7 @@ impl WindowTextSystem {
         runs: &[TextRun],
         wrap_width: Option<Pixels>,
         line_clamp: Option<usize>,
-        break_points: Option<&[usize]>,
+        break_points: Option<&[BreakPoint]>,
     ) -> Result<SmallVec<[WrappedLine; 1]>> {
         let mut runs = runs.iter().filter(|run| run.len > 0).cloned().peekable();
         let mut font_runs = self.font_runs_buffer.take();
@@ -767,8 +767,11 @@ impl WindowTextSystem {
                 line_break_points.extend(
                     points
                         .iter()
-                        .filter(|point| (line_start + 1..line_end).contains(point))
-                        .map(|point| point - line_start),
+                        .filter(|point| (line_start + 1..line_end).contains(&point.index))
+                        .map(|point| BreakPoint {
+                            index: point.index - line_start,
+                            rank: point.rank,
+                        }),
                 );
             }
 

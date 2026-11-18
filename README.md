@@ -138,6 +138,12 @@ gpui-pre version goes.
   when each glyph fits. The spaces at the end of a row hang past the edge,
   as in CSS. They get no row of their own and take no part in the alignment
   of the row.
+- Break points of the caller: `StyledText::with_break_points` wraps a text
+  only at the given `BreakPoint`s, in place of the Unicode line break
+  rules. Each point has a rank, 0 the most preferred. A row wraps at the
+  last point that fits of the lowest rank that it has, and at any glyph
+  when it has no point. Each line of a text with line breaks counts its
+  points from its own start. A cut text drops the points.
 - Typographic font families on Windows: DirectWrite groups the added fonts
   and the system fonts into typographic families. A lookup finds a family
   by its typographic, weight-stretch-style or GDI name, or a face by its

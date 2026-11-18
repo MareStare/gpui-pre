@@ -191,21 +191,20 @@ impl LineLayout {
         (left, right)
     }
 
-    /// Wraps the line at the byte offsets of `break_points`, or at the Unicode line break
-    /// opportunities when it is `None`. A part with no break that is wider than the line
-    /// wraps at any glyph.
+    /// Wraps the line at `break_points`, or at the Unicode line break opportunities, all of
+    /// rank 0, when it is `None`. A row wraps at the last point that fits of the lowest rank
+    /// that it has. A row with no point that is wider than the line wraps at any glyph.
     fn compute_wrap_boundaries(
         &self,
         text: &str,
         wrap_width: Pixels,
         max_lines: Option<usize>,
-        break_points: Option<&[usize]>,
+        break_points: Option<&[BreakPoint]>,
         scratch: &mut WrapScratch,
     ) -> SmallVec<[WrapBoundary; 1]> {
         let mut boundaries = SmallVec::new();
-        let mut current_segment: Option<Range<usize>> = None;
-        let mut last_candidate_ix = None;
-        let mut last_candidate_x = px(0.);
+        // The number of the segment of the last glyph, and its byte range.
+        let mut current_segment: Option<(usize, Range<usize>)> = None;
         let mut last_boundary = WrapBoundary {
             run_ix: 0,
             glyph_ix: 0,
@@ -216,7 +215,9 @@ impl LineLayout {
         let WrapScratch {
             glyph_indices,
             break_indices,
+            candidates,
         } = scratch;
+        candidates.clear();
         glyph_indices.clear();
         glyph_indices.extend(
             self.runs
@@ -229,10 +230,12 @@ impl LineLayout {
                 points
                     .iter()
                     .copied()
-                    .filter(|index| glyph_indices.contains(index)),
+                    .filter(|point| glyph_indices.contains(&point.index)),
             ),
             None => break_indices.extend(
-                LineWrapper::break_indices(text).filter(|index| glyph_indices.contains(index)),
+                LineWrapper::break_indices(text)
+                    .filter(|index| glyph_indices.contains(index))
+                    .map(|index| BreakPoint { index, rank: 0 }),
             ),
         }
         let mut glyphs = self
@@ -260,23 +263,34 @@ impl LineLayout {
             if byte != b' '
                 && current_segment
                     .as_ref()
-                    .is_none_or(|segment| !segment.contains(&index))
+                    .is_none_or(|(_, range)| !range.contains(&index))
             {
                 // Detect transitions between line-break segments rather than matching glyph
                 // indices directly, to accommodate RTL text. Workaround for the lack of complete
                 // UAX #9 support.
-                let segment = break_indices.partition_point(|break_index| *break_index <= index);
-                if current_segment.is_some() {
-                    last_candidate_ix = Some(boundary);
-                    last_candidate_x = x;
-                }
+                let segment = break_indices.partition_point(|point| point.index <= index);
                 let start = segment
                     .checked_sub(1)
-                    .and_then(|previous| break_indices.get(previous))
-                    .copied()
-                    .unwrap_or(0);
-                let end = break_indices.get(segment).copied().unwrap_or(text.len());
-                current_segment = Some(start..end);
+                    .and_then(|previous| break_indices.get(previous));
+                if let Some((previous, _)) = current_segment {
+                    // The points between the two segments, in either direction for RTL text.
+                    // Spaces start no segment, so a step can cross several points.
+                    let crossed = &break_indices[previous.min(segment)..previous.max(segment)];
+                    let candidate = WrapCandidate {
+                        rank: crossed.iter().map(|point| point.rank).min().unwrap_or(0),
+                        boundary,
+                        x,
+                    };
+                    // A later candidate of a rank replaces the earlier one.
+                    match candidates.iter_mut().find(|c| c.rank == candidate.rank) {
+                        Some(earlier) => *earlier = candidate,
+                        None => candidates.push(candidate),
+                    }
+                }
+                let end = break_indices
+                    .get(segment)
+                    .map_or(text.len(), |point| point.index);
+                current_segment = Some((segment, start.map_or(0, |point| point.index)..end));
             }
 
             let next_x = glyphs.peek().map_or(self.width, |(_, _, x)| *x);
@@ -298,19 +312,27 @@ impl LineLayout {
                     break 'glyphs;
                 }
 
-                if let Some(last_candidate_ix) = last_candidate_ix.take() {
-                    last_boundary = last_candidate_ix;
-                    last_boundary_x = last_candidate_x;
-                } else {
-                    last_boundary = boundary;
-                    last_boundary_x = x;
-                }
+                let best = candidates.iter().min_by_key(|candidate| candidate.rank);
+                (last_boundary, last_boundary_x) =
+                    best.map_or((boundary, x), |candidate| (candidate.boundary, candidate.x));
+                candidates.retain(|candidate| candidate.boundary > last_boundary);
                 boundaries.push(last_boundary);
             }
         }
 
         boundaries
     }
+}
+
+/// A byte offset at which a line may wrap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct BreakPoint {
+    /// The byte offset in the text. The line wraps before the character at it.
+    pub index: usize,
+
+    /// The preference of the point, with 0 as the most preferred. A row wraps at a point
+    /// of a rank only when no point of a lower rank fits on it.
+    pub rank: u8,
 }
 
 /// A line of text that has been wrapped to fit a given width
@@ -509,7 +531,17 @@ pub(crate) struct LineLayoutCache {
 #[derive(Default)]
 struct WrapScratch {
     glyph_indices: FxHashSet<usize>,
-    break_indices: Vec<usize>,
+    break_indices: Vec<BreakPoint>,
+
+    /// The last place of each rank at which the current row may wrap.
+    candidates: Vec<WrapCandidate>,
+}
+
+/// A place at which a row may wrap: before the glyph that starts a part.
+struct WrapCandidate {
+    rank: u8,
+    boundary: WrapBoundary,
+    x: Pixels,
 }
 
 #[derive(Default)]
@@ -622,7 +654,7 @@ impl LineLayoutCache {
         runs: &[FontRun],
         wrap_width: Option<Pixels>,
         max_lines: Option<usize>,
-        break_points: Option<&[usize]>,
+        break_points: Option<&[BreakPoint]>,
     ) -> Arc<WrappedLineLayout>
     where
         Text: AsRef<str>,
@@ -821,7 +853,7 @@ struct CacheKey {
     runs: SmallVec<[FontRun; 1]>,
     wrap_width: Option<Pixels>,
     force_width: Option<Pixels>,
-    break_points: Option<Box<[usize]>>,
+    break_points: Option<Box<[BreakPoint]>>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
@@ -831,7 +863,7 @@ struct CacheKeyRef<'a> {
     runs: &'a [FontRun],
     wrap_width: Option<Pixels>,
     force_width: Option<Pixels>,
-    break_points: Option<&'a [usize]>,
+    break_points: Option<&'a [BreakPoint]>,
 }
 
 impl PartialEq for dyn AsCacheKeyRef + '_ {
@@ -910,40 +942,77 @@ mod tests {
         assert_eq!(key.text.as_ptr(), text.as_ptr());
     }
 
-    #[test]
-    fn text_wraps_only_at_its_break_points() {
+    /// The glyph indices at which each line of `text` wraps at `break_points`. Each glyph
+    /// is 6 px wide, so a row of 24 px holds four glyphs.
+    fn wraps(text: &'static str, break_points: &[BreakPoint]) -> Vec<Vec<usize>> {
         let text_system =
             WindowTextSystem::new(Arc::new(TextSystem::new(Arc::new(NoopTextSystem::new()))));
-        let text = SharedString::from("ab/cd efgh\nxy/zw\np/qrst");
         let runs = [TextRun {
             len: text.len(),
             font: font(".ZedMono"),
             ..Default::default()
         }];
-        // Each glyph is 6 px wide, so a row holds four glyphs.
         let lines = text_system
             .shape_text_with_break_points(
-                text,
+                SharedString::from(text),
                 px(10.),
                 &runs,
                 Some(px(24.)),
                 None,
-                Some(&[3, 14, 19]),
+                Some(break_points),
             )
             .unwrap();
-        let wraps = |line: &WrappedLine| -> Vec<usize> {
-            line.layout
-                .wrap_boundaries()
-                .iter()
-                .map(|boundary| boundary.glyph_ix)
-                .collect()
-        };
-        // The space is no break point, so `cd efgh` wraps at a glyph.
-        assert_eq!(wraps(&lines[0]), [3, 7]);
-        // A break point of the second line counts from the start of the line.
-        assert_eq!(wraps(&lines[1]), [3]);
-        // A line after a shorter line counts from its own start too.
-        assert_eq!(wraps(&lines[2]), [2]);
+        lines
+            .iter()
+            .map(|line: &WrappedLine| {
+                line.layout
+                    .wrap_boundaries()
+                    .iter()
+                    .map(|boundary| boundary.glyph_ix)
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn points(rank: u8, indices: &[usize]) -> impl Iterator<Item = BreakPoint> + '_ {
+        indices.iter().map(move |index| BreakPoint {
+            index: *index,
+            rank,
+        })
+    }
+
+    #[test]
+    fn text_wraps_only_at_its_break_points() {
+        let break_points = points(0, &[3, 14, 19]).collect::<Vec<_>>();
+        assert_eq!(
+            wraps("ab/cd efgh\nxy/zw\np/qrst", &break_points),
+            [
+                // The space is no break point, so `cd efgh` wraps at a glyph.
+                vec![3, 7],
+                // A break point of the second line counts from the start of the line.
+                vec![3],
+                // A line after a shorter line counts from its own start too.
+                vec![2],
+            ]
+        );
+    }
+
+    #[test]
+    fn a_row_wraps_at_the_point_of_the_lowest_rank() {
+        let break_points = points(0, &[2]).chain(points(1, &[5])).collect::<Vec<_>>();
+        // `p/` takes a row, as its point outranks the later one. `qr stuvw` is too wide, so
+        // it wraps at its point of rank 1, and `stuvw` at a glyph.
+        assert_eq!(wraps("p/qr stuvw", &break_points), [vec![2, 5, 9]]);
+    }
+
+    #[test]
+    fn a_row_wraps_at_the_lowest_rank_of_the_points_before_a_glyph() {
+        // The point of rank 0 at the space and the point of rank 1 after it both lie before
+        // `a`, so the row wraps before `a` at rank 0, past the earlier point after `p/`.
+        let break_points = points(0, &[2, 4])
+            .chain(points(1, &[5]))
+            .collect::<Vec<_>>();
+        assert_eq!(wraps("p/q/ abcd", &break_points), [vec![5]]);
     }
 
     fn glyph_at(x: f32, index: usize) -> ShapedGlyph {
