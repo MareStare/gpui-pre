@@ -542,10 +542,7 @@ impl WgpuRenderer {
             color_space,
             width,
             height,
-            present_mode: config
-                .preferred_present_mode
-                .filter(|mode| surface_caps.present_modes.contains(mode))
-                .unwrap_or(wgpu::PresentMode::Fifo),
+            present_mode: present_mode(&surface_caps.present_modes, config.preferred_present_mode),
             desired_maximum_frame_latency: 2,
             alpha_mode: alpha_modes.pick(config.transparent),
             view_formats: vec![],
@@ -2274,11 +2271,20 @@ impl WgpuRenderer {
         config.preferred_present_mode = config
             .preferred_present_mode
             .or(self.config.preferred_present_mode);
+        // A recovery makes the surface from the config, so it stays also when the GPU is lost.
+        self.config = config;
         let window_handle = window
             .window_handle()
             .map_err(|e| anyhow::anyhow!("Failed to get window handle: {e}"))?;
 
         let surface = create_surface(instance, window_handle.as_raw())?;
+        let present_modes = {
+            let gpu_context = self.context.as_ref().map(|context| context.borrow());
+            let Some(context) = gpu_context.as_ref().and_then(|context| context.as_ref()) else {
+                anyhow::bail!("Cannot replace the surface: the renderer has no GPU context")
+            };
+            surface.get_capabilities(&context.adapter).present_modes
+        };
 
         let mut gpu = match std::mem::replace(&mut self.state, RendererState::Released) {
             RendererState::Ready {
@@ -2294,14 +2300,12 @@ impl WgpuRenderer {
                 anyhow::bail!("Cannot replace the surface: GPU resources have been released")
             }
         };
-        gpu.set_size(config.size);
-        gpu.set_alpha_mode(config.transparent);
-        if let Some(mode) = config.preferred_present_mode {
-            gpu.surface_config.present_mode = mode;
-        }
+        gpu.set_size(self.config.size);
+        gpu.set_alpha_mode(self.config.transparent);
+        gpu.surface_config.present_mode =
+            present_mode(&present_modes, self.config.preferred_present_mode);
         surface.configure(&gpu.core.resources.device, &gpu.surface_config);
-        self.state = RendererState::Ready { surface, gpu };
-        self.config = config;
+        self.set_ready(surface, gpu);
 
         Ok(())
     }
@@ -2409,11 +2413,17 @@ impl WgpuRenderer {
             needs_new_context,
             &self.atlas,
         )?;
-        self.state = RendererState::Ready { surface, gpu };
-        self.last_frame_error = None;
+        self.set_ready(surface, gpu);
 
         log::info!("GPU recovery complete");
         Ok(())
+    }
+
+    /// Draws to a new surface. An error of the frames on the old surface is dropped.
+    #[cfg(not(target_family = "wasm"))]
+    fn set_ready(&mut self, surface: wgpu::Surface<'static>, gpu: WindowGpu) {
+        self.state = RendererState::Ready { surface, gpu };
+        self.last_frame_error = None;
     }
 }
 
@@ -2550,9 +2560,20 @@ impl SurfaceSource for MetalLayerSource {
     }
 }
 
+/// The preferred present mode when the surface supports it, or else `Fifo`, which every
+/// surface supports.
+fn present_mode(
+    supported: &[wgpu::PresentMode],
+    preferred: Option<wgpu::PresentMode>,
+) -> wgpu::PresentMode {
+    preferred
+        .filter(|mode| supported.contains(mode))
+        .unwrap_or(wgpu::PresentMode::Fifo)
+}
+
 /// Creates the context on the first group of backends with an adapter that can draw
-/// to the window. It fails with `ContextError::NoAdapterNamed` only when no group has
-/// the adapter that `WGPU_ADAPTER_NAME` names.
+/// to the window. It fails with the error of a missing name only when no group has the
+/// adapter that `WGPU_ADAPTER_NAME` names.
 #[cfg(not(target_family = "wasm"))]
 fn create_context_and_surface(
     source: &(impl SurfaceSource + ?Sized),
