@@ -3,7 +3,7 @@ use crate::{
     HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size, TextOverflow,
     TextRun, TextStyle, TooltipId, TruncateFrom, WhiteSpace, Window, WrappedLine,
-    WrappedLineLayout, register_tooltip_mouse_handlers, set_tooltip_on_window,
+    WrappedLineLayout, point, px, register_tooltip_mouse_handlers, set_tooltip_on_window, size,
 };
 use anyhow::Context as _;
 use gpui_util::ResultExt;
@@ -1287,10 +1287,28 @@ impl Element for InteractiveText {
                         }
                     });
 
+                    // The tooltip of a range sits under the line of the pointer, centered on the
+                    // pointer.
+                    let anchor = Rc::new({
+                        let text_layout = text_layout.clone();
+                        move |window: &Window| {
+                            let mouse = window.mouse_position();
+                            let line_top = text_layout
+                                .index_for_position(mouse)
+                                .ok()
+                                .and_then(|index| text_layout.position_for_index(index))
+                                .map_or(mouse.y, |position| position.y);
+                            Bounds::new(
+                                point(mouse.x, line_top),
+                                size(px(0.), text_layout.line_height()),
+                            )
+                        }
+                    });
                     register_tooltip_mouse_handlers(
                         &active_tooltip,
                         self.tooltip_id,
                         build_tooltip,
+                        anchor,
                         check_is_hovered,
                         check_is_hovered_during_prepaint,
                         interactive_state.long_press_tooltip_active.clone(),

@@ -982,6 +982,9 @@ pub(crate) struct TooltipBounds {
 pub(crate) struct TooltipRequest {
     id: TooltipId,
     tooltip: AnyTooltip,
+    /// The absolute bounds of the part of the element that the tooltip sits next to. With
+    /// none, the tooltip sits next to the pointer.
+    anchor: Option<Bounds<Pixels>>,
 }
 
 /// The ids of the elements being drawn, root first, with the hash of every
@@ -1287,6 +1290,8 @@ pub struct Window {
     next_hitbox_id: HitboxId,
     pub(crate) next_tooltip_id: TooltipId,
     pub(crate) tooltip_bounds: Option<TooltipBounds>,
+    /// When the last tooltip hid because its element lost the pointer.
+    pub(crate) tooltip_hidden_at: Option<Instant>,
     pub(crate) next_frame_callbacks: Rc<RefCell<Vec<FrameCallback>>>,
     pub(crate) dirty_views: FxHashSet<EntityId>,
     focus_listeners: SingleSubscriberSet<AnyWindowFocusListener>,
@@ -2411,6 +2416,7 @@ impl Window {
             next_hitbox_id: HitboxId(0),
             next_tooltip_id: TooltipId::default(),
             tooltip_bounds: None,
+            tooltip_hidden_at: None,
             dirty_views: FxHashSet::default(),
             focus_listeners: SingleSubscriberSet::new(),
             focus_lost_listeners: SingleSubscriberSet::new(),
@@ -4116,6 +4122,7 @@ impl Window {
     }
 
     fn prepaint_tooltip(&mut self, cx: &mut App) -> Option<AnyElement> {
+        let mut shown = None;
         // Use indexing instead of iteration to avoid borrowing self for the duration of the loop.
         for tooltip_request_index in (0..self.next_frame.tooltip_requests.len()).rev() {
             let Some(Some(tooltip_request)) = self
@@ -4127,12 +4134,23 @@ impl Window {
                 log::error!("Unexpectedly absent TooltipRequest");
                 continue;
             };
+            if shown.is_some() {
+                // A tooltip under the one that shows only updates its state. When its element
+                // lost the pointer, it hides, so it does not show again later at a stale place.
+                (tooltip_request.tooltip.check_visible_and_update)(Bounds::default(), self, cx);
+                continue;
+            }
             let mut element = tooltip_request.tooltip.view.clone().into_any_element();
-            let mouse_position = tooltip_request.tooltip.mouse_position;
             let tooltip_size = element.layout_as_root(AvailableSpace::min_size(), self, cx);
-
-            let tooltip_bounds =
-                tooltip_place::tooltip_bounds(mouse_position, tooltip_size, self.frame_bounds());
+            let area = self.frame_bounds();
+            let tooltip_bounds = match tooltip_request.anchor {
+                Some(anchor) => tooltip_place::under_element(anchor, tooltip_size, area),
+                None => tooltip_place::at_pointer(
+                    tooltip_request.tooltip.mouse_position,
+                    tooltip_size,
+                    area,
+                ),
+            };
 
             // It's possible for an element to have an active tooltip while not being painted (e.g.
             // via the `visible_on_hover` method). Since mouse listeners are not active in this
@@ -4151,9 +4169,9 @@ impl Window {
                 id: tooltip_request.id,
                 bounds: tooltip_bounds,
             });
-            return Some(element);
+            shown = Some(element);
         }
-        None
+        shown
     }
 
     fn prepaint_deferred_draws(&mut self, cx: &mut App) {
@@ -4480,11 +4498,31 @@ impl Window {
     /// Sets a tooltip to be rendered for the upcoming frame. This method should only be called
     /// during the paint phase of element drawing.
     pub fn set_tooltip(&mut self, tooltip: AnyTooltip) -> TooltipId {
+        self.push_tooltip_request(tooltip, None)
+    }
+
+    /// Sets a tooltip that sits next to `anchor`, the absolute bounds of the part of its element
+    /// that shows it. This method should only be called during the prepaint phase.
+    pub(crate) fn set_anchored_tooltip(
+        &mut self,
+        tooltip: AnyTooltip,
+        anchor: Bounds<Pixels>,
+    ) -> TooltipId {
+        self.push_tooltip_request(tooltip, Some(anchor))
+    }
+
+    fn push_tooltip_request(
+        &mut self,
+        tooltip: AnyTooltip,
+        anchor: Option<Bounds<Pixels>>,
+    ) -> TooltipId {
         self.invalidator.debug_assert_prepaint();
         let id = TooltipId(post_inc(&mut self.next_tooltip_id.0));
-        self.next_frame
-            .tooltip_requests
-            .push(Some(TooltipRequest { id, tooltip }));
+        self.next_frame.tooltip_requests.push(Some(TooltipRequest {
+            id,
+            tooltip,
+            anchor,
+        }));
         id
     }
 
