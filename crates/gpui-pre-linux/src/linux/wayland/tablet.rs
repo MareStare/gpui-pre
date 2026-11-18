@@ -207,10 +207,9 @@ enum Step {
         position: Point<Pixels>,
         click_count: usize,
     },
-    Exit {
-        position: Point<Pixels>,
-        pressed: Option<MouseButton>,
-    },
+
+    /// The tool left. It released its buttons before.
+    Exit(Point<Pixels>),
 }
 
 /// The state of a tool that its frames change.
@@ -276,10 +275,7 @@ impl ToolState {
             }
             self.near = false;
             steps.push(Step::Pen(PenEvent::Leave));
-            steps.push(Step::Exit {
-                position: self.position,
-                pressed: None,
-            });
+            steps.push(Step::Exit(self.position));
             steps.push(Step::Hover(false));
         }
         steps
@@ -499,9 +495,9 @@ impl WaylandClientStatePtr {
                     modifiers,
                     click_count,
                 }),
-                Step::Exit { position, pressed } => PlatformInput::MouseExited(MouseExitEvent {
+                Step::Exit(position) => PlatformInput::MouseExited(MouseExitEvent {
                     position,
-                    pressed_button: pressed,
+                    pressed_button: None,
                     modifiers,
                 }),
             };
@@ -690,10 +686,7 @@ mod tests {
                 release(MouseButton::Left),
                 release(MouseButton::Right),
                 Step::Pen(PenEvent::Leave),
-                Step::Exit {
-                    position: at(1.0, 2.0),
-                    pressed: None
-                },
+                Step::Exit(at(1.0, 2.0)),
                 Step::Hover(false),
             ]
         );
