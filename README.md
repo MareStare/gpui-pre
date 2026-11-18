@@ -251,7 +251,8 @@ gpui-pre version goes.
   focus listeners of the draw that a tab step moved the focus. A tab step
   to the element that has the focus leaves no step pending.
 - Drag threshold per element: `drag_threshold` sets how far the pointer
-  moves with the button down before a drag of the element starts.
+  moves with the button down before a drag of the element starts. The
+  default, `DRAG_THRESHOLD`, is public.
 
 ## License
 

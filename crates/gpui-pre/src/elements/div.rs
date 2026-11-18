@@ -49,7 +49,9 @@ type StackSafe<T> = stacksafe::StackSafe<T>;
 #[cfg(not(feature = "stacker"))]
 type StackSafe<T> = T;
 
-const DRAG_THRESHOLD: f64 = 2.;
+/// How far, in pixels, the pointer moves with the left button down before a drag starts, for an
+/// element that sets no threshold of its own.
+pub const DRAG_THRESHOLD: f64 = 2.;
 const DEFAULT_TOOLTIP_SHOW_DELAY: Duration = Duration::from_millis(500);
 const HOVERABLE_TOOLTIP_HIDE_DELAY: Duration = Duration::from_millis(500);
 /// While a tooltip shows, and for this long after it hid, the next tooltip shows at once.
@@ -678,7 +680,7 @@ impl Interactivity {
     }
 
     /// Sets how far the pointer moves with the left button down before a drag of this element
-    /// starts. The default is 2 pixels.
+    /// starts. The default is [`DRAG_THRESHOLD`].
     /// The imperative API equivalent to [`StatefulInteractiveElement::drag_threshold`].
     pub fn drag_threshold(&mut self, threshold: Pixels) {
         self.drag_threshold = Some(threshold);
@@ -1721,7 +1723,7 @@ pub trait StatefulInteractiveElement: InteractiveElement {
     }
 
     /// Sets how far the pointer moves with the left button down before a drag of this element
-    /// starts. The default is 2 pixels.
+    /// starts. The default is [`DRAG_THRESHOLD`].
     /// The fluent API equivalent to [`Interactivity::drag_threshold`].
     fn drag_threshold(mut self, threshold: Pixels) -> Self
     where
