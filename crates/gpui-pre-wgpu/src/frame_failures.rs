@@ -10,12 +10,18 @@ const PERSISTENT_AFTER: u32 = 10;
 /// The consecutive frames of a renderer that failed with a GPU error.
 #[derive(Debug, Default)]
 pub(crate) struct FrameFailures {
-    count: u32,
-    last_error: Option<String>,
+    failure: Option<Failure>,
 
     /// The renderer submitted GPU work after the last check. Only then does
     /// a check with no error tell that the work succeeded.
     submitted: bool,
+}
+
+#[derive(Debug)]
+struct Failure {
+    /// The number of consecutive failed frames.
+    count: u32,
+    last_error: String,
 }
 
 /// What the renderer does with a frame after a check.
@@ -33,14 +39,17 @@ impl FrameFailures {
         let submitted = std::mem::take(&mut self.submitted);
         let Some(error) = error else {
             if submitted {
-                *self = Self::default();
+                self.failure = None;
             }
             return FrameCheck::Draw;
         };
-        self.count += 1;
-        log::error!("GPU error in frame {} of a failure: {error}", self.count);
-        self.last_error = Some(error);
-        if self.count.is_multiple_of(RECOVERY_INTERVAL) {
+        let count = self.failure.as_ref().map_or(0, |failure| failure.count) + 1;
+        log::error!("GPU error in frame {count} of a failure: {error}");
+        self.failure = Some(Failure {
+            count,
+            last_error: error,
+        });
+        if count.is_multiple_of(RECOVERY_INTERVAL) {
             FrameCheck::Recover
         } else {
             FrameCheck::Draw
@@ -53,13 +62,16 @@ impl FrameFailures {
     }
 
     pub(crate) fn failure(&self) -> Option<GpuFailure> {
-        if self.count <= PERSISTENT_AFTER {
-            return None;
-        }
-        Some(GpuFailure {
-            error: self.last_error.clone().unwrap_or_default(),
-            failed_frames: self.count,
+        let failure = self.failure.as_ref()?;
+        (failure.count > PERSISTENT_AFTER).then(|| GpuFailure {
+            error: failure.last_error.clone(),
+            failed_frames: failure.count,
         })
+    }
+
+    #[cfg(test)]
+    fn count(&self) -> u32 {
+        self.failure.as_ref().map_or(0, |failure| failure.count)
     }
 }
 
@@ -116,7 +128,7 @@ mod tests {
         assert_eq!(frame(&mut failures, None), FrameCheck::Draw);
         assert_eq!(failures.failure(), None);
         frame(&mut failures, Some("bad bind group"));
-        assert_eq!(failures.count, 1);
+        assert_eq!(failures.count(), 1);
     }
 
     #[test]
@@ -132,7 +144,7 @@ mod tests {
         assert_eq!(frame(&mut failures, None), FrameCheck::Draw);
         assert_eq!(frame(&mut failures, None), FrameCheck::Draw);
         assert_eq!(failures.failure(), None);
-        assert_eq!(failures.count, 0);
+        assert_eq!(failures.count(), 0);
     }
 
     /// A recovery submits no work, so the next frame with no error does not end
@@ -144,8 +156,8 @@ mod tests {
             frame(&mut failures, Some("bad bind group"));
         }
         frame(&mut failures, None);
-        assert_eq!(failures.count, RECOVERY_INTERVAL);
+        assert_eq!(failures.count(), RECOVERY_INTERVAL);
         frame(&mut failures, None);
-        assert_eq!(failures.count, 0);
+        assert_eq!(failures.count(), 0);
     }
 }
