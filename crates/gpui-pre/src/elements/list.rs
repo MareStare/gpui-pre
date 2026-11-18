@@ -1583,6 +1583,8 @@ impl Element for List {
             state.measuring_behavior.reset();
         }
 
+        // A request from before the list is for the containers outside it.
+        let outer_request = window.take_autoscroll();
         let mut autoscroll = true;
         let layout = loop {
             match state.prepaint_items(
@@ -1600,6 +1602,9 @@ impl Element for List {
                 }
             }
         };
+        if let Some(outer_request) = outer_request {
+            window.request_autoscroll(outer_request);
+        }
 
         state.last_layout_bounds = Some(bounds);
         state.last_padding = Some(padding);
