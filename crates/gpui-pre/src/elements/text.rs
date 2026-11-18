@@ -1140,8 +1140,9 @@ impl Element for InteractiveText {
 
                 if let Some(interactive_state) = interactive_state.as_mut() {
                     if self.tooltip_builder.is_some() {
+                        // The tooltip of a range stays where the pointer was when it showed.
                         self.tooltip_id =
-                            set_tooltip_on_window(&interactive_state.active_tooltip, window);
+                            set_tooltip_on_window(&interactive_state.active_tooltip, None, window);
                     } else {
                         // If there is no longer a tooltip builder, remove the active tooltip.
                         interactive_state.long_press_tooltip_active.set(false);

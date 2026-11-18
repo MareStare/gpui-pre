@@ -2481,9 +2481,18 @@ impl Interactivity {
                             .hover_state
                             .get_or_insert_with(Default::default);
                     }
+                    let tooltip_anchor = self.tooltip_builder.is_some().then(|| {
+                        let anchor = bounds.intersect(&window.content_mask().bounds);
+                        element_state
+                            .tooltip_anchor
+                            .get_or_insert_with(Default::default)
+                            .set(anchor);
+                        anchor
+                    });
                     if let Some(active_tooltip) = element_state.active_tooltip.as_ref() {
-                        if self.tooltip_builder.is_some() {
-                            self.tooltip_id = set_tooltip_on_window(active_tooltip, window);
+                        if tooltip_anchor.is_some() {
+                            self.tooltip_id =
+                                set_tooltip_on_window(active_tooltip, tooltip_anchor, window);
                         } else {
                             // If there is no longer a tooltip builder, remove the active tooltip.
                             if let Some(long_press_tooltip_active) =
@@ -3325,14 +3334,18 @@ impl Interactivity {
                 let build_tooltip = Rc::new(move |window: &mut Window, cx: &mut App| {
                     Some(((tooltip_builder.build)(window, cx), tooltip_is_hoverable))
                 });
+                let anchor = element_state
+                    .tooltip_anchor
+                    .get_or_insert_with(Default::default)
+                    .clone();
                 // Use bounds instead of testing hitbox since this is called during prepaint.
                 let check_is_hovered_during_prepaint = Rc::new({
                     let pending_mouse_down = pending_mouse_down.clone();
-                    let source_bounds = hitbox.bounds;
+                    let anchor = anchor.clone();
                     move |window: &Window| {
                         !window.last_input_was_keyboard()
                             && pending_mouse_down.borrow().is_none()
-                            && source_bounds.contains(&window.mouse_position())
+                            && anchor.get().contains(&window.mouse_position())
                     }
                 });
                 let check_is_hovered = Rc::new({
@@ -3341,12 +3354,11 @@ impl Interactivity {
                         pending_mouse_down.borrow().is_none() && hitbox.is_hovered(window)
                     }
                 });
-                let visible_bounds = hitbox.bounds.intersect(&hitbox.content_mask.bounds);
                 register_tooltip_mouse_handlers(
                     &active_tooltip,
                     self.tooltip_id,
                     build_tooltip,
-                    Rc::new(move |_| visible_bounds),
+                    Rc::new(move |_| anchor.get()),
                     check_is_hovered,
                     check_is_hovered_during_prepaint,
                     long_press_tooltip_active,
@@ -3749,6 +3761,9 @@ pub struct InteractiveElementState {
     ongoing_scroll: Option<Rc<RefCell<OngoingScroll>>>,
     pub(crate) active_tooltip: Option<Rc<RefCell<Option<ActiveTooltip>>>>,
     long_press_tooltip_active: Option<Rc<Cell<bool>>>,
+    /// The visible bounds of the element in the latest prepaint. Its tooltip sits next to them
+    /// and stays while they hold the pointer.
+    tooltip_anchor: Option<Rc<Cell<Bounds<Pixels>>>>,
 }
 
 /// Whether or not the element or a group that contains it is clicked by the mouse.
@@ -3828,8 +3843,11 @@ pub(crate) fn clear_active_tooltip_if_not_hoverable(
     }
 }
 
+/// Asks to show the active tooltip in this frame. A tooltip sits next to `anchor`, or next to
+/// the anchor it got when it showed if `anchor` is `None`.
 pub(crate) fn set_tooltip_on_window(
     active_tooltip: &Rc<RefCell<Option<ActiveTooltip>>>,
+    anchor: Option<Bounds<Pixels>>,
     window: &mut Window,
 ) -> Option<TooltipId> {
     let tooltip = match active_tooltip.borrow().as_ref() {
@@ -3838,7 +3856,7 @@ pub(crate) fn set_tooltip_on_window(
         Some(ActiveTooltip::Visible { tooltip, .. }) => tooltip.clone(),
         Some(ActiveTooltip::WaitingForHide { tooltip, .. }) => tooltip.clone(),
     };
-    Some(window.set_anchored_tooltip(tooltip.tooltip, tooltip.anchor))
+    Some(window.set_anchored_tooltip(tooltip.tooltip, anchor.unwrap_or(tooltip.anchor)))
 }
 
 /// The absolute bounds of the part of an element that a tooltip sits next to.
@@ -4165,10 +4183,13 @@ fn handle_tooltip_check_visible_and_update(
         None | Some(ActiveTooltip::WaitingForShow { .. }) => Action::None,
     };
 
+    // A key press hides the tooltip under the pointer. Only a pointer that left the element
+    // keeps the next tooltip warm.
+    let pointer_left = !window.last_input_was_keyboard();
     match action {
         Action::None => {}
         Action::Hide => {
-            window.tooltip_hidden_at = Some(cx.background_executor().now());
+            window.tooltip_hidden_at = pointer_left.then(|| cx.background_executor().now());
             clear_active_tooltip(active_tooltip, window);
         }
         Action::ScheduleHide(tooltip) => {
@@ -4183,7 +4204,8 @@ fn handle_tooltip_check_visible_and_update(
                     };
                     if active_tooltip.borrow_mut().take().is_some() {
                         cx.update(|window, cx| {
-                            window.tooltip_hidden_at = Some(cx.background_executor().now());
+                            window.tooltip_hidden_at =
+                                pointer_left.then(|| cx.background_executor().now());
                             window.refresh();
                         })
                         .ok();
@@ -5343,14 +5365,22 @@ mod tests {
         assert!(active_tooltip.borrow().is_none());
     }
 
-    /// A bar of three buttons of 40 by 20 px with a tooltip each, 10 px apart, at y 100.
-    struct TooltipBar;
+    /// A bar of three buttons of 40 by 20 px with a tooltip each, 10 px apart, at y `top`.
+    struct TooltipBar {
+        top: Pixels,
+    }
+
+    impl Default for TooltipBar {
+        fn default() -> Self {
+            Self { top: px(100.) }
+        }
+    }
 
     impl Render for TooltipBar {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             div()
                 .size_full()
-                .pt(px(100.))
+                .pt(self.top)
                 .flex()
                 .gap(px(10.))
                 .children(["a", "b", "c"].map(|id| {
@@ -5400,7 +5430,7 @@ mod tests {
     #[test]
     fn a_tooltip_sits_centered_under_its_element() {
         let mut test_app = TestAppContext::single();
-        let window: AnyWindowHandle = test_app.add_window(|_, _| TooltipBar).into();
+        let window: AnyWindowHandle = test_app.add_window(|_, _| TooltipBar::default()).into();
         redraw(&mut test_app, window);
         assert_eq!(hover(&mut test_app, window, point(px(55.), px(105.))), None);
         test_app
@@ -5414,7 +5444,7 @@ mod tests {
     #[test]
     fn the_next_tooltip_shows_at_once_while_a_tooltip_shows() {
         let mut test_app = TestAppContext::single();
-        let window: AnyWindowHandle = test_app.add_window(|_, _| TooltipBar).into();
+        let window: AnyWindowHandle = test_app.add_window(|_, _| TooltipBar::default()).into();
         redraw(&mut test_app, window);
         hover(&mut test_app, window, point(px(5.), px(105.)));
         test_app
@@ -5443,7 +5473,7 @@ mod tests {
     #[test]
     fn the_next_tooltip_shows_at_once_shortly_after_a_tooltip_hid() {
         let mut test_app = TestAppContext::single();
-        let window: AnyWindowHandle = test_app.add_window(|_, _| TooltipBar).into();
+        let window: AnyWindowHandle = test_app.add_window(|_, _| TooltipBar::default()).into();
         redraw(&mut test_app, window);
         hover(&mut test_app, window, point(px(5.), px(105.)));
         test_app
@@ -5467,6 +5497,53 @@ mod tests {
             .advance_clock(DEFAULT_TOOLTIP_SHOW_DELAY);
         let c = redraw(&mut test_app, window).expect("the tooltip of c shows");
         assert_eq!(c.center().x, px(120.));
+    }
+
+    #[test]
+    fn a_tooltip_follows_its_element() {
+        let mut test_app = TestAppContext::single();
+        let bar = test_app.add_window(|_, _| TooltipBar::default());
+        let window: AnyWindowHandle = bar.into();
+        redraw(&mut test_app, window);
+        hover(&mut test_app, window, point(px(55.), px(115.)));
+        test_app
+            .dispatcher
+            .advance_clock(DEFAULT_TOOLTIP_SHOW_DELAY);
+        let tooltip = redraw(&mut test_app, window).expect("the tooltip of b shows");
+        assert_eq!(tooltip.top(), px(120.));
+
+        let mut move_bar = |top| {
+            bar.update(&mut test_app, |bar, _, cx| {
+                bar.top = px(top);
+                cx.notify();
+            })
+            .unwrap();
+            redraw(&mut test_app, window)
+        };
+        let tooltip = move_bar(105.).expect("b still holds the pointer");
+        assert_eq!(tooltip.top(), px(125.));
+        assert_eq!(move_bar(120.), None, "b lost the pointer");
+    }
+
+    #[test]
+    fn the_next_tooltip_waits_after_a_key_press_hid_a_tooltip() {
+        let mut test_app = TestAppContext::single();
+        let window: AnyWindowHandle = test_app.add_window(|_, _| TooltipBar::default()).into();
+        redraw(&mut test_app, window);
+        hover(&mut test_app, window, point(px(5.), px(105.)));
+        test_app
+            .dispatcher
+            .advance_clock(DEFAULT_TOOLTIP_SHOW_DELAY);
+        redraw(&mut test_app, window).expect("the tooltip of a shows");
+
+        key_down(&mut test_app, window, "a");
+        assert_eq!(redraw(&mut test_app, window), None);
+        assert_eq!(hover(&mut test_app, window, point(px(55.), px(105.))), None);
+        test_app
+            .dispatcher
+            .advance_clock(DEFAULT_TOOLTIP_SHOW_DELAY);
+        let b = redraw(&mut test_app, window).expect("the tooltip of b shows");
+        assert_eq!(b.center().x, px(70.));
     }
 
     /// A window that shows a tooltip anywhere in it.

@@ -182,11 +182,12 @@ commit, then rebase the patch commits onto it.
   checks that the text system of each platform runs.
 - Tooltips under their element: the tooltip of an element sits centered
   under the element, or above it when there is no room below, inside the
-  frame of the window. The view of the tooltip holds its gap to the
-  element as a margin. The tooltip of interactive text sits under the
-  hovered line at the pointer. `Window::set_tooltip` keeps the place at
-  the pointer. While a tooltip shows, and for 300 ms after its element
-  lost the pointer, the next tooltip shows with no delay.
+  frame of the window, and follows the element when it moves. The view of
+  the tooltip holds its gap to the element as a margin. The tooltip of
+  interactive text sits under the hovered line at the pointer.
+  `Window::set_tooltip` keeps the place at the pointer. While a tooltip
+  shows, and for 300 ms after its element lost the pointer, the next
+  tooltip shows with no delay.
 
 ## License
 
