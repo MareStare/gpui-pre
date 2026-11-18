@@ -203,7 +203,8 @@ impl LineLayout {
         scratch: &mut WrapScratch,
     ) -> SmallVec<[WrapBoundary; 1]> {
         let mut boundaries = SmallVec::new();
-        let mut current_segment: Option<Range<usize>> = None;
+        // The number of the segment of the last glyph, and its byte range.
+        let mut current_segment: Option<(usize, Range<usize>)> = None;
         let mut last_boundary = WrapBoundary {
             run_ix: 0,
             glyph_ix: 0,
@@ -262,7 +263,7 @@ impl LineLayout {
             if byte != b' '
                 && current_segment
                     .as_ref()
-                    .is_none_or(|segment| !segment.contains(&index))
+                    .is_none_or(|(_, range)| !range.contains(&index))
             {
                 // Detect transitions between line-break segments rather than matching glyph
                 // indices directly, to accommodate RTL text. Workaround for the lack of complete
@@ -271,9 +272,12 @@ impl LineLayout {
                 let start = segment
                     .checked_sub(1)
                     .and_then(|previous| break_indices.get(previous));
-                if current_segment.is_some() {
+                if let Some((previous, _)) = current_segment {
+                    // The points between the two segments, in either direction for RTL text.
+                    // Spaces start no segment, so a step can cross several points.
+                    let crossed = &break_indices[previous.min(segment)..previous.max(segment)];
                     let candidate = WrapCandidate {
-                        rank: start.map_or(0, |point| point.rank),
+                        rank: crossed.iter().map(|point| point.rank).min().unwrap_or(0),
                         boundary,
                         x,
                     };
@@ -286,7 +290,7 @@ impl LineLayout {
                 let end = break_indices
                     .get(segment)
                     .map_or(text.len(), |point| point.index);
-                current_segment = Some(start.map_or(0, |point| point.index)..end);
+                current_segment = Some((segment, start.map_or(0, |point| point.index)..end));
             }
 
             let next_x = glyphs.peek().map_or(self.width, |(_, _, x)| *x);
@@ -999,6 +1003,16 @@ mod tests {
         // `p/` takes a row, as its point outranks the later one. `qr stuvw` is too wide, so
         // it wraps at its point of rank 1, and `stuvw` at a glyph.
         assert_eq!(wraps("p/qr stuvw", &break_points), [vec![2, 5, 9]]);
+    }
+
+    #[test]
+    fn a_row_wraps_at_the_lowest_rank_of_the_points_before_a_glyph() {
+        // The point of rank 0 at the space and the point of rank 1 after it both lie before
+        // `a`, so the row wraps before `a` at rank 0, past the earlier point after `p/`.
+        let break_points = points(0, &[2, 4])
+            .chain(points(1, &[5]))
+            .collect::<Vec<_>>();
+        assert_eq!(wraps("p/q/ abcd", &break_points), [vec![5]]);
     }
 
     fn glyph_at(x: f32, index: usize) -> ShapedGlyph {
