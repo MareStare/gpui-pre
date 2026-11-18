@@ -17,12 +17,21 @@ pub(crate) struct TabStopMap {
     by_id: FxHashMap<FocusId, usize>,
     nodes: Vec<TabStopNode>,
     sorted: bool,
+    /// The wrapping group of each open group, innermost last. `None` for a
+    /// group that does not wrap.
+    open_groups: Vec<Option<WrapGroupId>>,
+    /// The wrapping group that holds each wrapping group, if any.
+    wrap_parents: FxHashMap<WrapGroupId, Option<WrapGroupId>>,
 }
+
+/// A group whose tab order wraps, by the index of its `Group` operation in
+/// the insertion history.
+type WrapGroupId = usize;
 
 #[derive(Debug, Clone)]
 pub enum TabStopOperation {
     Insert(FocusHandle),
-    Group(TabIndex),
+    Group { tab_index: TabIndex, wraps: bool },
     GroupEnd,
 }
 
@@ -51,6 +60,9 @@ struct TabStopNode {
 
     /// Whether this node is a tab stop
     tab_stop: bool,
+
+    /// The innermost wrapping group that holds this node.
+    wrap_group: Option<WrapGroupId>,
 }
 
 impl Ord for TabStopNode {
@@ -78,19 +90,52 @@ impl TabStopMap {
         self.nodes.push(TabStopNode {
             node_insertion_index: self.insertion_history.len() - 1,
             tab_stop: focus_handle.tab_stop,
+            wrap_group: self.innermost_wrap_group(),
             path,
         });
     }
 
-    pub fn begin_group(&mut self, tab_index: isize) {
+    /// Opens a group. When the group `wraps`, `next` and `prev` from a node
+    /// in it stay in it and wrap at its ends.
+    pub fn begin_group(&mut self, tab_index: isize, wraps: bool) {
+        let id = self.insertion_history.len();
         self.insertion_history
-            .push(TabStopOperation::Group(tab_index));
+            .push(TabStopOperation::Group { tab_index, wraps });
         self.current_path.0.push(tab_index);
+        if wraps {
+            self.wrap_parents.insert(id, self.innermost_wrap_group());
+        }
+        self.open_groups.push(wraps.then_some(id));
     }
 
     pub fn end_group(&mut self) {
         self.insertion_history.push(TabStopOperation::GroupEnd);
         self.current_path.0.pop();
+        self.open_groups.pop();
+    }
+
+    fn innermost_wrap_group(&self) -> Option<WrapGroupId> {
+        self.open_groups.iter().rev().find_map(|group| *group)
+    }
+
+    /// Whether a node of the wrapping group `group` is inside the wrapping
+    /// group `scope`. With no scope, each node is inside.
+    fn is_within(&self, mut group: Option<WrapGroupId>, scope: Option<WrapGroupId>) -> bool {
+        let Some(scope) = scope else {
+            return true;
+        };
+        while let Some(id) = group {
+            if id == scope {
+                return true;
+            }
+            group = self.wrap_parents.get(&id).copied().flatten();
+        }
+        false
+    }
+
+    /// The wrapping group of the focused node, which bounds a step from it.
+    fn scope_of(&self, position: Option<usize>) -> Option<WrapGroupId> {
+        position.and_then(|position| self.nodes[position].wrap_group)
     }
 
     pub fn clear(&mut self) {
@@ -99,30 +144,32 @@ impl TabStopMap {
         self.by_id.clear();
         self.nodes.clear();
         self.sorted = false;
+        self.open_groups.clear();
+        self.wrap_parents.clear();
     }
 
     pub fn next(&mut self, focused_id: Option<&FocusId>) -> Option<FocusHandle> {
         self.ensure_sorted();
-        let start = focused_id
-            .and_then(|id| self.by_id.get(id))
-            .map_or(0, |position| position + 1);
+        let focused = focused_id.and_then(|id| self.by_id.get(id).copied());
+        let scope = self.scope_of(focused);
+        let start = focused.map_or(0, |position| position + 1);
         let node = self.nodes[start..]
             .iter()
             .chain(&self.nodes[..start])
-            .find(|node| node.tab_stop)?;
+            .find(|node| node.tab_stop && self.is_within(node.wrap_group, scope))?;
         self.focus_handle_for_order(node)
     }
 
     pub fn prev(&mut self, focused_id: Option<&FocusId>) -> Option<FocusHandle> {
         self.ensure_sorted();
-        let end = focused_id
-            .and_then(|id| self.by_id.get(id).copied())
-            .unwrap_or(self.nodes.len());
+        let focused = focused_id.and_then(|id| self.by_id.get(id).copied());
+        let scope = self.scope_of(focused);
+        let end = focused.unwrap_or(self.nodes.len());
         let node = self.nodes[..end]
             .iter()
             .rev()
             .chain(self.nodes[end..].iter().rev())
-            .find(|node| node.tab_stop)?;
+            .find(|node| node.tab_stop && self.is_within(node.wrap_group, scope))?;
         self.focus_handle_for_order(node)
     }
 
@@ -154,7 +201,9 @@ impl TabStopMap {
         for node in nodes {
             match node {
                 TabStopOperation::Insert(focus_handle) => self.insert(focus_handle),
-                TabStopOperation::Group(tab_index) => self.begin_group(*tab_index),
+                TabStopOperation::Group { tab_index, wraps } => {
+                    self.begin_group(*tab_index, *wraps)
+                }
                 TabStopOperation::GroupEnd => self.end_group(),
             }
         }
@@ -339,7 +388,7 @@ mod tests {
 
         #[must_use]
         fn tab_group(mut self, tab_index: isize, children: impl FnOnce(Self) -> Self) -> Self {
-            self.tab_map.begin_group(tab_index);
+            self.tab_map.begin_group(tab_index, false);
             self = children(self);
             self.tab_map.end_group();
             self
@@ -497,5 +546,111 @@ mod tests {
             .tab_stop(3, 0)
             .tab_stop(4, 1)
             .assert();
+    }
+
+    /// Steps with `step` from `from` and returns the focused handle.
+    fn step(
+        map: &mut TabStopMap,
+        step: fn(&mut TabStopMap, Option<&FocusId>) -> Option<FocusHandle>,
+        from: &FocusHandle,
+    ) -> Option<FocusId> {
+        step(map, Some(&from.id)).map(|handle| handle.id)
+    }
+
+    #[test]
+    fn test_wrapping_group_keeps_the_steps_inside() {
+        let focus_map = Arc::new(RwLock::new(FocusMap::default()));
+        let stop = || FocusHandle::new(&focus_map).tab_stop(true);
+        let (before, after) = (stop(), stop());
+        let container = FocusHandle::new(&focus_map);
+        let (first, middle, last) = (stop(), stop(), stop());
+        let mut map = TabStopMap::default();
+        map.insert(&before);
+        // The order is `before`, `after`, then the group: a group sorts
+        // after the stops of its own tab index.
+        map.begin_group(0, true);
+        map.insert(&container);
+        // Each stop in a plain group of its own, as a button has.
+        for handle in [&first, &middle, &last] {
+            map.begin_group(0, false);
+            map.insert(handle);
+            map.end_group();
+        }
+        map.end_group();
+        map.insert(&after);
+
+        let next = TabStopMap::next;
+        let prev = TabStopMap::prev;
+        assert_eq!(step(&mut map, next, &container), Some(first.id));
+        assert_eq!(step(&mut map, next, &first), Some(middle.id));
+        assert_eq!(step(&mut map, next, &middle), Some(last.id));
+        assert_eq!(step(&mut map, next, &last), Some(first.id));
+        assert_eq!(step(&mut map, prev, &first), Some(last.id));
+        assert_eq!(step(&mut map, prev, &container), Some(last.id));
+
+        // Outside the group, the steps walk the whole order.
+        assert_eq!(step(&mut map, next, &before), Some(after.id));
+        assert_eq!(step(&mut map, next, &after), Some(first.id));
+        assert_eq!(step(&mut map, prev, &before), Some(last.id));
+        assert_eq!(map.next(None).map(|handle| handle.id), Some(before.id));
+    }
+
+    #[test]
+    fn test_nested_wrapping_groups() {
+        let focus_map = Arc::new(RwLock::new(FocusMap::default()));
+        let stop = || FocusHandle::new(&focus_map).tab_stop(true);
+        let (outer_first, outer_last, inner_first, inner_last) = (stop(), stop(), stop(), stop());
+        let mut map = TabStopMap::default();
+        // The order is the outer stops, then the inner group.
+        map.begin_group(0, true);
+        map.insert(&outer_first);
+        map.begin_group(0, true);
+        map.insert(&inner_first);
+        map.insert(&inner_last);
+        map.end_group();
+        map.insert(&outer_last);
+        map.end_group();
+
+        let next = TabStopMap::next;
+        let prev = TabStopMap::prev;
+        // The outer group reaches the stops of the inner one.
+        assert_eq!(step(&mut map, next, &outer_first), Some(outer_last.id));
+        assert_eq!(step(&mut map, next, &outer_last), Some(inner_first.id));
+        assert_eq!(step(&mut map, prev, &outer_first), Some(inner_last.id));
+        // The inner group keeps its own steps.
+        assert_eq!(step(&mut map, next, &inner_last), Some(inner_first.id));
+        assert_eq!(step(&mut map, prev, &inner_first), Some(inner_last.id));
+    }
+
+    #[test]
+    fn test_wrapping_group_with_no_stop_moves_nothing() {
+        let focus_map = Arc::new(RwLock::new(FocusMap::default()));
+        let outside = FocusHandle::new(&focus_map).tab_stop(true);
+        let container = FocusHandle::new(&focus_map);
+        let mut map = TabStopMap::default();
+        map.insert(&outside);
+        map.begin_group(0, true);
+        map.insert(&container);
+        map.end_group();
+
+        assert_eq!(step(&mut map, TabStopMap::next, &container), None);
+        assert_eq!(step(&mut map, TabStopMap::prev, &container), None);
+    }
+
+    #[test]
+    fn test_wrapping_group_survives_replay() {
+        let focus_map = Arc::new(RwLock::new(FocusMap::default()));
+        let stop = || FocusHandle::new(&focus_map).tab_stop(true);
+        let (outside, first, last) = (stop(), stop(), stop());
+        let mut map = TabStopMap::default();
+        map.insert(&outside);
+        map.begin_group(0, true);
+        map.insert(&first);
+        map.insert(&last);
+        map.end_group();
+
+        let mut replayed = TabStopMap::default();
+        replayed.replay(&map.insertion_history);
+        assert_eq!(step(&mut replayed, TabStopMap::next, &last), Some(first.id));
     }
 }

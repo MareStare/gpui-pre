@@ -2711,7 +2711,8 @@ impl Window {
         self.focus_enabled = false;
     }
 
-    /// Move focus to next tab stop.
+    /// Move focus to next tab stop. From a focus in a group that wraps, the
+    /// step stays in that group.
     pub fn focus_next(&mut self, cx: &mut App) {
         if !self.focus_enabled {
             return;
@@ -2722,7 +2723,8 @@ impl Window {
         }
     }
 
-    /// Move focus to previous tab stop.
+    /// Move focus to previous tab stop. From a focus in a group that wraps,
+    /// the step stays in that group.
     pub fn focus_prev(&mut self, cx: &mut App) {
         if !self.focus_enabled {
             return;
@@ -4901,11 +4903,18 @@ impl Window {
         }
     }
 
-    /// Executes the given closure within the context of a tab group.
+    /// Executes the given closure within the context of a tab group. When the
+    /// group `wraps`, [`Self::focus_next`] and [`Self::focus_prev`] from a
+    /// focus in it stay in it.
     #[inline]
-    pub fn with_tab_group<R>(&mut self, index: Option<isize>, f: impl FnOnce(&mut Self) -> R) -> R {
+    pub fn with_tab_group<R>(
+        &mut self,
+        index: Option<isize>,
+        wraps: bool,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
         if let Some(index) = index {
-            self.next_frame.tab_stops.begin_group(index);
+            self.next_frame.tab_stops.begin_group(index, wraps);
             let result = f(self);
             self.next_frame.tab_stops.end_group();
             result
