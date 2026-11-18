@@ -1626,6 +1626,13 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Keeps the focus that a tab step reveals `padding` inside each edge
+    /// of this element that scrolls, as `scroll-padding` in CSS.
+    fn scroll_padding(mut self, padding: Pixels) -> Self {
+        self.interactivity().scroll_padding = padding;
+        self
+    }
+
     /// Track the scroll state of this element with the given handle.
     fn anchor_scroll(mut self, scroll_anchor: Option<ScrollAnchor>) -> Self {
         self.interactivity().scroll_anchor = scroll_anchor;
@@ -2144,9 +2151,10 @@ impl Element for Div {
 
         // A scroll container reveals the focus of a tab step.
         let reveal_offset = window
-            .tab_step_pending
+            .tab_step_pending()
             .then(|| self.interactivity.scroll_offset.clone())
             .flatten();
+        let padding = self.interactivity.scroll_padding;
         self.interactivity.prepaint(
             global_id,
             inspector_id,
@@ -2190,7 +2198,7 @@ impl Element for Div {
                 if let Some(offset) = reveal_offset.as_ref() {
                     match window.take_autoscroll() {
                         Some(target) => {
-                            reveal_focus(offset, bounds, style.overflow, target, window)
+                            reveal_focus(offset, bounds, padding, style.overflow, target, window)
                         }
                         None => {
                             if let Some(outer_request) = outer_request {
@@ -2296,6 +2304,7 @@ pub struct Interactivity {
     pub(crate) tracked_scroll_handle: Option<ScrollHandle>,
     pub(crate) scroll_anchor: Option<ScrollAnchor>,
     pub(crate) scroll_offset: Option<Rc<RefCell<Point<Pixels>>>>,
+    pub(crate) scroll_padding: Pixels,
     pub(crate) ongoing_scroll: Option<Rc<RefCell<OngoingScroll>>>,
     pub(crate) group: Option<SharedString>,
     /// The base style of the element, before any modifications are applied
@@ -2477,9 +2486,6 @@ impl Interactivity {
 
         if let Some(focus_handle) = self.tracked_focus_handle.as_ref() {
             window.set_focus_handle(focus_handle, cx);
-            if window.tab_step_pending && focus_handle.is_focused(window) {
-                window.request_autoscroll(bounds);
-            }
 
             if window.a11y.is_active() {
                 if let Some(global_id) = global_id {
@@ -2512,6 +2518,20 @@ impl Interactivity {
                 let mut element_state =
                     element_state.map(|element_state| element_state.unwrap_or_default());
                 let style = self.compute_style_internal(None, element_state.as_mut(), window, cx);
+
+                // The focus of a tab step asks its scroll containers to
+                // show it with its outline.
+                if window.tab_step_pending()
+                    && self
+                        .tracked_focus_handle
+                        .as_ref()
+                        .is_some_and(|focus| focus.is_focused(window))
+                {
+                    let reach = style
+                        .outline
+                        .map_or(Pixels::ZERO, |outline| outline.reach().max(Pixels::ZERO));
+                    window.request_autoscroll(bounds.dilate(reach));
+                }
 
                 if let Some(element_state) = element_state.as_mut() {
                     if let Some(clicked_state) = element_state.clicked_state.as_ref() {
@@ -4429,8 +4449,9 @@ where
 }
 
 /// Scrolls the least distance that shows `target`, the autoscroll request
-/// of the focus that a tab step reveals. The part of it that shows stays
-/// requested for the scroll containers outside.
+/// of the focus that a tab step reveals, `padding` inside each edge of
+/// `viewport` that scrolls. The part of it that shows stays requested for
+/// the scroll containers outside.
 ///
 /// The scroll shows one frame late: the children have their places in this
 /// frame already, and an element prepaints once per frame. A [`crate::List`]
@@ -4438,11 +4459,13 @@ where
 fn reveal_focus(
     offset: &Rc<RefCell<Point<Pixels>>>,
     viewport: Bounds<Pixels>,
+    padding: Pixels,
     overflow: Point<Overflow>,
     target: Bounds<Pixels>,
     window: &mut Window,
 ) {
     let along = |overflow: Overflow, start: Pixels, end: Pixels, view_start, view_end| {
+        let (view_start, view_end) = (view_start + padding, view_end - padding);
         if overflow != Overflow::Scroll {
             px(0.)
         } else if start < view_start || end - start > view_end - view_start {
@@ -6316,6 +6339,101 @@ mod tests {
             .unwrap();
         draw(&mut cx);
         assert_eq!(list.offset().y, px(0.));
+    }
+
+    /// A wrapping group with one stop.
+    struct OneStop {
+        stop: FocusHandle,
+    }
+
+    impl Render for OneStop {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().tab_wrap().child(div().track_focus(&self.stop))
+        }
+    }
+
+    /// A tab step to the stop that has the focus leaves no step pending,
+    /// so no later draw scrolls back to it.
+    #[test]
+    fn a_tab_step_to_the_focused_stop_reveals_nothing() {
+        let mut cx = TestAppContext::single();
+        let stop = cx.update(|cx| cx.focus_handle().tab_stop(true));
+        let window: AnyWindowHandle = cx
+            .add_window({
+                let stop = stop.clone();
+                move |_, _| OneStop { stop }
+            })
+            .into();
+        cx.update_window(window, |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+
+        let pending = cx
+            .update_window(window, |_, window, cx| {
+                window.focus(&stop, cx);
+                window.focus_next(cx);
+                window.tab_step_pending()
+            })
+            .unwrap();
+
+        assert!(!pending);
+    }
+
+    /// Four rows of 40 px with an outline 3 px out, in a list that shows
+    /// 60 px and keeps the focus 5 px inside its edges.
+    struct PaddedReveal {
+        rows: [FocusHandle; 4],
+        list: ScrollHandle,
+    }
+
+    impl Render for PaddedReveal {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let outline = crate::Outline {
+                color: crate::red(),
+                width: px(2.),
+                offset: px(1.),
+            };
+            let row = |handle: &FocusHandle| div().h(px(40.)).outline(outline).track_focus(handle);
+            div().child(
+                div()
+                    .id("list")
+                    .h(px(60.))
+                    .overflow_y_scroll()
+                    .track_scroll(&self.list)
+                    .scroll_padding(px(5.))
+                    .children(self.rows.iter().map(row)),
+            )
+        }
+    }
+
+    /// A tab step shows the focus with its outline and the padding of the
+    /// list.
+    #[test]
+    fn a_tab_step_shows_the_outline_and_the_padding() {
+        let mut cx = TestAppContext::single();
+        let rows = cx.update(|cx| [(); 4].map(|()| cx.focus_handle().tab_stop(true)));
+        let list = ScrollHandle::new();
+        let window: AnyWindowHandle = cx
+            .add_window({
+                let (rows, list) = (rows.clone(), list.clone());
+                move |_, _| PaddedReveal { rows, list }
+            })
+            .into();
+        let draw = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, cx| window.draw(cx).clear(cx))
+                .unwrap();
+        };
+        draw(&mut cx);
+
+        cx.update_window(window, |_, window, cx| {
+            window.focus(&rows[1], cx);
+            window.focus_next(cx);
+        })
+        .unwrap();
+        draw(&mut cx);
+
+        // The row spans 80 to 120, its outline 77 to 123, and the list
+        // keeps it above 55.
+        assert_eq!(list.offset().y, px(-68.));
     }
 
     #[gpui::test]

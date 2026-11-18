@@ -1304,7 +1304,7 @@ pub struct Window {
     pub(crate) requested_autoscroll: Option<Bounds<Pixels>>,
     /// Whether a tab step moved the focus since the last draw. The next
     /// draw scrolls the new focus into view.
-    pub(crate) tab_step_pending: bool,
+    tab_step_pending: bool,
     /// The [`TextInputConfiguration`] most recently forwarded to the platform
     /// window, so that only actual changes are forwarded (reconfiguring a live
     /// input session can restart the IME connection).
@@ -2724,8 +2724,7 @@ impl Window {
         }
 
         if let Some(handle) = self.rendered_frame.tab_stops.next(self.focus.as_ref()) {
-            self.focus(&handle, cx);
-            self.tab_step_pending = true;
+            self.step_focus(&handle, cx);
         }
     }
 
@@ -2738,9 +2737,24 @@ impl Window {
         }
 
         if let Some(handle) = self.rendered_frame.tab_stops.prev(self.focus.as_ref()) {
-            self.focus(&handle, cx);
+            self.step_focus(&handle, cx);
+        }
+    }
+
+    /// Focuses `handle` for a tab step. A step to the focused stop changes
+    /// nothing, so it draws nothing and reveals nothing.
+    fn step_focus(&mut self, handle: &FocusHandle, cx: &mut App) {
+        if self.focus != Some(handle.id) {
+            self.focus(handle, cx);
             self.tab_step_pending = true;
         }
+    }
+
+    /// Whether a tab step moved the focus and the window has not drawn the
+    /// step yet. The focus listeners of the draw that shows the step see
+    /// it.
+    pub fn tab_step_pending(&self) -> bool {
+        self.tab_step_pending
     }
 
     /// Accessor for the text system.
@@ -3849,7 +3863,6 @@ impl Window {
         }
         if !cx.mode.skip_drawing() {
             self.draw_roots(cx);
-            self.tab_step_pending = false;
             #[cfg(feature = "profiler")]
             {
                 let viewport_size = self.viewport_size;
@@ -3938,6 +3951,7 @@ impl Window {
                 .clone()
                 .retain(|listener| listener(&event, self, cx));
         }
+        self.tab_step_pending = false;
 
         debug_assert!(self.rendered_entity_stack.is_empty());
         self.record_entities_accessed(cx);

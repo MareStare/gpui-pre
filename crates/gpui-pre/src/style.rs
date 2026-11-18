@@ -410,6 +410,12 @@ pub struct Outline {
 }
 
 impl Outline {
+    /// How far the outer edge of the line lies outside the border box. It
+    /// is negative for a line that lies inside the box.
+    pub fn reach(&self) -> Pixels {
+        self.offset + self.width
+    }
+
     /// The bounds and the corner radii of the outer edge of the line around
     /// an element of `bounds` and `corner_radii`.
     fn outer(
@@ -417,7 +423,7 @@ impl Outline {
         bounds: Bounds<Pixels>,
         corner_radii: Corners<Pixels>,
     ) -> (Bounds<Pixels>, Corners<Pixels>) {
-        let reach = self.offset + self.width;
+        let reach = self.reach();
         (bounds.dilate(reach), corner_radii.spread(reach))
     }
 }
