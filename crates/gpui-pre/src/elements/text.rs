@@ -1,8 +1,8 @@
 use crate::{
-    ActiveTooltip, AnyView, App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId,
-    HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size, TextOverflow,
-    TextRun, TextStyle, TooltipId, TruncateFrom, WhiteSpace, Window, WrappedLine,
+    ActiveTooltip, AnyView, App, Bounds, BreakPoint, DispatchPhase, Element, ElementId,
+    GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement,
+    LayoutId, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size,
+    TextOverflow, TextRun, TextStyle, TooltipId, TruncateFrom, WhiteSpace, Window, WrappedLine,
     WrappedLineLayout, point, px, register_tooltip_mouse_handlers, set_tooltip_on_window, size,
 };
 use anyhow::Context as _;
@@ -393,7 +393,7 @@ pub struct StyledText {
     runs: Option<Vec<TextRun>>,
     delayed_highlights: Option<Vec<(Range<usize>, HighlightStyle)>>,
     delayed_font_family_overrides: Option<Vec<(Range<usize>, SharedString)>>,
-    break_points: Option<Arc<[usize]>>,
+    break_points: Option<Arc<[BreakPoint]>>,
     layout: TextLayout,
 }
 
@@ -540,17 +540,23 @@ impl StyledText {
         self
     }
 
-    /// Wraps the text only at the given byte offsets, in place of the Unicode line break
-    /// rules. The offsets are sorted and lie on char boundaries. A part of the text with no
-    /// break point that is wider than the line wraps at any character. A cut of the text by
-    /// its text overflow drops the break points.
-    pub fn with_break_points(mut self, break_points: impl Into<Arc<[usize]>>) -> Self {
+    /// Wraps the text only at the given break points, in place of the Unicode line break
+    /// rules. A row wraps at the last point that fits of the lowest rank that it has. The
+    /// points are sorted by their offsets, with no offset twice, and lie on char boundaries.
+    /// A part of the text with no break point that is wider than the line wraps at any
+    /// character. A cut of the text by its text overflow drops the break points.
+    pub fn with_break_points(mut self, break_points: impl Into<Arc<[BreakPoint]>>) -> Self {
         let break_points = break_points.into();
-        debug_assert!(break_points.is_sorted(), "unsorted break points");
+        debug_assert!(
+            break_points
+                .array_windows()
+                .all(|[point, next]| point.index < next.index),
+            "unsorted break points"
+        );
         debug_assert!(
             break_points
                 .iter()
-                .all(|point| self.text.is_char_boundary(*point)),
+                .all(|point| self.text.is_char_boundary(point.index)),
             "a break point is not on a char boundary"
         );
         self.break_points = Some(break_points);
@@ -660,7 +666,7 @@ impl TextLayout {
         &self,
         text: SharedString,
         runs: Option<Vec<TextRun>>,
-        break_points: Option<Arc<[usize]>>,
+        break_points: Option<Arc<[BreakPoint]>>,
         window: &mut Window,
         _: &mut App,
     ) -> LayoutId {
