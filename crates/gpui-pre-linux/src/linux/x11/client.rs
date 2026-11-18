@@ -46,7 +46,7 @@ use super::{
     XimHandler, button_or_scroll_from_event_detail, check_reply,
     clipboard::{self, Clipboard},
     event_position, fp3232_to_f32, get_reply, get_valuator_axis_index, handle_connection_error,
-    image_cursor::{self, ImageCursor},
+    image_cursor::ImageCursors,
     modifiers_from_state,
     pen::{Pens, PointerAction, PointerSample},
     pressed_button_from_mask, xcb_flush,
@@ -63,11 +63,11 @@ use crate::linux::{
 use crate::linux::{LinuxCommon, LinuxKeyboardLayout, X11Window, modifiers_from_xinput_info};
 
 use gpui::{
-    AnyWindowHandle, Bounds, ClipboardItem, CursorImage, CursorImageCache, CursorRequest,
-    CursorStyle, FileDropEvent, FrameRequestSource, Keystroke, Modifiers, ModifiersChangedEvent,
-    MouseButton, Pixels, PlatformDisplay, PlatformFrameSignal, PlatformInput,
-    PlatformKeyboardLayout, PlatformWindow, Point, RequestFrameOptions, ScrollDelta, Size,
-    TouchPhase, WindowButtonLayout, WindowParams, WindowVisibility, px,
+    AnyWindowHandle, Bounds, ClipboardItem, CursorImage, CursorRequest, CursorStyle, FileDropEvent,
+    FrameRequestSource, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, Pixels,
+    PlatformDisplay, PlatformFrameSignal, PlatformInput, PlatformKeyboardLayout, PlatformWindow,
+    Point, RequestFrameOptions, ScrollDelta, Size, TouchPhase, WindowButtonLayout, WindowParams,
+    WindowVisibility, px,
 };
 use gpui_wgpu::{CompositorGpuHint, GpuContext};
 
@@ -235,7 +235,7 @@ pub struct X11ClientState {
 
     /// The cursors made from images. None for an image that the server
     /// did not take.
-    pub(crate) image_cursor_cache: CursorImageCache<Option<ImageCursor>>,
+    pub(crate) image_cursors: ImageCursors,
     pub(crate) invisible_cursor_cache: Option<xproto::Cursor>,
     pub(crate) cursor_hidden_window: Option<xproto::Window>,
 
@@ -555,7 +555,7 @@ impl X11Connection {
                 cursor_handle,
                 window_cursors: HashMap::default(),
                 cursor_cache: HashMap::default(),
-                image_cursor_cache: CursorImageCache::default(),
+                image_cursors: ImageCursors::default(),
                 cursor_hidden_window: None,
                 invisible_cursor_cache: None,
 
@@ -2209,12 +2209,7 @@ impl X11ClientState {
     fn get_image_cursor(&mut self, image: &Arc<CursorImage>) -> Option<xproto::Cursor> {
         let connection = &self.xcb_connection;
         let root = connection.setup().roots[self.x_root_index].root;
-        self.image_cursor_cache
-            .get_or_insert_with(image, |image| {
-                image_cursor::create(connection, root, image).log_err()
-            })
-            .as_ref()
-            .map(ImageCursor::cursor)
+        self.image_cursors.cursor(connection, root, image)
     }
 }
 

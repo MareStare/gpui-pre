@@ -5,13 +5,43 @@
 //! The protocol: <https://www.x.org/releases/current/doc/renderproto/renderproto.txt>
 
 use anyhow::{Context as _, Result, anyhow};
-use gpui::CursorImage;
+use gpui::{CursorImage, CursorImageCache};
 use gpui_util::ResultExt as _;
 use std::rc::Rc;
+use std::sync::Arc;
 use x11rb::connection::Connection as _;
 use x11rb::protocol::render::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::{self, ConnectionExt as _};
 use x11rb::xcb_ffi::XCBConnection;
+
+/// The cursors of the images, by image.
+#[derive(Default)]
+pub(crate) struct ImageCursors {
+    /// None for an image that has no cursor.
+    cursors: CursorImageCache<Option<ImageCursor>>,
+
+    /// The ARGB32 picture format of the server, once a cursor found it.
+    format: Option<render::Pictformat>,
+}
+
+impl ImageCursors {
+    /// The cursor of the image on the screen of `root`. It lives at least
+    /// as long as the image.
+    pub fn cursor(
+        &mut self,
+        connection: &Rc<XCBConnection>,
+        root: xproto::Window,
+        image: &Arc<CursorImage>,
+    ) -> Option<xproto::Cursor> {
+        let Self { cursors, format } = self;
+        cursors
+            .get_or_insert_with(image, |image| {
+                create(connection, root, format, image).log_err()
+            })
+            .as_ref()
+            .map(ImageCursor::cursor)
+    }
+}
 
 /// A cursor made from an image. Drop frees it. The server keeps it while
 /// a window uses it.
@@ -32,15 +62,20 @@ impl Drop for ImageCursor {
     }
 }
 
-/// Makes a cursor of the image on the screen of `root`.
-pub(crate) fn create(
+/// Makes a cursor of the image on the screen of `root`. Looks up the
+/// ARGB32 picture `format` when it is None.
+fn create(
     connection: &Rc<XCBConnection>,
     root: xproto::Window,
+    format: &mut Option<render::Pictformat>,
     image: &CursorImage,
 ) -> Result<ImageCursor> {
     let width = u16::try_from(image.width()).context("X11: a cursor image is too wide")?;
     let height = u16::try_from(image.height()).context("X11: a cursor image is too high")?;
-    let format = argb32_format(connection)?;
+    let format = match *format {
+        Some(format) => format,
+        None => *format.insert(argb32_format(connection)?),
+    };
     let mut pixels = image.premultiplied_bgra();
     // The pixels are 32-bit ARGB values in the byte order of the server.
     if connection.setup().image_byte_order == xproto::ImageOrder::MSB_FIRST {
