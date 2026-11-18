@@ -77,7 +77,8 @@ gpui-pre version goes.
 - Headless apps: the `headless` feature runs an app on the test platform
   in real time and draws each frame with the wgpu headless renderer.
   `Window::named_element_bounds` gives the visible bounds of each named
-  element. `Window::render_to_image` works in every build: the wgpu
+  element. The name of an element is its debug selector, or the id of an
+  element that takes presses. `Window::render_to_image` works in every build: the wgpu
   renderer draws the scene to an offscreen texture and reads it back, also
   for X11 and Wayland windows.
 - Resize on the test platform: `Window::resize` resizes a test window in a
@@ -192,6 +193,27 @@ gpui-pre version goes.
 - Spring colors: `Interpolate` for `Rgba` and `Hsla` mixes with
   premultiplied alpha, as CSS does, so a clear color adds no tint on the
   way.
+- Animating frames: `Window::animating` tells whether the last frame drew a
+  one-shot animation or a moving spring before its end. A repeating
+  animation and the repeating part of a chain do not count. A cached view
+  that draws from its cache counts as it did when it last rendered.
+- Springs per coordinate: a `SpringVector` target gives its coordinates as
+  `SpringCoordinates`, and each coordinate moves on a spring of its own, so
+  a position or a rectangle keeps a velocity for each component. Each
+  `SpringTarget` is a vector of one coordinate. `SpringVector::tolerances`
+  gives the settle tolerance of each coordinate, in place of the epsilon of
+  the animation. `SpringConfig::critically_damped` makes a spring that comes
+  within 1% of its target in a duration, or jumps to it with a zero
+  duration.
+- Window frame: `Window::frame_bounds` gives the part of the surface that the
+  user sees as the window. A window with client decorations draws a shadow
+  on each side that is not tiled, as `Tiling::shadow` and `Tiling::inset`
+  state. The tooltips of the window stay inside the frame. The test window
+  reports client decorations with `simulate_decorations`.
+- Painted shadows: `Window::painted_shadows` gives the shadows of the last
+  frame to tests, as `painted_quads` gives its quads.
+- Debug bounds of any selector: `VisualTestContext::debug_bounds` takes a
+  selector of any lifetime.
 
 ## License
 
