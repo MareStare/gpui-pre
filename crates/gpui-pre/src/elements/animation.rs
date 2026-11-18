@@ -757,6 +757,23 @@ mod tests {
     /// A one-shot animation beside a repeating one.
     struct OneShotTestView;
 
+    impl Render for OneShotTestView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .child(div().with_animation(
+                    "one-shot-animation",
+                    Animation::new(Duration::from_secs(1)),
+                    |this, _| this,
+                ))
+                .child(div().with_animation(
+                    "repeating-animation",
+                    Animation::new(Duration::from_secs(1)).repeat(),
+                    |this, _| this,
+                ))
+        }
+    }
+
     /// A one-shot intro that a repeating animation follows.
     struct IntroTestView;
 
@@ -798,23 +815,6 @@ mod tests {
                 Animation::new(Duration::from_secs(1)).with_max_fps(2.0),
                 |this, _| this,
             )
-        }
-    }
-
-    impl Render for OneShotTestView {
-        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            div()
-                .size_full()
-                .child(div().with_animation(
-                    "one-shot-animation",
-                    Animation::new(Duration::from_secs(1)),
-                    |this, _| this,
-                ))
-                .child(div().with_animation(
-                    "repeating-animation",
-                    Animation::new(Duration::from_secs(1)).repeat(),
-                    |this, _| this,
-                ))
         }
     }
 
@@ -860,6 +860,12 @@ mod tests {
         });
         cx.run_until_parked();
         (rendered_deltas, window)
+    }
+
+    fn animating<V: 'static>(window: &WindowHandle<V>, cx: &mut TestAppContext) -> bool {
+        window
+            .update(cx, |_, window, _| window.animating())
+            .unwrap()
     }
 
     fn simulate_next_frame<V: Render>(window: &WindowHandle<V>, cx: &mut TestAppContext) -> usize {
@@ -960,13 +966,8 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(*rendered.borrow(), vec![Position(0.0, 0.0)]);
-        let animating = |cx: &mut TestAppContext| {
-            window
-                .update(cx, |_, window, _| window.animating())
-                .unwrap()
-        };
         assert!(
-            animating(cx),
+            animating(&window, cx),
             "a moving spring is an animation of the frame"
         );
 
@@ -1003,7 +1004,7 @@ mod tests {
         }
         assert_eq!(*rendered.borrow().last().unwrap(), Position(0.0, -50.0));
         assert_eq!(simulate_next_frame(&window, cx), 0);
-        assert!(!animating(cx));
+        assert!(!animating(&window, cx));
     }
 
     #[gpui::test]
@@ -1326,16 +1327,14 @@ mod tests {
     fn test_a_frame_is_animating_during_a_one_shot_intro(cx: &mut TestAppContext) {
         let window = cx.open_window(size(px(100.), px(100.)), |_, _| IntroTestView);
         cx.run_until_parked();
-        let animating = |cx: &mut TestAppContext| {
-            window
-                .update(cx, |_, window, _| window.animating())
-                .unwrap()
-        };
-        assert!(animating(cx));
+        assert!(animating(&window, cx));
 
         cx.executor().advance_clock(Duration::from_millis(1100));
         simulate_next_frame(&window, cx);
-        assert!(!animating(cx), "the repeat after the intro does not count");
+        assert!(
+            !animating(&window, cx),
+            "the repeat after the intro does not count"
+        );
     }
 
     #[gpui::test]
@@ -1344,49 +1343,39 @@ mod tests {
             child: cx.new(|_| ThrottledOneShotView),
         });
         cx.run_until_parked();
-        let animating = |cx: &mut TestAppContext| {
-            window
-                .update(cx, |_, window, _| window.animating())
-                .unwrap()
-        };
-        assert!(animating(cx));
+        assert!(animating(&window, cx));
 
         // The outer view draws again before the timer of the frame rate
         // fires. The cached view draws from its cache.
         cx.executor().advance_clock(Duration::from_millis(100));
         window.update(cx, |_, _, cx| cx.notify()).unwrap();
         cx.run_until_parked();
-        assert!(animating(cx));
+        assert!(animating(&window, cx));
 
         cx.executor().advance_clock(Duration::from_secs(2));
         cx.run_until_parked();
         simulate_next_frame(&window, cx);
-        assert!(!animating(cx));
+        assert!(!animating(&window, cx));
     }
 
     #[gpui::test]
     fn test_a_frame_is_animating_until_its_one_shot_animations_end(cx: &mut TestAppContext) {
         let window = cx.open_window(size(px(100.), px(100.)), |_, _| OneShotTestView);
         cx.run_until_parked();
-        let animating = |cx: &mut TestAppContext| {
-            window
-                .update(cx, |_, window, _| window.animating())
-                .unwrap()
-        };
-        assert!(animating(cx));
+        assert!(animating(&window, cx));
 
         cx.executor().advance_clock(Duration::from_millis(500));
         simulate_next_frame(&window, cx);
-        assert!(animating(cx));
+        assert!(animating(&window, cx));
 
         cx.executor().advance_clock(Duration::from_millis(600));
         simulate_next_frame(&window, cx);
-        assert!(!animating(cx));
+        assert!(!animating(&window, cx));
         assert!(
             simulate_next_frame(&window, cx) > 0,
             "the repeating animation asks for frames"
         );
-        assert!(!animating(cx));
+        assert!(!animating(&window, cx));
     }
 
     #[gpui::test]
