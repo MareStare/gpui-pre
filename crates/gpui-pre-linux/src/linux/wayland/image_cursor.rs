@@ -115,59 +115,58 @@ impl CursorSurface {
             shape_device.set_shape(target.serial, to_shape(cursor.style));
             return;
         }
-        let scale = target.scale;
+        let scale = (target.scale)();
         let names = cursor_style_to_icon_names(cursor.style);
         let Some(icon) = buffers.theme.icon(names, scale) else {
             return;
         };
-        if let Some(viewport) = &self.viewport {
-            viewport.set_destination(-1, -1);
-        }
-        self.surface.set_buffer_scale(scale);
-        let (width, height) = icon.dimensions();
-        let (x, y) = icon.hotspot();
-        let scale = scale as u32;
-        target.set_surface(&self.surface, (x / scale) as i32, (y / scale) as i32);
-        self.surface.attach(Some(icon), 0, 0);
-        self.surface
-            .damage(0, 0, (width / scale) as i32, (height / scale) as i32);
-        self.surface.commit();
+        let (x, y) = self.attach(icon, icon.dimensions(), icon.hotspot(), scale as f32);
+        target.set_surface(&self.surface, x, y);
     }
 
     /// Attaches the image to the surface. Gives the hotspot in the logical
     /// pixels of the surface.
     fn show(&self, images: &mut ImageCursors, image: &Arc<CursorImage>) -> Option<(i32, i32)> {
         let buffer = images.buffer(image)?;
+        let size = (image.width(), image.height());
+        Some(self.attach(&buffer, size, image.hotspot(), image.scale()))
+    }
+
+    /// Attaches a buffer of `size` pixels that has `scale` pixels for each
+    /// logical pixel. Gives the hotspot in the logical pixels of the surface.
+    fn attach(
+        &self,
+        buffer: &WlBuffer,
+        (width, height): (u32, u32),
+        (x, y): (u32, u32),
+        scale: f32,
+    ) -> (i32, i32) {
         let scale = match &self.viewport {
             Some(_) => {
                 self.surface.set_buffer_scale(1);
-                image.scale()
+                scale
             }
             None => {
                 // A buffer scale must divide the size of the buffer.
-                let whole = image.scale().round() as i32;
+                let whole = scale.round() as i32;
                 let fits = whole >= 1
-                    && (image.scale() - whole as f32).abs() < 0.01
-                    && image.width() as i32 % whole == 0
-                    && image.height() as i32 % whole == 0;
+                    && (scale - whole as f32).abs() < 0.01
+                    && width as i32 % whole == 0
+                    && height as i32 % whole == 0;
                 let scale = if fits { whole } else { 1 };
                 self.surface.set_buffer_scale(scale);
                 scale as f32
             }
         };
         let logical = |length: u32| (length as f32 / scale).round() as i32;
-        let (width, height) = (
-            logical(image.width()).max(1),
-            logical(image.height()).max(1),
-        );
+        let (logical_width, logical_height) = (logical(width).max(1), logical(height).max(1));
         if let Some(viewport) = &self.viewport {
-            viewport.set_destination(width, height);
+            viewport.set_destination(logical_width, logical_height);
         }
-        self.surface.attach(Some(&buffer), 0, 0);
-        self.surface.damage(0, 0, width, height);
+        self.surface.attach(Some(buffer), 0, 0);
+        self.surface.damage(0, 0, logical_width, logical_height);
         self.surface.commit();
-        let (x, y) = image.hotspot();
-        Some((logical(x), logical(y)))
+        (logical(x), logical(y))
     }
 }
 
@@ -185,8 +184,8 @@ pub(crate) struct CursorTarget<'a> {
     /// The serial of the enter event of the device.
     pub serial: u32,
 
-    /// The scale of the output under the device.
-    pub scale: i32,
+    /// Gives the scale of the output under the device.
+    pub scale: &'a dyn Fn() -> i32,
 }
 
 impl CursorTarget<'_> {

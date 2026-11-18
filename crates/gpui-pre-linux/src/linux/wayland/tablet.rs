@@ -152,7 +152,7 @@ impl TabletTool {
             device: CursorDevice::TabletTool(&self.tool),
             shape_device: self.cursor_shape_device.as_ref(),
             serial: self.enter_serial,
-            scale: window.primary_output_scale(),
+            scale: &|| window.primary_output_scale(),
         };
         self.cursor_surface.show_cursor(cursor, buffers, target);
     }

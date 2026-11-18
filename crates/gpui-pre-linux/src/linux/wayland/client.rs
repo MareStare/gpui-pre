@@ -984,15 +984,12 @@ impl WaylandClientState {
         let Some(wl_pointer) = &self.wl_pointer else {
             return;
         };
-        let scale = self
-            .mouse_focused_window
-            .as_ref()
-            .map_or(1, |window| window.primary_output_scale());
+        let window = self.mouse_focused_window.as_ref();
         let target = CursorTarget {
             device: CursorDevice::Pointer(wl_pointer),
             shape_device: self.cursor_shape_device.as_ref(),
             serial,
-            scale,
+            scale: &|| window.map_or(1, |window| window.primary_output_scale()),
         };
         self.cursor_surface
             .show_cursor(cursor, &mut self.cursor_buffers, target);
