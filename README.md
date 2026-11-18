@@ -236,6 +236,16 @@ gpui-pre version goes.
 - Shadow spread radius: the spread of a box shadow grows its corner radii
   as CSS does, so a ring around a round element stays round. An inset
   shadow and an outline shape their corners by the same rule.
+- Tab groups that wrap: a tab group made with `tab_wrap` keeps
+  `focus_next` and `focus_prev` inside it while the focus is in it, and
+  wraps at its ends, so a modal view keeps the keys. A wrapping group
+  inside another keeps the steps of the inner group. The focus of a tab
+  step asks each scroll container around it to show the element and its
+  outline, with the least scroll. `scroll_padding` keeps the element that
+  far inside the edges of the container. A list passes a request from
+  before it to the containers outside. `Window::tab_step_pending` tells the
+  focus listeners of the draw that a tab step moved the focus. A tab step
+  to the element that has the focus leaves no step pending.
 
 ## License
 
