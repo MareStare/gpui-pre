@@ -1,8 +1,11 @@
 # Branches
 
-- `main` holds the published gpui-pre sources and every patch that mart calls. Mart pins a commit of `main`.
+- `main` holds the published gpui-pre sources and every patch that mart calls.
 - Rewrite no commit of `main` and no commit that mart pinned. Fix a patch in a new commit.
-- Land each patch on `main` from a short-lived `mart/<topic>` branch off `main`, as a fast-forward after a rebase. Land a branch with a commit that mart pinned by a `git merge --no-ff`. Delete the branch after it lands.
+- Branch each patch from `main` as a short-lived `mart/<topic>`, also while mart pins the branch of another session. Branch from that other branch only when the patch needs it, and land that branch first.
+- A mart branch may pin the head of its patch branch. Land the patch branch on `main` before mart's `main` pins it, and pin the merge commit there.
+- Land a branch by `git merge --no-ff`, so each pinned commit stays reachable. Resolve a conflict with another landed branch in the merge commit. Rebase only a branch that mart never pinned.
+- Delete a branch after it lands.
 - Tag the head of a dropped branch with commits that no other ref holds as `archive/<branch>`, then delete the branch.
 - Drop a patch in a new commit on `main` when mart drops its last caller.
 - Describe each patch in the `## Patches` list of `README.md`, in the commit that changes it.
