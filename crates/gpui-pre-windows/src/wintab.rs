@@ -286,8 +286,7 @@ impl Tablet {
             .is_ok()
             .then(|| (f64::from(cursor.x), f64::from(cursor.y)));
         let map = WindowMap::read(hwnd, None, scale);
-        let packets = packets.get(..count).unwrap_or_default();
-        self.scale.events(packets, &map, cursor, emit);
+        self.scale.events(&packets[..count], &map, cursor, emit);
     }
 
     /// Puts the context on top of the other contexts. Tablets send

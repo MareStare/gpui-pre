@@ -12,7 +12,10 @@
 //! and the samples come only through WinTab. The app picks the API with
 //! [`PenApi`]. The messages of the other API give no pen events.
 
-use std::{cell::Cell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 use gpui::{PenApi, PenEvent, Point, point, px};
 use windows::{
@@ -92,15 +95,17 @@ impl PenApiState {
     }
 }
 
+type PenCallback = Box<dyn FnMut(PenEvent)>;
+
 /// The pen of one window.
 pub(crate) struct WindowPen {
     hwnd: HWND,
     api: Rc<PenApiState>,
-    callback: Cell<Option<Box<dyn FnMut(PenEvent)>>>,
 
-    /// The app reads the pen of the window. A window that does not reads no
-    /// pen messages and opens no WinTab context.
-    listening: Cell<bool>,
+    /// The pen callback of the app. A window with none reads no pen
+    /// messages and opens no WinTab context. The app can replace the
+    /// callback while it runs.
+    callback: RefCell<Option<Rc<RefCell<PenCallback>>>>,
     wintab: Wintab,
 }
 
@@ -127,8 +132,7 @@ impl WindowPen {
         Self {
             hwnd,
             api,
-            callback: Cell::new(None),
-            listening: Cell::new(false),
+            callback: RefCell::new(None),
             wintab: Wintab::new(wintab::api),
         }
     }
@@ -136,7 +140,7 @@ impl WindowPen {
     /// Gives each pen event of the window to `callback`. It turns off the
     /// pen feedback of the window and opens a WinTab context when the API
     /// reads WinTab.
-    pub(crate) fn listen(&self, callback: Box<dyn FnMut(PenEvent)>) {
+    pub(crate) fn listen(&self, callback: PenCallback) {
         // The property holds a number, not a handle. A window that keeps the
         // feedback still gives the pen events.
         unsafe {
@@ -147,15 +151,14 @@ impl WindowPen {
             )
         }
         .ok();
-        self.callback.set(Some(callback));
-        self.listening.set(true);
+        *self.callback.borrow_mut() = Some(Rc::new(RefCell::new(callback)));
         self.wintab.want(self.hwnd, self.api.wintab_wanted());
     }
 
     /// Applies a change of the pen API. The pen leaves, so no state of the
     /// API before stays.
     pub(crate) fn use_api(&self) {
-        if self.listening.get() {
+        if self.listening() {
             self.emit_one(PenEvent::Leave);
             self.wintab.want(self.hwnd, self.api.wintab_wanted());
         }
@@ -171,7 +174,7 @@ impl WindowPen {
     /// on to the window procedure after it. `scale` is the scale factor of
     /// the window.
     pub(crate) fn handle_msg(&self, msg: u32, wparam: WPARAM, lparam: LPARAM, scale: f32) {
-        if !self.listening.get() {
+        if !self.listening() {
             return;
         }
         let hwnd = self.hwnd;
@@ -214,16 +217,23 @@ impl WindowPen {
         }
     }
 
+    /// The app reads the pen of the window.
+    fn listening(&self) -> bool {
+        self.callback.borrow().is_some()
+    }
+
     fn emit_one(&self, event: PenEvent) {
         self.emit(|emit| emit(event));
     }
 
+    /// Drops the events of a message that comes while the callback runs.
     fn emit(&self, events: impl FnOnce(&mut dyn FnMut(PenEvent))) {
-        let Some(mut callback) = self.callback.take() else {
+        let Some(callback) = self.callback.borrow().clone() else {
             return;
         };
-        events(&mut *callback);
-        self.callback.set(Some(callback));
+        if let Ok(mut callback) = callback.try_borrow_mut() {
+            events(&mut **callback);
+        }
     }
 }
 
@@ -365,7 +375,6 @@ fn ink_events(history: &[POINTER_PEN_INFO], map: &WindowMap, emit: &mut dyn FnMu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
     use windows::Win32::UI::Input::Pointer::{POINTER_FLAGS, POINTER_INFO};
 
     type Events = Rc<RefCell<Vec<PenEvent>>>;
@@ -376,13 +385,12 @@ mod tests {
         let pen = WindowPen {
             hwnd: HWND(std::ptr::null_mut()),
             api: api.clone(),
-            callback: Cell::new(None),
-            listening: Cell::new(true),
+            callback: RefCell::new(None),
             wintab: Wintab::new(|| None),
         };
         let sink = events.clone();
-        pen.callback
-            .set(Some(Box::new(move |event| sink.borrow_mut().push(event))));
+        let callback: PenCallback = Box::new(move |event| sink.borrow_mut().push(event));
+        *pen.callback.borrow_mut() = Some(Rc::new(RefCell::new(callback)));
         (pen, events)
     }
 
@@ -421,7 +429,7 @@ mod tests {
     #[test]
     fn a_window_that_does_not_listen_gives_no_events() {
         let (pen, events) = window(&Rc::default());
-        pen.listening.set(false);
+        *pen.callback.borrow_mut() = None;
         pen.handle_msg(wintab::WT_PROXIMITY, WPARAM(0), ENTER, 1.0);
         pen.use_api();
         assert_eq!(take(&events), []);
