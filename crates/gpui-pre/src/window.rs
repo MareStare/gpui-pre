@@ -307,6 +307,19 @@ type AnyObserver = Box<dyn FnMut(&mut Window, &mut App) -> bool + 'static>;
 pub(crate) type AnyWindowFocusListener =
     Box<dyn FnMut(&WindowFocusEvent, &mut Window, &mut App) -> bool + 'static>;
 
+/// The reveal of the focus after a step of the tab order. It lasts for
+/// one draw.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) enum FocusReveal {
+    #[default]
+    None,
+    /// A tab step moved the focus. The draw has not reached it yet.
+    Pending,
+    /// The part of the focused element that is still to show, in window
+    /// coordinates. Each scroll container around it scrolls to show it.
+    Requested(Bounds<Pixels>),
+}
+
 pub(crate) struct WindowFocusEvent {
     pub(crate) previous_focus_path: SmallVec<[FocusId; 8]>,
     pub(crate) current_focus_path: SmallVec<[FocusId; 8]>,
@@ -1283,6 +1296,7 @@ pub struct Window {
     pub(crate) element_opacity: f32,
     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
     pub(crate) requested_autoscroll: Option<Bounds<Pixels>>,
+    pub(crate) focus_reveal: FocusReveal,
     /// The [`TextInputConfiguration`] most recently forwarded to the platform
     /// window, so that only actual changes are forwarded (reconfiguring a live
     /// input session can restart the IME connection).
@@ -2412,6 +2426,7 @@ impl Window {
             content_mask_stack: Vec::new(),
             element_opacity: 1.0,
             requested_autoscroll: None,
+            focus_reveal: FocusReveal::None,
             last_text_input_configuration: None,
             focused_text_input: None,
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
@@ -2693,26 +2708,30 @@ impl Window {
     }
 
     /// Move focus to next tab stop. From a focus in a group that wraps, the
-    /// step stays in that group.
+    /// step stays in that group. The scroll containers of the new focus
+    /// scroll to show it.
     pub fn focus_next(&mut self, cx: &mut App) {
         if !self.focus_enabled {
             return;
         }
 
         if let Some(handle) = self.rendered_frame.tab_stops.next(self.focus.as_ref()) {
-            self.focus(&handle, cx)
+            self.focus(&handle, cx);
+            self.focus_reveal = FocusReveal::Pending;
         }
     }
 
     /// Move focus to previous tab stop. From a focus in a group that wraps,
-    /// the step stays in that group.
+    /// the step stays in that group. The scroll containers of the new focus
+    /// scroll to show it.
     pub fn focus_prev(&mut self, cx: &mut App) {
         if !self.focus_enabled {
             return;
         }
 
         if let Some(handle) = self.rendered_frame.tab_stops.prev(self.focus.as_ref()) {
-            self.focus(&handle, cx)
+            self.focus(&handle, cx);
+            self.focus_reveal = FocusReveal::Pending;
         }
     }
 
@@ -3808,6 +3827,7 @@ impl Window {
         }
         if !cx.mode.skip_drawing() {
             self.draw_roots(cx);
+            self.focus_reveal = FocusReveal::None;
             #[cfg(feature = "profiler")]
             {
                 let viewport_size = self.viewport_size;

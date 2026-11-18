@@ -43,6 +43,7 @@ use std::{
 };
 
 use super::ImageCacheProvider;
+use crate::window::FocusReveal;
 
 #[cfg(feature = "stacker")]
 type StackSafe<T> = stacksafe::StackSafe<T>;
@@ -2137,6 +2138,7 @@ impl Element for Div {
             (child_max - child_min).into()
         };
 
+        let scroll_offset_cell = self.interactivity.scroll_offset.clone();
         self.interactivity.prepaint(
             global_id,
             inspector_id,
@@ -2150,6 +2152,8 @@ impl Element for Div {
                     return hitbox;
                 }
 
+                // Only a reveal that a child asks for scrolls this element.
+                let reveal_pending = window.focus_reveal == FocusReveal::Pending;
                 window.with_image_cache(image_cache, |window| {
                     window.with_element_offset(scroll_offset, |window| {
                         if let Some(order_fn) = &self.prepaint_order_fn {
@@ -2170,6 +2174,12 @@ impl Element for Div {
                         listener(children_bounds, window, cx);
                     }
                 });
+
+                if let Some(offset) = scroll_offset_cell.as_ref()
+                    && reveal_pending
+                {
+                    reveal_focus(offset, bounds, style.overflow, window);
+                }
 
                 hitbox
             },
@@ -2448,6 +2458,9 @@ impl Interactivity {
 
         if let Some(focus_handle) = self.tracked_focus_handle.as_ref() {
             window.set_focus_handle(focus_handle, cx);
+            if window.focus_reveal == FocusReveal::Pending && focus_handle.is_focused(window) {
+                window.focus_reveal = FocusReveal::Requested(bounds);
+            }
 
             if window.a11y.is_active() {
                 if let Some(global_id) = global_id {
@@ -4394,6 +4407,56 @@ where
     }
 }
 
+/// Scrolls the least distance that shows the focus that a tab step reveals.
+/// The part of it that shows stays for the scroll containers outside. The
+/// children have their places already, so the next frame draws the scroll.
+fn reveal_focus(
+    offset: &Rc<RefCell<Point<Pixels>>>,
+    viewport: Bounds<Pixels>,
+    overflow: Point<Overflow>,
+    window: &mut Window,
+) {
+    let FocusReveal::Requested(target) = window.focus_reveal else {
+        return;
+    };
+    let along = |overflow: Overflow, start: Pixels, end: Pixels, view_start, view_end| {
+        if overflow != Overflow::Scroll {
+            px(0.)
+        } else if start < view_start || end - start > view_end - view_start {
+            view_start - start
+        } else if end > view_end {
+            view_end - end
+        } else {
+            px(0.)
+        }
+    };
+    let delta = point(
+        along(
+            overflow.x,
+            target.left(),
+            target.right(),
+            viewport.left(),
+            viewport.right(),
+        ),
+        along(
+            overflow.y,
+            target.top(),
+            target.bottom(),
+            viewport.top(),
+            viewport.bottom(),
+        ),
+    );
+    if delta != Point::default() {
+        *offset.borrow_mut() += delta;
+        window.request_animation_frame();
+    }
+    let shown = Bounds {
+        origin: target.origin + delta,
+        size: target.size,
+    };
+    window.focus_reveal = FocusReveal::Requested(shown.intersect(&viewport));
+}
+
 /// Represents an element that can be scrolled *to* in its parent element.
 /// Contrary to [ScrollHandle::scroll_to_item], an anchored element does not have to be an immediate child of the parent.
 #[derive(Clone)]
@@ -6156,6 +6219,82 @@ mod tests {
 
         assert_eq!(after_last, Some(first.id));
         assert_eq!(before_first, Some(last.id));
+    }
+
+    /// A list of three rows of 40 px that shows 50 px, and a list after it.
+    struct RevealList {
+        rows: [FocusHandle; 3],
+        list: ScrollHandle,
+        other: ScrollHandle,
+    }
+
+    impl Render for RevealList {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let row = |handle: &FocusHandle| div().h(px(40.)).track_focus(handle);
+            div()
+                .child(
+                    div()
+                        .id("list")
+                        .h(px(50.))
+                        .overflow_y_scroll()
+                        .track_scroll(&self.list)
+                        .children(self.rows.iter().map(row)),
+                )
+                .child(
+                    div()
+                        .id("other")
+                        .h(px(50.))
+                        .overflow_y_scroll()
+                        .track_scroll(&self.other)
+                        .child(div().h(px(200.))),
+                )
+        }
+    }
+
+    /// A tab step scrolls the list to show the row that it focuses. A focus
+    /// that no tab step gives scrolls nothing, and a list that does not hold
+    /// the focus keeps its place.
+    #[test]
+    fn a_tab_step_scrolls_the_focus_into_view() {
+        let mut cx = TestAppContext::single();
+        let rows = cx.update(|cx| [(); 3].map(|()| cx.focus_handle().tab_stop(true)));
+        let (list, other) = (ScrollHandle::new(), ScrollHandle::new());
+        let window: AnyWindowHandle = cx
+            .add_window({
+                let (rows, list, other) = (rows.clone(), list.clone(), other.clone());
+                move |_, _| RevealList { rows, list, other }
+            })
+            .into();
+        let draw = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, cx| window.draw(cx).clear(cx))
+                .unwrap();
+        };
+        draw(&mut cx);
+
+        cx.update_window(window, |_, window, cx| window.focus(&rows[2], cx))
+            .unwrap();
+        draw(&mut cx);
+        assert_eq!(list.offset().y, px(0.));
+
+        cx.update_window(window, |_, window, cx| {
+            window.focus(&rows[0], cx);
+            window.focus_prev(cx);
+        })
+        .unwrap();
+        draw(&mut cx);
+        draw(&mut cx);
+        assert_eq!(
+            cx.update_window(window, |_, window, cx| window.focused(cx).map(|h| h.id))
+                .unwrap(),
+            Some(rows[2].id)
+        );
+        assert_eq!(list.offset().y, px(-70.));
+        assert_eq!(other.offset().y, px(0.));
+
+        cx.update_window(window, |_, window, cx| window.focus_next(cx))
+            .unwrap();
+        draw(&mut cx);
+        assert_eq!(list.offset().y, px(0.));
     }
 
     #[gpui::test]
