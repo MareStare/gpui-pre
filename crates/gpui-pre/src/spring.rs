@@ -328,6 +328,8 @@ pub trait SpringVector: 'static {
     /// The settle tolerance of each coordinate, in the unit of that
     /// coordinate, such as half a pixel for a position. With none, each
     /// coordinate takes the epsilon of the animation.
+    ///
+    /// A target gives one tolerance for each coordinate.
     fn tolerances(&self) -> Option<SpringCoordinates> {
         None
     }

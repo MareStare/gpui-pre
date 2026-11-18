@@ -144,6 +144,11 @@ pub trait AnimationExt {
         let tolerances = target
             .tolerances()
             .unwrap_or_else(|| smallvec::smallvec![epsilon; coordinates.len()]);
+        debug_assert_eq!(
+            tolerances.len(),
+            coordinates.len(),
+            "a spring target gives one tolerance for each coordinate"
+        );
         SpringAnimationElement {
             id: id.into(),
             element: Some(self),
