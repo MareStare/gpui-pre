@@ -3187,6 +3187,13 @@ impl Window {
         self.rendered_frame.scene.underlines.clone()
     }
 
+    /// Returns the shadows in the most recently rendered frame's scene. Like the quads, their
+    /// bounds are in scaled pixels and are not clipped.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn painted_shadows(&self) -> Vec<Shadow> {
+        self.rendered_frame.scene.shadows.clone()
+    }
+
     /// Set the content size of the window.
     pub fn resize(&mut self, size: Size<Pixels>) {
         self.platform_window.resize(size);
