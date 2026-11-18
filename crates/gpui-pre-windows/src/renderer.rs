@@ -6,12 +6,12 @@ use std::{num::NonZeroIsize, sync::Arc};
 
 use anyhow::{Context as _, Result};
 use gpui::{DevicePixels, GpuSpecs, PlatformAtlas, Scene, Size, WindowBackgroundAppearance};
-use gpui_wgpu::{NativeRenderer, TextContrast, WgpuWindowRenderer};
+use gpui_wgpu::{NativeRenderer, TextContrast, WgpuWindowRenderer, WindowRenderer};
 use raw_window_handle as rwh;
 
 use crate::{DirectXDevices, DirectXRenderer, HWND};
 
-pub(crate) type WindowRenderer = gpui_wgpu::WindowRenderer<DirectXRenderer>;
+pub(crate) type Renderer = WindowRenderer<DirectXRenderer>;
 
 impl NativeRenderer for DirectXRenderer {
     const NAME: &'static str = "dx11";
@@ -28,13 +28,13 @@ impl NativeRenderer for DirectXRenderer {
     }
 }
 
-pub(crate) fn new_window_renderer(
+pub(crate) fn new_renderer(
     hwnd: HWND,
     directx_devices: &DirectXDevices,
     disable_direct_composition: bool,
     size: Size<DevicePixels>,
-) -> Result<WindowRenderer> {
-    WindowRenderer::start(
+) -> Result<Renderer> {
+    Renderer::start(
         || Ok((new_wgpu(hwnd, size)?, ())),
         || {
             DirectXRenderer::new(hwnd, directx_devices, disable_direct_composition)
@@ -73,7 +73,7 @@ pub(crate) trait WindowRendererExt {
     fn gpu_specs(&self) -> Result<GpuSpecs>;
 }
 
-impl WindowRendererExt for WindowRenderer {
+impl WindowRendererExt for Renderer {
     fn draw(
         &mut self,
         scene: &Scene,

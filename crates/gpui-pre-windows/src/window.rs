@@ -64,7 +64,7 @@ pub struct WindowsWindowState {
     pub last_visibility: Cell<Option<WindowVisibility>>,
     pub direct_manipulation: DirectManipulationHandler,
 
-    pub renderer: RefCell<WindowRenderer>,
+    pub renderer: RefCell<Renderer>,
     /// Set when the next `draw_window` call must be treated as a forced
     /// render. Used after a GPU device-lost recovery, where the next frame
     /// must both re-enable drawing (via `mark_drawable`) and bypass the GPUI
@@ -143,7 +143,7 @@ impl WindowsWindowState {
         };
         let border_offset = WindowBorderOffset::default();
         let restore_from_minimized = None;
-        let renderer = new_window_renderer(
+        let renderer = new_renderer(
             hwnd,
             directx_devices,
             disable_direct_composition,
