@@ -107,29 +107,30 @@ impl ImageCursorSurface {
     /// pixels of the surface.
     fn show(&self, images: &mut ImageCursors, image: &Arc<CursorImage>) -> Option<(i32, i32)> {
         let buffer = images.buffer(image)?;
-        let (width, height) = (image.width() as i32, image.height() as i32);
-        let scale = image.scale();
-        let logical = |length: u32| (length as f32 / scale).round() as i32;
-        match &self.viewport {
-            Some(viewport) => {
+        let scale = match &self.viewport {
+            Some(_) => {
                 self.surface.set_buffer_scale(1);
-                viewport.set_destination(
-                    logical(image.width()).max(1),
-                    logical(image.height()).max(1),
-                );
+                image.scale()
             }
             None => {
                 // A buffer scale must divide the size of the buffer.
-                let whole = scale.round() as i32;
+                let whole = image.scale().round() as i32;
                 let fits = whole >= 1
-                    && (scale - whole as f32).abs() < 0.01
-                    && width % whole == 0
-                    && height % whole == 0;
-                self.surface.set_buffer_scale(if fits { whole } else { 1 });
+                    && (image.scale() - whole as f32).abs() < 0.01
+                    && image.width() as i32 % whole == 0
+                    && image.height() as i32 % whole == 0;
+                let scale = if fits { whole } else { 1 };
+                self.surface.set_buffer_scale(scale);
+                scale as f32
             }
+        };
+        let logical = |length: u32| (length as f32 / scale).round() as i32;
+        let (width, height) = (logical(image.width()).max(1), logical(image.height()).max(1));
+        if let Some(viewport) = &self.viewport {
+            viewport.set_destination(width, height);
         }
         self.surface.attach(Some(&buffer), 0, 0);
-        self.surface.damage_buffer(0, 0, width, height);
+        self.surface.damage(0, 0, width, height);
         self.surface.commit();
         let (x, y) = image.hotspot();
         Some((logical(x), logical(y)))
