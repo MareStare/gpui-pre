@@ -872,6 +872,8 @@ pub trait InteractiveElement: Sized {
     /// inside it, [`Window::focus_next`] and [`Window::focus_prev`] go to the
     /// tab stops inside it and wrap at its ends. Useful for a modal view,
     /// such as a dialog.
+    /// A group that wraps inside another group that wraps keeps the steps
+    /// inside the inner group.
     fn tab_wrap(mut self) -> Self {
         self.interactivity().tab_wrap = true;
         self.tab_group()
