@@ -28,16 +28,8 @@ read fonts of Zed from `assets/fonts`.
 
 ## Layout of the history
 
-1. One commit adds the published sources of one gpui-pre version, with no
-   changes.
-2. Each patch is one commit on top of it, so each one rebases on its own
-   onto a later gpui-pre version.
-3. A commit with a `(cherry picked from commit <sha>)` line takes the
-   change of that Zed commit, with the paths of the crates here. Drop it
-   in a rebase onto a gpui-pre version that holds that Zed commit.
-
-To move to a later version, add its published sources in a new base
-commit, then rebase the patch commits onto it.
+`AGENTS.md` describes the branches, the tags and how an upgrade to a later
+gpui-pre version goes.
 
 ## Patches
 
