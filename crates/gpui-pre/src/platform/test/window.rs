@@ -616,7 +616,6 @@ impl PlatformWindow for TestWindow {
         self.0.lock().sprite_atlas.clone()
     }
 
-    #[cfg(any(test, feature = "headless"))]
     fn render_to_pending_image(&self, scene: &Scene) -> anyhow::Result<PendingImage> {
         let scale_factor = self.scale_factor();
         let mut state = self.0.lock();
