@@ -3,8 +3,8 @@ use std::{cell::Cell, rc::Rc, time::Duration};
 
 use crate::{
     AnyElement, App, Element, ElementId, GlobalElementId, InspectorElementId, IntoElement,
-    ParentElement, SpringAnimation, SpringConfig, SpringPlayback, SpringState, SpringTarget,
-    Window,
+    ParentElement, SpringAnimation, SpringConfig, SpringCoordinates, SpringPlayback, SpringState,
+    SpringVector, Window,
 };
 
 pub use easing::*;
@@ -116,7 +116,8 @@ pub trait AnimationExt {
         }
     }
 
-    /// Renders this component or element at the value produced by a spring.
+    /// Renders this component or element at the value produced by springs, one
+    /// per coordinate of the target.
     ///
     /// The element ID preserves position and velocity across target changes.
     /// A newly mounted spring starts at its target unless configured with
@@ -129,7 +130,7 @@ pub trait AnimationExt {
     ) -> SpringAnimationElement<Self>
     where
         Self: Sized,
-        T: SpringTarget,
+        T: SpringVector,
         T::Output: 'static,
     {
         let SpringAnimation {
@@ -139,17 +140,20 @@ pub trait AnimationExt {
             initial,
             playback,
         } = animation;
-        let scalar_target = target.target();
+        let coordinates = target.coordinates();
+        let tolerances = target
+            .tolerances()
+            .unwrap_or_else(|| smallvec::smallvec![epsilon; coordinates.len()]);
         SpringAnimationElement {
             id: id.into(),
             element: Some(self),
             config,
-            target: scalar_target,
-            epsilon,
+            target: coordinates,
+            tolerances,
             initial,
             playback,
-            animator: Some(Box::new(move |this, value| {
-                animator(this, target.resolve(value))
+            animator: Some(Box::new(move |this, coordinates| {
+                animator(this, target.resolve_coordinates(coordinates))
             })),
         }
     }
@@ -165,16 +169,16 @@ pub struct AnimationElement<E> {
     animator: Box<dyn Fn(E, usize, f32) -> E + 'static>,
 }
 
-/// A GPUI element driven by a stateful spring.
+/// A GPUI element driven by stateful springs, one per coordinate of its target.
 pub struct SpringAnimationElement<E> {
     id: ElementId,
     element: Option<E>,
     config: SpringConfig,
-    target: f32,
-    epsilon: f32,
-    initial: Option<f32>,
+    target: SpringCoordinates,
+    tolerances: SpringCoordinates,
+    initial: Option<SpringCoordinates>,
     playback: SpringPlayback,
-    animator: Option<Box<dyn FnOnce(E, f32) -> E + 'static>>,
+    animator: Option<Box<dyn FnOnce(E, &[f32]) -> E + 'static>>,
 }
 
 impl<E: ParentElement> ParentElement for SpringAnimationElement<E> {
@@ -240,12 +244,41 @@ struct AnimationState {
 }
 
 struct SpringElementState {
-    spring: SpringState,
-    target: f32,
+    springs: SmallVec<[SpringState; 4]>,
+    target: SpringCoordinates,
     config: SpringConfig,
-    initial: f32,
+    initial: SpringCoordinates,
     playback: SpringPlayback,
     updated_at: Instant,
+}
+
+impl SpringElementState {
+    fn new(
+        initial: SpringCoordinates,
+        target: SpringCoordinates,
+        config: SpringConfig,
+        playback: SpringPlayback,
+        now: Instant,
+    ) -> Self {
+        Self {
+            springs: at_rest(&initial),
+            target,
+            config,
+            initial,
+            playback,
+            updated_at: now,
+        }
+    }
+}
+
+fn at_rest(coordinates: &[f32]) -> SmallVec<[SpringState; 4]> {
+    coordinates
+        .iter()
+        .map(|&position| SpringState {
+            position,
+            velocity: 0.0,
+        })
+        .collect()
 }
 
 impl<E: IntoElement + 'static> Element for SpringAnimationElement<E> {
@@ -269,23 +302,25 @@ impl<E: IntoElement + 'static> Element for SpringAnimationElement<E> {
     ) -> (crate::LayoutId, Self::RequestLayoutState) {
         window.with_element_state(global_id.unwrap(), |state, window| {
             let now = cx.background_executor().now();
-            let initial = self.initial.unwrap_or(self.target);
-            let mut state = state.unwrap_or_else(|| SpringElementState {
-                spring: SpringState {
-                    position: initial,
-                    velocity: 0.0,
-                },
-                target: self.target,
-                config: self.config,
-                initial,
-                playback: self.playback,
-                updated_at: now,
-            });
+            let initial = self.initial.take().unwrap_or_else(|| self.target.clone());
+            let mut state = state
+                .filter(|state: &SpringElementState| state.springs.len() == self.target.len())
+                .unwrap_or_else(|| {
+                    SpringElementState::new(
+                        initial,
+                        self.target.clone(),
+                        self.config,
+                        self.playback,
+                        now,
+                    )
+                });
 
             let elapsed = now.duration_since(state.updated_at).as_secs_f32();
             match state.playback {
                 SpringPlayback::Running => {
-                    state.spring = state.config.step(state.spring, state.target, elapsed);
+                    for (spring, &target) in state.springs.iter_mut().zip(&state.target) {
+                        *spring = state.config.step(*spring, target, elapsed);
+                    }
                 }
                 SpringPlayback::Paused
                 | SpringPlayback::Stopped
@@ -294,47 +329,42 @@ impl<E: IntoElement + 'static> Element for SpringAnimationElement<E> {
             }
 
             state.config = self.config;
-            state.target = self.target;
+            state.target = std::mem::take(&mut self.target);
 
             let done = match self.playback {
                 SpringPlayback::Running => {
                     if cx.reduce_motion() {
-                        state.spring = SpringState {
-                            position: state.target,
-                            velocity: 0.0,
-                        };
+                        state.springs = at_rest(&state.target);
                         true
                     } else {
-                        let done =
-                            state
-                                .config
-                                .is_settled(state.spring, state.target, self.epsilon);
-                        if done {
-                            state.spring = SpringState {
-                                position: state.target,
-                                velocity: 0.0,
-                            };
+                        let mut done = true;
+                        let coordinates = state.springs.iter_mut().zip(&state.target);
+                        for ((spring, &target), &tolerance) in coordinates.zip(&self.tolerances) {
+                            if state.config.is_settled(*spring, target, tolerance) {
+                                *spring = SpringState {
+                                    position: target,
+                                    velocity: 0.0,
+                                };
+                            } else {
+                                done = false;
+                            }
                         }
                         done
                     }
                 }
                 SpringPlayback::Paused => true,
                 SpringPlayback::Stopped => {
-                    state.spring.velocity = 0.0;
+                    for spring in &mut state.springs {
+                        spring.velocity = 0.0;
+                    }
                     true
                 }
                 SpringPlayback::Completed => {
-                    state.spring = SpringState {
-                        position: state.target,
-                        velocity: 0.0,
-                    };
+                    state.springs = at_rest(&state.target);
                     true
                 }
                 SpringPlayback::Cancelled => {
-                    state.spring = SpringState {
-                        position: state.initial,
-                        velocity: 0.0,
-                    };
+                    state.springs = at_rest(&state.initial);
                     true
                 }
             };
@@ -343,7 +373,9 @@ impl<E: IntoElement + 'static> Element for SpringAnimationElement<E> {
 
             let element = self.element.take().expect("should only be called once");
             let animator = self.animator.take().expect("should only be called once");
-            let mut element = animator(element, state.spring.position).into_any_element();
+            let positions: SpringCoordinates =
+                state.springs.iter().map(|spring| spring.position).collect();
+            let mut element = animator(element, &positions).into_any_element();
 
             if !done {
                 window.request_animation_frame();
@@ -605,6 +637,87 @@ mod tests {
         }
     }
 
+    /// A position whose two coordinates spring on their own.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct Position(f32, f32);
+
+    impl SpringVector for Position {
+        type Output = Position;
+
+        fn coordinates(&self) -> SpringCoordinates {
+            smallvec::smallvec![self.0, self.1]
+        }
+
+        fn resolve_coordinates(&self, coordinates: &[f32]) -> Self::Output {
+            Position(coordinates[0], coordinates[1])
+        }
+    }
+
+    struct MultiSpringTestView {
+        target: Position,
+        rendered: Rc<RefCell<Vec<Position>>>,
+    }
+
+    impl Render for MultiSpringTestView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let rendered = self.rendered.clone();
+            let animation =
+                SpringAnimation::new(SpringConfig::critically_damped(Duration::from_millis(200)))
+                    .to(self.target)
+                    .from(Position(0.0, 0.0))
+                    .with_epsilon(0.01);
+            div().with_spring("multi-spring", animation, move |this, position| {
+                rendered.borrow_mut().push(position);
+                this.left(px(position.0)).top(px(position.1))
+            })
+        }
+    }
+
+    /// An offset in pixels that settles within half a pixel.
+    #[derive(Clone, Copy)]
+    struct Offset(f32);
+
+    impl SpringVector for Offset {
+        type Output = f32;
+
+        fn coordinates(&self) -> SpringCoordinates {
+            smallvec::smallvec![self.0]
+        }
+
+        fn resolve_coordinates(&self, coordinates: &[f32]) -> Self::Output {
+            coordinates[0]
+        }
+
+        fn tolerances(&self) -> Option<SpringCoordinates> {
+            Some(smallvec::smallvec![0.5])
+        }
+    }
+
+    /// A glide of 300 pixels in 120 ms, with the tolerance of the offset or
+    /// with the default epsilon.
+    struct GlideTestView {
+        to: f32,
+        in_pixels: bool,
+    }
+
+    impl Render for GlideTestView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let config = SpringConfig::critically_damped(Duration::from_millis(120));
+            let el = div();
+            if self.in_pixels {
+                let animation = SpringAnimation::new(config)
+                    .to(Offset(self.to))
+                    .from(Offset(0.0));
+                el.with_spring("glide", animation, |this, x| this.left(px(x)))
+                    .into_any_element()
+            } else {
+                let animation = SpringAnimation::new(config).to(self.to).from(0.0);
+                el.with_spring("glide", animation, |this, x| this.left(px(x)))
+                    .into_any_element()
+            }
+        }
+    }
+
     impl Render for SyncedAnimationTestView {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             let record_deltas = |deltas: Rc<RefCell<Vec<f32>>>| {
@@ -822,6 +935,79 @@ mod tests {
         assert!(simulate_next_frame(&window, cx) > 0);
         let value_after_retargeting = *rendered_values.borrow().last().unwrap();
         assert!(value_after_retargeting > value_before_retargeting);
+    }
+
+    #[gpui::test]
+    fn test_each_coordinate_springs_on_its_own(cx: &mut TestAppContext) {
+        let rendered = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.open_window(size(px(100.0), px(100.0)), {
+            let rendered = rendered.clone();
+            move |_, _| MultiSpringTestView {
+                target: Position(100.0, -50.0),
+                rendered,
+            }
+        });
+        cx.run_until_parked();
+        assert_eq!(*rendered.borrow(), vec![Position(0.0, 0.0)]);
+
+        cx.executor().advance_clock(Duration::from_millis(50));
+        assert!(simulate_next_frame(&window, cx) > 0);
+        let midway = *rendered.borrow().last().unwrap();
+        assert!(0.0 < midway.0 && midway.0 < 100.0, "{midway:?}");
+        // Both coordinates cover the same share of their distance.
+        assert!(
+            (midway.0 / 100.0 - midway.1 / -50.0).abs() < 1e-4,
+            "{midway:?}"
+        );
+
+        // The first coordinate turns back with its velocity. The second one
+        // keeps its target and its course.
+        window
+            .update(cx, |view, _, cx| {
+                view.target = Position(0.0, -50.0);
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(5));
+        assert!(simulate_next_frame(&window, cx) > 0);
+        let turned = *rendered.borrow().last().unwrap();
+        assert!(turned.0 > midway.0, "{turned:?}");
+        assert!(turned.1 < midway.1, "{turned:?}");
+
+        for _ in 0..100 {
+            cx.executor().advance_clock(Duration::from_millis(16));
+            if simulate_next_frame(&window, cx) == 0 {
+                break;
+            }
+        }
+        assert_eq!(*rendered.borrow().last().unwrap(), Position(0.0, -50.0));
+        assert_eq!(simulate_next_frame(&window, cx), 0);
+    }
+
+    #[gpui::test]
+    fn test_a_glide_in_pixels_settles_near_its_duration(cx: &mut TestAppContext) {
+        let mut glide = |in_pixels| {
+            let window = cx.open_window(size(px(400.0), px(100.0)), |_, _| GlideTestView {
+                to: 300.0,
+                in_pixels,
+            });
+            cx.run_until_parked();
+            let mut elapsed = Duration::ZERO;
+            while elapsed < Duration::from_secs(1) {
+                cx.executor().advance_clock(Duration::from_millis(8));
+                elapsed += Duration::from_millis(8);
+                if simulate_next_frame(&window, cx) == 0 {
+                    break;
+                }
+            }
+            elapsed
+        };
+        let in_pixels = glide(true);
+        assert!(in_pixels <= Duration::from_millis(180), "{in_pixels:?}");
+        // The default epsilon is a thousandth of a pixel here.
+        let fine = glide(false);
+        assert!(fine >= Duration::from_millis(240), "{fine:?}");
     }
 
     #[gpui::test]
