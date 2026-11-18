@@ -586,14 +586,20 @@ impl Platform for TestPlatform {
             .as_threaded()
             .expect("the run loop needs a threaded dispatcher");
         on_finish_launching();
-        let mut last_frames = None::<Instant>;
+        let mut next_frames = Instant::now();
         while !self.quitting.get() {
             dispatcher.run_ready_main_tasks();
-            if last_frames.is_none_or(|time| time.elapsed() >= FRAME_INTERVAL) {
+            let now = Instant::now();
+            if now >= next_frames {
                 self.deliver_frames();
-                last_frames = Some(Instant::now());
+                // A loop that missed a whole frame starts the cadence again, so it
+                // delivers no burst of late frames.
+                next_frames += FRAME_INTERVAL;
+                if next_frames <= now {
+                    next_frames = now + FRAME_INTERVAL;
+                }
             }
-            dispatcher.wait_for_main_work(FRAME_INTERVAL);
+            dispatcher.wait_for_main_work(next_frames.saturating_duration_since(Instant::now()));
         }
         if let Some(mut callback) = self.quit_callback.borrow_mut().take() {
             callback();
