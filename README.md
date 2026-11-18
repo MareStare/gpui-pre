@@ -236,6 +236,10 @@ gpui-pre version goes.
 - Shadow spread radius: the spread of a box shadow grows its corner radii
   as CSS does, so a ring around a round element stays round. An inset
   shadow and an outline shape their corners by the same rule.
+- Shadow edges: a shadow starts at its element as drawn, at whole device
+  pixels, and keeps the fraction of its offset and spread. The shader
+  anti-aliases its edge, so a ring of 1.5 px draws as 1 solid and 1 half
+  pixel, as in a browser.
 - Tab groups that wrap: a tab group made with `tab_wrap` keeps
   `focus_next` and `focus_prev` inside it while the focus is in it, and
   wraps at its ends, so a modal view keeps the keys. A wrapping group

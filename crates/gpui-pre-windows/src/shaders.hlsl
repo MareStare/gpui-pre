@@ -890,8 +890,8 @@ ShadowVertexOutput shadow_vertex(uint vertex_id: SV_VertexID, uint instance_id: 
     if (shadow.inset != 0u) {
         bounds = shadow.element_bounds;
     } else {
-        // Leave room for the gaussian tail outside the shadow rect.
-        float margin = 3.0 * shadow.blur_radius;
+        // Leave room for the gaussian tail and the anti-aliased edge outside the shadow rect.
+        float margin = 3.0 * shadow.blur_radius + 0.5;
         bounds = shadow.bounds;
         bounds.origin -= margin;
         bounds.size += 2.0 * margin;

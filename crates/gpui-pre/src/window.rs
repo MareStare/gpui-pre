@@ -5020,17 +5020,21 @@ impl Window {
         let scale_factor = self.scale_factor();
         let content_mask = self.snapped_content_mask();
         let opacity = self.element_opacity();
-        let element_bounds = self.cover_bounds(bounds);
+        let element_bounds = self.snap_bounds(bounds);
         let element_corner_radii = corner_radii.scale(scale_factor);
         for shadow in shadows {
             if shadow.inset {
                 continue;
             }
-            let shadow_bounds = (bounds + shadow.offset).dilate(shadow.spread_radius);
             self.next_frame.scene.insert_primitive(Shadow {
                 order: 0,
                 blur_radius: shadow.blur_radius.scale(scale_factor),
-                bounds: self.cover_bounds(shadow_bounds),
+                bounds: Self::shadow_shape(
+                    element_bounds,
+                    shadow.offset,
+                    shadow.spread_radius,
+                    scale_factor,
+                ),
                 content_mask,
                 corner_radii: corner_radii
                     .spread(shadow.spread_radius)
@@ -5058,18 +5062,22 @@ impl Window {
         let scale_factor = self.scale_factor();
         let content_mask = self.snapped_content_mask();
         let opacity = self.element_opacity();
-        let element_bounds = self.cover_bounds(bounds);
+        let element_bounds = self.snap_bounds(bounds);
         let element_corner_radii = corner_radii.scale(scale_factor);
         for shadow in shadows {
             if !shadow.inset {
                 continue;
             }
-            let hole = (bounds + shadow.offset).dilate(-shadow.spread_radius);
             let hole_corner_radii = corner_radii.spread(-shadow.spread_radius);
             self.next_frame.scene.insert_primitive(Shadow {
                 order: 0,
                 blur_radius: shadow.blur_radius.scale(scale_factor),
-                bounds: self.cover_bounds(hole),
+                bounds: Self::shadow_shape(
+                    element_bounds,
+                    shadow.offset,
+                    -shadow.spread_radius,
+                    scale_factor,
+                ),
                 content_mask,
                 corner_radii: hole_corner_radii.scale(scale_factor),
                 color: shadow.color.opacity(opacity),
@@ -5079,6 +5087,21 @@ impl Window {
                 pad: 0,
             });
         }
+    }
+
+    /// The shape of a shadow of an element drawn at `element_bounds`, moved by
+    /// `offset` and grown by `spread`. The shape starts at the element as
+    /// drawn, as in Chromium:
+    /// <https://github.com/chromium/chromium/blob/c74bb717aefa06a5fb981d00d784a1dd35eefa65/third_party/blink/renderer/core/paint/box_painter_base.cc#L292-L312>.
+    /// The offset and the spread keep their fractions of a device pixel, so the
+    /// shader anti-aliases the edge of a ring of any width.
+    fn shadow_shape(
+        element_bounds: Bounds<ScaledPixels>,
+        offset: Point<Pixels>,
+        spread: Pixels,
+        scale_factor: f32,
+    ) -> Bounds<ScaledPixels> {
+        (element_bounds + offset.scale(scale_factor)).dilate(spread.scale(scale_factor))
     }
 
     fn largest_border_interior(quad: &Quad) -> Bounds<ScaledPixels> {
@@ -10561,6 +10584,74 @@ mod tests {
             );
         })
         .unwrap();
+    }
+
+    struct FractionalRingTestView;
+
+    impl Render for FractionalRingTestView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().child(
+                div()
+                    .absolute()
+                    .left(px(40.))
+                    .top(px(30.))
+                    .size(px(10.))
+                    .shadow(vec![
+                        crate::BoxShadow::new(px(0.), px(0.), hsla(0., 1., 0.5, 1.))
+                            .spread_radius(px(1.5)),
+                        crate::BoxShadow::new(px(0.), px(0.), hsla(0., 1., 0.5, 1.))
+                            .spread_radius(px(0.75))
+                            .inset(),
+                    ]),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn test_shadow_of_a_fractional_spread_keeps_its_fraction(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| FractionalRingTestView);
+        let device = |x: f32, y: f32, width: f32, height: f32| {
+            Bounds::new(
+                point(ScaledPixels(x), ScaledPixels(y)),
+                size(ScaledPixels(width), ScaledPixels(height)),
+            )
+        };
+        for (scale, element, ring, hole) in [
+            (
+                1.,
+                device(40., 30., 10., 10.),
+                device(38.5, 28.5, 13., 13.),
+                device(40.75, 30.75, 8.5, 8.5),
+            ),
+            (
+                1.25,
+                device(50., 37., 12., 12.),
+                device(48.125, 35.125, 15.75, 15.75),
+                device(50.9375, 37.9375, 10.125, 10.125),
+            ),
+            (
+                2.,
+                device(80., 60., 20., 20.),
+                device(77., 57., 26., 26.),
+                device(81.5, 61.5, 17., 17.),
+            ),
+        ] {
+            cx.simulate_window_scale_factor_change(window.into(), scale);
+            cx.update_window(window.into(), |_, window, cx| {
+                window.draw(cx).clear(cx);
+                let shadows = window
+                    .painted_shadows()
+                    .into_iter()
+                    .map(|shadow| (shadow.inset, shadow.bounds, shadow.element_bounds))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    shadows,
+                    [(0, ring, element), (1, hole, element)],
+                    "scale {scale}"
+                );
+            })
+            .unwrap();
+        }
     }
 
     fn test_underline_paint_at_scales(

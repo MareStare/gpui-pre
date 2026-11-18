@@ -981,8 +981,8 @@ fn vs_shadow(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) ins
     if (shadow.inset != 0u) {
         geometry = shadow.element_bounds;
     } else {
-        // Leave room for the gaussian tail outside the shadow rect.
-        let margin = 3.0 * shadow.blur_radius;
+        // Leave room for the gaussian tail and the anti-aliased edge outside the shadow rect.
+        let margin = 3.0 * shadow.blur_radius + 0.5;
         geometry = shadow.bounds;
         geometry.origin -= vec2<f32>(margin);
         geometry.size += 2.0 * vec2<f32>(margin);

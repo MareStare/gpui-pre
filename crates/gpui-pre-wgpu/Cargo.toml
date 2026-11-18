@@ -64,6 +64,11 @@ name = "sprite_tile"
 path = "tests/sprite_tile.rs"
 required-features = ["test-support"]
 
+[[test]]
+name = "shadow_edge"
+path = "tests/shadow_edge.rs"
+required-features = ["test-support"]
+
 [dependencies.anyhow]
 version = "1.0.86"
 
