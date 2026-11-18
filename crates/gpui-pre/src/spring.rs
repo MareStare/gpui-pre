@@ -1,9 +1,18 @@
 use std::{ops::RangeInclusive, time::Duration};
 
+use smallvec::{SmallVec, smallvec};
+
 use crate::{Hsla, Pixels, Rems, Rgba};
 
 const CRITICAL_DAMPING_TOLERANCE: f32 = 1e-4;
 const DEFAULT_SPRING_EPSILON: f32 = 0.001;
+
+/// The value of $\omega_0 t$ at which a critically damped spring that starts at
+/// rest has 1% of its distance left: $(1 + \omega_0 t) e^{-\omega_0 t} = 0.01$.
+const CRITICAL_SETTLE_COEFFICIENT: f32 = 6.638_352;
+
+/// The coordinates of a spring target, one spring per coordinate.
+pub type SpringCoordinates = SmallVec<[f32; 4]>;
 
 /// The physical parameters of a damped harmonic oscillator.
 ///
@@ -27,6 +36,20 @@ impl SpringConfig {
             damping,
             mass,
         }
+    }
+
+    /// Creates a critically damped spring with unit mass that comes within 1%
+    /// of its target in `duration` when it starts at rest.
+    ///
+    /// Such a spring never overshoots, and it suits a transition that has a
+    /// duration in its design.
+    pub fn critically_damped(duration: Duration) -> Self {
+        let natural_frequency = CRITICAL_SETTLE_COEFFICIENT / duration.as_secs_f32();
+        Self::new(
+            natural_frequency * natural_frequency,
+            2.0 * natural_frequency,
+            1.0,
+        )
     }
 
     /// Returns the natural angular frequency and damping ratio $(\omega_0, \zeta)$.
@@ -272,6 +295,37 @@ pub trait SpringTarget: 'static {
     fn resolve(&self, value: f32) -> Self::Output;
 }
 
+/// A value that springs can target, one spring per coordinate.
+///
+/// Each coordinate gets its own one-dimensional spring with the same
+/// configuration, so each coordinate keeps its own velocity. A position or a
+/// rectangle has one coordinate per component. Each [`SpringTarget`] is a
+/// vector with one coordinate.
+pub trait SpringVector: 'static {
+    /// The value supplied to the spring animator.
+    type Output;
+
+    /// Returns the target in the coordinate space of the springs.
+    ///
+    /// A target returns the same number of coordinates every time.
+    fn coordinates(&self) -> SpringCoordinates;
+
+    /// Projects the coordinates of the springs into the animated output.
+    fn resolve_coordinates(&self, coordinates: &[f32]) -> Self::Output;
+}
+
+impl<T: SpringTarget> SpringVector for T {
+    type Output = T::Output;
+
+    fn coordinates(&self) -> SpringCoordinates {
+        smallvec![self.target()]
+    }
+
+    fn resolve_coordinates(&self, coordinates: &[f32]) -> Self::Output {
+        self.resolve(coordinates[0])
+    }
+}
+
 impl SpringTarget for f32 {
     type Output = f32;
 
@@ -473,7 +527,7 @@ pub struct SpringAnimation<T = ()> {
     pub(crate) config: SpringConfig,
     pub(crate) target: T,
     pub(crate) epsilon: f32,
-    pub(crate) initial: Option<f32>,
+    pub(crate) initial: Option<SpringCoordinates>,
     pub(crate) playback: SpringPlayback,
 }
 
@@ -490,7 +544,7 @@ impl SpringAnimation<()> {
     }
 
     /// Sets the value or path targeted by this spring.
-    pub fn to<T: SpringTarget>(self, target: T) -> SpringAnimation<T> {
+    pub fn to<T: SpringVector>(self, target: T) -> SpringAnimation<T> {
         let SpringAnimation {
             config,
             target: (),
@@ -509,7 +563,7 @@ impl SpringAnimation<()> {
 }
 
 impl<T> SpringAnimation<T> {
-    /// Sets the settling tolerance in the target's scalar coordinate space.
+    /// Sets the settling tolerance in the coordinate space of the target.
     pub fn with_epsilon(mut self, epsilon: f32) -> Self {
         self.epsilon = epsilon;
         self
@@ -522,10 +576,10 @@ impl<T> SpringAnimation<T> {
     }
 }
 
-impl<T: SpringTarget> SpringAnimation<T> {
-    /// Sets the coordinate used when this element has no prior spring state.
+impl<T: SpringVector> SpringAnimation<T> {
+    /// Sets the coordinates used when this element has no prior spring state.
     pub fn from(mut self, initial: T) -> Self {
-        self.initial = Some(initial.target());
+        self.initial = Some(initial.coordinates());
         self
     }
 }
@@ -627,6 +681,20 @@ mod tests {
         assert_eq!(false.target(), 0.0);
         assert_eq!(true.target(), 1.0);
         assert_eq!(true.resolve(1.25), AnimationPhase(1.25));
+        assert_eq!(Pixels::from(12.0).coordinates().as_slice(), [12.0]);
+        assert_eq!(true.resolve_coordinates(&[1.25]), AnimationPhase(1.25));
+    }
+
+    #[test]
+    fn critically_damped_spring_comes_within_one_percent_in_its_duration() {
+        let duration = Duration::from_millis(120);
+        let config = SpringConfig::critically_damped(duration);
+        let (_, damping_ratio) = config.canonical();
+        assert!((damping_ratio - 1.0).abs() < EPSILON);
+
+        let rest = SpringState::default();
+        let at_end = config.step(rest, 1.0, duration.as_secs_f32()).position;
+        assert!((at_end - 0.99).abs() < EPSILON);
     }
 
     #[test]
