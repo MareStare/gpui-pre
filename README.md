@@ -66,7 +66,9 @@ gpui-pre version goes.
   validate indirect calls, DX12 starts only when no Vulkan adapter can
   draw to the window, and a resize does not wait for the GPU.
 - Backends from the environment: `WGPU_BACKEND` and the wgpu backend
-  options override the default, Vulkan and then DX12 on Windows.
+  options override the default, Vulkan and then DX12 on Windows. On
+  Windows each backend gets an instance of its own, so no instance with
+  Vulkan and DX12 drops after use.
 - Device loss recovery: the wgpu window renderer of macOS and Windows makes
   a new device after a lost one, and asks the next frame to build the scene
   again. The renderer keeps its settings, such as the text contrast and the

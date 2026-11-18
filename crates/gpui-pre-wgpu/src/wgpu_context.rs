@@ -492,20 +492,24 @@ impl WgpuContext {
         ))
     }
 
-    /// The groups of backends to try in turn. `WGPU_BACKEND` overrides them, e.g. `dx12`
-    /// or `vulkan`. On Windows, DX12 comes after Vulkan: a DX12 instance takes 200 to
-    /// 400 ms to enumerate its adapters on an Intel UHD iGPU, so it starts only when no
-    /// Vulkan adapter can draw to the window. Apple platforms have Metal only.
+    /// The groups of backends to try in turn. `WGPU_BACKEND` overrides the backends, e.g.
+    /// `dx12` or `vulkan`. Apple platforms have Metal only.
+    ///
+    /// On Windows, each backend gets an instance of its own, also the backends of
+    /// `WGPU_BACKEND`. The NVIDIA driver can crash the process when an instance with the
+    /// Vulkan and DX12 backends drops after it made a device: a driver thread that starts
+    /// late jumps through freed state. DX12 comes after Vulkan: a DX12 instance takes 200
+    /// to 400 ms to enumerate its adapters on an Intel UHD iGPU, so it starts only when no
+    /// Vulkan adapter can draw to the window.
     #[cfg(not(target_family = "wasm"))]
     pub(crate) fn backend_groups() -> Vec<wgpu::Backends> {
-        if let Some(backends) = wgpu::Backends::from_env() {
-            vec![backends]
-        } else if cfg!(windows) {
-            vec![wgpu::Backends::VULKAN, wgpu::Backends::DX12]
+        let from_env = wgpu::Backends::from_env();
+        if cfg!(windows) {
+            one_backend_each(from_env.unwrap_or(wgpu::Backends::VULKAN | wgpu::Backends::DX12))
         } else if cfg!(target_vendor = "apple") {
-            vec![wgpu::Backends::METAL]
+            vec![from_env.unwrap_or(wgpu::Backends::METAL)]
         } else {
-            vec![wgpu::Backends::VULKAN | wgpu::Backends::GL]
+            vec![from_env.unwrap_or(wgpu::Backends::VULKAN | wgpu::Backends::GL)]
         }
     }
 
@@ -912,11 +916,30 @@ fn parse_pci_id(id: &str) -> anyhow::Result<u32> {
     u32::from_str_radix(id, 16).context("parsing PCI ID as hex")
 }
 
+/// Each backend of `backends` as a group of its own: Vulkan, DX12 and GL first, then the
+/// others.
+#[cfg(not(target_family = "wasm"))]
+fn one_backend_each(backends: wgpu::Backends) -> Vec<wgpu::Backends> {
+    const PREFERRED: [wgpu::Backends; 3] = [
+        wgpu::Backends::VULKAN,
+        wgpu::Backends::DX12,
+        wgpu::Backends::GL,
+    ];
+    let mut groups: Vec<_> = backends.iter().collect();
+    groups.sort_by_key(|group| {
+        PREFERRED
+            .iter()
+            .position(|preferred| preferred == group)
+            .unwrap_or(PREFERRED.len())
+    });
+    groups
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         CompositorGpuHint, DeviceErrorState, adapter_name_matches, adapter_rank,
-        device_type_priority, parse_pci_id,
+        device_type_priority, one_backend_each, parse_pci_id,
     };
 
     /// A hybrid laptop: the integrated GPU drives the display, the discrete GPU
@@ -961,6 +984,28 @@ mod tests {
         assert_eq!(first(Some("radeon"), None, None), nvidia.device);
         assert!(adapter_name_matches(&intel.name, "intel(r) uhd"));
         assert!(!adapter_name_matches(&intel.name, "radeon"));
+    }
+
+    #[test]
+    fn each_backend_gets_an_instance_of_its_own() {
+        use wgpu::Backends;
+        assert_eq!(
+            one_backend_each(Backends::DX12 | Backends::VULKAN),
+            [Backends::VULKAN, Backends::DX12]
+        );
+        assert_eq!(
+            one_backend_each(Backends::all()),
+            [
+                Backends::VULKAN,
+                Backends::DX12,
+                Backends::GL,
+                Backends::NOOP,
+                Backends::METAL,
+                Backends::BROWSER_WEBGPU,
+            ]
+        );
+        assert_eq!(one_backend_each(Backends::DX12), [Backends::DX12]);
+        assert!(one_backend_each(Backends::empty()).is_empty());
     }
 
     #[test]
