@@ -74,9 +74,9 @@ impl DeviceErrorState {
     }
 
     /// Returns the latest error once per observer, without consuming shared state.
-    /// Start each observer at zero, including after switching devices, so errors
-    /// raised during construction are observed. Multiple errors between observations
-    /// coalesce into the latest error; this is not an error queue.
+    /// An observer that starts at zero sees the latest error of the device. Multiple
+    /// errors between observations coalesce into the latest error; this is not an
+    /// error queue.
     pub fn observe_error(&self, generation: &mut u64) -> Option<String> {
         let last_error = self.last_error.lock();
         if *generation == last_error.0 {
@@ -703,7 +703,7 @@ impl WgpuContext {
             Self::create_device(adapter).await?;
         // Test with the configuration the renderer will use, so that it doesn't need to
         // configure the surface a second time.
-        let (surface_config, _, _) = WgpuRenderer::surface_configuration(
+        let (surface_config, _) = WgpuRenderer::surface_configuration(
             surface,
             adapter,
             &device,

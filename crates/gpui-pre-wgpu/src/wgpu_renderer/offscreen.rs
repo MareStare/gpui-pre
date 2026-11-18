@@ -1,6 +1,6 @@
 //! Renders to a texture in place of a surface and reads the pixels back on any thread.
 
-use super::WgpuRendererCore;
+use super::{TextRendering, WgpuRendererCore};
 use crate::DeviceErrorState;
 use anyhow::{Context as _, Result};
 use gpui::{DevicePixels, Scene, Size};
@@ -60,11 +60,13 @@ impl OffscreenTarget {
         &self,
         core: &mut WgpuRendererCore,
         scene: &Scene,
+        text: &TextRendering,
         premultiplied_alpha: bool,
         clear_color: wgpu::Color,
     ) -> Result<()> {
         core.render_frame(
             scene,
+            text,
             &self.view,
             self.size(),
             premultiplied_alpha,
@@ -82,12 +84,14 @@ impl OffscreenTarget {
         &self,
         core: &mut WgpuRendererCore,
         scene: &Scene,
+        text: &TextRendering,
         premultiplied_alpha: bool,
         clear_color: wgpu::Color,
     ) -> Result<gpui::PendingImage> {
         let readback = Readback::new(core, self)?;
         core.render_frame(
             scene,
+            text,
             &self.view,
             self.size(),
             premultiplied_alpha,
