@@ -746,8 +746,9 @@ type FrameCallback = Box<dyn FnOnce(&mut Window, &mut App)>;
 pub(crate) type AnyMouseListener =
     Box<dyn FnMut(&dyn Any, DispatchPhase, &mut Window, &mut App) + 'static>;
 
+/// A cursor to show over a hitbox, or over the whole window with no hitbox.
 #[derive(Clone)]
-pub(crate) struct CursorStyleRequest {
+pub(crate) struct HitboxCursorRequest {
     pub(crate) hitbox_id: Option<HitboxId>,
     pub(crate) cursor: CursorRequest,
 }
@@ -1065,7 +1066,7 @@ pub(crate) struct Frame {
     pub(crate) deferred_draws: Vec<DeferredDraw>,
     pub(crate) input_handlers: Vec<Option<PlatformInputHandler>>,
     pub(crate) tooltip_requests: Vec<Option<TooltipRequest>>,
-    pub(crate) cursor_styles: Vec<CursorStyleRequest>,
+    pub(crate) cursors: Vec<HitboxCursorRequest>,
     /// The frame draws a one-shot animation or a spring before its end.
     pub(crate) animating: bool,
     #[cfg(any(test, feature = "headless"))]
@@ -1126,7 +1127,7 @@ pub(crate) struct PaintIndex {
     named_elements_index: usize,
     mouse_listeners_index: usize,
     input_handlers_index: usize,
-    cursor_styles_index: usize,
+    cursors_index: usize,
     window_control_hitboxes_index: usize,
     accessed_element_states_index: usize,
     tab_handle_index: usize,
@@ -1174,7 +1175,7 @@ impl Frame {
             deferred_draws: Vec::new(),
             input_handlers: Vec::new(),
             tooltip_requests: Vec::new(),
-            cursor_styles: Vec::new(),
+            cursors: Vec::new(),
             animating: false,
 
             #[cfg(any(test, feature = "headless"))]
@@ -1197,7 +1198,7 @@ impl Frame {
         self.scene.clear();
         self.input_handlers.clear();
         self.tooltip_requests.clear();
-        self.cursor_styles.clear();
+        self.cursors.clear();
         self.hitboxes.clear();
         self.window_control_hitboxes.clear();
         self.deferred_draws.clear();
@@ -1216,7 +1217,7 @@ impl Frame {
     }
 
     pub(crate) fn cursor(&self, window: &Window) -> Option<&CursorRequest> {
-        self.cursor_styles
+        self.cursors
             .iter()
             .rev()
             .fold_while(None, |cursor, request| match request.hitbox_id {
@@ -4420,7 +4421,7 @@ impl Window {
             named_elements_index: self.next_frame.named_elements.len(),
             mouse_listeners_index: self.next_frame.mouse_listeners.len(),
             input_handlers_index: self.next_frame.input_handlers.len(),
-            cursor_styles_index: self.next_frame.cursor_styles.len(),
+            cursors_index: self.next_frame.cursors.len(),
             window_control_hitboxes_index: self.next_frame.window_control_hitboxes.len(),
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
             tab_handle_index: self.next_frame.tab_stops.paint_index(),
@@ -4435,9 +4436,8 @@ impl Window {
             &self.rendered_frame.named_elements
                 [range.start.named_elements_index..range.end.named_elements_index],
         );
-        self.next_frame.cursor_styles.extend(
-            self.rendered_frame.cursor_styles
-                [range.start.cursor_styles_index..range.end.cursor_styles_index]
+        self.next_frame.cursors.extend(
+            self.rendered_frame.cursors[range.start.cursors_index..range.end.cursors_index]
                 .iter()
                 .cloned(),
         );
@@ -4500,7 +4500,7 @@ impl Window {
     /// during the paint phase of element drawing.
     pub fn set_cursor_style(&mut self, style: CursorStyle, hitbox: &Hitbox) {
         self.invalidator.debug_assert_paint();
-        self.next_frame.cursor_styles.push(CursorStyleRequest {
+        self.next_frame.cursors.push(HitboxCursorRequest {
             hitbox_id: Some(hitbox.id),
             cursor: style.into(),
         });
@@ -4516,7 +4516,7 @@ impl Window {
         hitbox: &Hitbox,
     ) {
         self.invalidator.debug_assert_paint();
-        self.next_frame.cursor_styles.push(CursorStyleRequest {
+        self.next_frame.cursors.push(HitboxCursorRequest {
             hitbox_id: Some(hitbox.id),
             cursor: CursorRequest {
                 style: fallback,
@@ -4531,7 +4531,7 @@ impl Window {
     /// phase of element drawing.
     pub fn set_window_cursor_style(&mut self, style: CursorStyle) {
         self.invalidator.debug_assert_paint();
-        self.next_frame.cursor_styles.push(CursorStyleRequest {
+        self.next_frame.cursors.push(HitboxCursorRequest {
             hitbox_id: None,
             cursor: style.into(),
         })
