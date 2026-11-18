@@ -191,11 +191,15 @@ impl LineLayout {
         (left, right)
     }
 
+    /// Wraps the line at the byte offsets of `break_points`, or at the Unicode line break
+    /// opportunities when it is `None`. A part with no break that is wider than the line
+    /// wraps at any glyph.
     fn compute_wrap_boundaries(
         &self,
         text: &str,
         wrap_width: Pixels,
         max_lines: Option<usize>,
+        break_points: Option<&[usize]>,
         scratch: &mut WrapScratch,
     ) -> SmallVec<[WrapBoundary; 1]> {
         let mut boundaries = SmallVec::new();
@@ -220,8 +224,17 @@ impl LineLayout {
                 .flat_map(|run| run.glyphs.iter().map(|glyph| glyph.index)),
         );
         break_indices.clear();
-        break_indices
-            .extend(LineWrapper::break_indices(text).filter(|index| glyph_indices.contains(index)));
+        match break_points {
+            Some(points) => break_indices.extend(
+                points
+                    .iter()
+                    .copied()
+                    .filter(|index| glyph_indices.contains(index)),
+            ),
+            None => break_indices.extend(
+                LineWrapper::break_indices(text).filter(|index| glyph_indices.contains(index)),
+            ),
+        }
         let mut glyphs = self
             .runs
             .iter()
@@ -609,6 +622,7 @@ impl LineLayoutCache {
         runs: &[FontRun],
         wrap_width: Option<Pixels>,
         max_lines: Option<usize>,
+        break_points: Option<&[usize]>,
     ) -> Arc<WrappedLineLayout>
     where
         Text: AsRef<str>,
@@ -621,6 +635,7 @@ impl LineLayoutCache {
             runs,
             wrap_width,
             force_width: None,
+            break_points,
         } as &dyn AsCacheKeyRef;
 
         let state = self.state.borrow();
@@ -647,6 +662,7 @@ impl LineLayoutCache {
                     text.as_ref(),
                     wrap_width,
                     max_lines,
+                    break_points,
                     &mut self.wrap_scratch.borrow_mut(),
                 )
             } else {
@@ -663,6 +679,7 @@ impl LineLayoutCache {
                 runs: SmallVec::from(runs),
                 wrap_width,
                 force_width: None,
+                break_points: break_points.map(Box::from),
             });
 
             let mut state = self.state.borrow_mut();
@@ -694,6 +711,7 @@ impl LineLayoutCache {
             runs,
             wrap_width: None,
             force_width,
+            break_points: None,
         } as &dyn AsCacheKeyRef;
 
         let state = self.state.borrow();
@@ -727,6 +745,7 @@ impl LineLayoutCache {
                 runs: SmallVec::from(runs),
                 wrap_width: None,
                 force_width,
+                break_points: None,
             });
             let layout = Arc::new(layout);
             current_frame.lines.insert(key.clone(), layout.clone());
@@ -802,6 +821,7 @@ struct CacheKey {
     runs: SmallVec<[FontRun; 1]>,
     wrap_width: Option<Pixels>,
     force_width: Option<Pixels>,
+    break_points: Option<Box<[usize]>>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
@@ -811,6 +831,7 @@ struct CacheKeyRef<'a> {
     runs: &'a [FontRun],
     wrap_width: Option<Pixels>,
     force_width: Option<Pixels>,
+    break_points: Option<&'a [usize]>,
 }
 
 impl PartialEq for dyn AsCacheKeyRef + '_ {
@@ -835,6 +856,7 @@ impl AsCacheKeyRef for CacheKey {
             runs: self.runs.as_slice(),
             wrap_width: self.wrap_width,
             force_width: self.force_width,
+            break_points: self.break_points.as_deref(),
         }
     }
 }
@@ -866,7 +888,9 @@ impl AsCacheKeyRef for CacheKeyRef<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{GlyphId, NoopTextSystem, TextRun, TextSystem, WindowTextSystem, font};
+    use crate::{
+        GlyphId, NoopTextSystem, TextRun, TextSystem, WindowTextSystem, WrappedLine, font,
+    };
 
     #[test]
     fn shape_line_shares_its_text_with_the_layout_cache() {
@@ -884,6 +908,42 @@ mod tests {
         let state = text_system.line_layout_cache.state.borrow();
         let (key, _) = state.current_frame.lines.iter().next().unwrap();
         assert_eq!(key.text.as_ptr(), text.as_ptr());
+    }
+
+    #[test]
+    fn text_wraps_only_at_its_break_points() {
+        let text_system =
+            WindowTextSystem::new(Arc::new(TextSystem::new(Arc::new(NoopTextSystem::new()))));
+        let text = SharedString::from("ab/cd efgh\nxy/zw\np/qrst");
+        let runs = [TextRun {
+            len: text.len(),
+            font: font(".ZedMono"),
+            ..Default::default()
+        }];
+        // Each glyph is 6 px wide, so a row holds four glyphs.
+        let lines = text_system
+            .shape_text_with_break_points(
+                text,
+                px(10.),
+                &runs,
+                Some(px(24.)),
+                None,
+                Some(&[3, 14, 19]),
+            )
+            .unwrap();
+        let wraps = |line: &WrappedLine| -> Vec<usize> {
+            line.layout
+                .wrap_boundaries()
+                .iter()
+                .map(|boundary| boundary.glyph_ix)
+                .collect()
+        };
+        // The space is no break point, so `cd efgh` wraps at a glyph.
+        assert_eq!(wraps(&lines[0]), [3, 7]);
+        // A break point of the second line counts from the start of the line.
+        assert_eq!(wraps(&lines[1]), [3]);
+        // A line after a shorter line counts from its own start too.
+        assert_eq!(wraps(&lines[2]), [2]);
     }
 
     fn glyph_at(x: f32, index: usize) -> ShapedGlyph {
@@ -929,7 +989,7 @@ mod tests {
         layout.len = "你好".len();
         assert_eq!(
             layout
-                .compute_wrap_boundaries("你好", px(15.), None, &mut WrapScratch::default())
+                .compute_wrap_boundaries("你好", px(15.), None, None, &mut WrapScratch::default())
                 .as_slice(),
             &[WrapBoundary {
                 run_ix: 0,
@@ -942,7 +1002,7 @@ mod tests {
         layout.len = 1;
         assert!(
             layout
-                .compute_wrap_boundaries("a", px(10.), None, &mut WrapScratch::default())
+                .compute_wrap_boundaries("a", px(10.), None, None, &mut WrapScratch::default())
                 .is_empty()
         );
     }
@@ -963,7 +1023,13 @@ mod tests {
             layout.width = px(indices.len() as f32 * 10.);
             layout.len = text.len();
             assert_eq!(
-                layout.compute_wrap_boundaries(text, px(40.), None, &mut WrapScratch::default()),
+                layout.compute_wrap_boundaries(
+                    text,
+                    px(40.),
+                    None,
+                    None,
+                    &mut WrapScratch::default()
+                ),
                 expected_boundaries
                     .into_iter()
                     .map(|glyph_ix| WrapBoundary {
@@ -989,7 +1055,7 @@ mod tests {
         layout.len = text.len();
         assert_eq!(
             layout
-                .compute_wrap_boundaries(text, px(60.), None, &mut WrapScratch::default())
+                .compute_wrap_boundaries(text, px(60.), None, None, &mut WrapScratch::default())
                 .as_slice(),
             &[WrapBoundary {
                 run_ix: 0,
@@ -1109,7 +1175,7 @@ mod tests {
         let mut starts = vec![0];
         starts.extend(
             layout
-                .compute_wrap_boundaries(text, wrap_width, None, &mut WrapScratch::default())
+                .compute_wrap_boundaries(text, wrap_width, None, None, &mut WrapScratch::default())
                 .iter()
                 .map(|boundary| glyphs[boundary.glyph_ix].index),
         );
@@ -1146,7 +1212,7 @@ mod tests {
                 let wrap_width = widest_glyph + px(extra);
                 let wrap = |max_lines| {
                     let mut scratch = WrapScratch::default();
-                    layout.compute_wrap_boundaries(text, wrap_width, max_lines, &mut scratch)
+                    layout.compute_wrap_boundaries(text, wrap_width, max_lines, None, &mut scratch)
                 };
                 let all = wrap(None);
                 for max_lines in 1..=3 {

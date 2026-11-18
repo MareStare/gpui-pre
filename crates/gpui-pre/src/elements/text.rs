@@ -271,7 +271,7 @@ impl Element for &'static str {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let state = TextLayout::default();
-        let layout_id = state.layout(SharedString::from(*self), None, window, cx);
+        let layout_id = state.layout(SharedString::from(*self), None, None, window, cx);
         (layout_id, state)
     }
 
@@ -345,7 +345,7 @@ impl Element for SharedString {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let state = TextLayout::default();
-        let layout_id = state.layout(self.clone(), None, window, cx);
+        let layout_id = state.layout(self.clone(), None, None, window, cx);
         (layout_id, state)
     }
 
@@ -393,6 +393,7 @@ pub struct StyledText {
     runs: Option<Vec<TextRun>>,
     delayed_highlights: Option<Vec<(Range<usize>, HighlightStyle)>>,
     delayed_font_family_overrides: Option<Vec<(Range<usize>, SharedString)>>,
+    break_points: Option<Arc<[usize]>>,
     layout: TextLayout,
 }
 
@@ -404,6 +405,7 @@ impl StyledText {
             runs: None,
             delayed_highlights: None,
             delayed_font_family_overrides: None,
+            break_points: None,
             layout: TextLayout::default(),
         }
     }
@@ -537,6 +539,23 @@ impl StyledText {
         self.runs = Some(runs);
         self
     }
+
+    /// Wraps the text only at the given byte offsets, in place of the Unicode line break
+    /// rules. The offsets are sorted and lie on char boundaries. A part of the text with no
+    /// break point that is wider than the line wraps at any character. A cut of the text by
+    /// its text overflow drops the break points.
+    pub fn with_break_points(mut self, break_points: impl Into<Arc<[usize]>>) -> Self {
+        let break_points = break_points.into();
+        debug_assert!(break_points.is_sorted(), "unsorted break points");
+        debug_assert!(
+            break_points
+                .iter()
+                .all(|point| self.text.is_char_boundary(*point)),
+            "a break point is not on a char boundary"
+        );
+        self.break_points = Some(break_points);
+        self
+    }
 }
 
 impl Element for StyledText {
@@ -571,7 +590,13 @@ impl Element for StyledText {
             Self::apply_font_family_overrides(runs, overrides);
         }
 
-        let layout_id = self.layout.layout(self.text.clone(), runs, window, cx);
+        let layout_id = self.layout.layout(
+            self.text.clone(),
+            runs,
+            self.break_points.clone(),
+            window,
+            cx,
+        );
         (layout_id, ())
     }
 
@@ -635,6 +660,7 @@ impl TextLayout {
         &self,
         text: SharedString,
         runs: Option<Vec<TextRun>>,
+        break_points: Option<Arc<[usize]>>,
         window: &mut Window,
         _: &mut App,
     ) -> LayoutId {
@@ -700,7 +726,7 @@ impl TextLayout {
                     return size;
                 }
 
-                let (text, runs) = if let Some(truncate_width) = truncate_width {
+                let (shown, runs) = if let Some(truncate_width) = truncate_width {
                     // Taking a wrapper from the pool locks it twice and moves its
                     // character width cache around, so only do it when truncating.
                     let mut line_wrapper =
@@ -743,16 +769,20 @@ impl TextLayout {
                 } else {
                     (text.clone(), Cow::Borrowed(&*runs))
                 };
+                // The break points index the text before a cut.
+                let break_points = break_points.as_deref().filter(|_| shown == text);
+                let text = shown;
                 let len = text.len();
 
                 let Some(lines) = window
                     .text_system()
-                    .shape_text(
+                    .shape_text_with_break_points(
                         text,
                         font_size,
                         &runs,
                         wrap_width,            // Wrap if we know the width.
                         text_style.line_clamp, // Limit the number of lines if line_clamp is set.
+                        break_points,
                     )
                     .log_err()
                 else {

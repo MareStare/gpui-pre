@@ -541,8 +541,8 @@ impl LineWrapper {
         (text, Cow::Borrowed(runs))
     }
 
-    /// The byte offsets in `text` at which a line break is allowed.
-    pub(crate) fn break_indices(text: &str) -> impl Iterator<Item = usize> {
+    /// The byte offsets in `text` at which the Unicode line break rules allow a line break.
+    pub fn break_indices(text: &str) -> impl Iterator<Item = usize> {
         icu_segmenter::LineSegmenter::new_for_non_complex_scripts(Default::default())
             .segment_str(text)
     }
