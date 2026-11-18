@@ -610,7 +610,7 @@ impl SpringAnimation<()> {
 impl<T> SpringAnimation<T> {
     /// Sets the settling tolerance in the coordinate space of the target.
     ///
-    /// The tolerances of a target, from [`SpringVector::tolerances`], override it.
+    /// The tolerances that a target gives for its coordinates override it.
     pub fn with_epsilon(mut self, epsilon: f32) -> Self {
         self.epsilon = epsilon;
         self

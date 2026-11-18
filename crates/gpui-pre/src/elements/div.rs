@@ -6255,11 +6255,9 @@ mod tests {
             .unwrap();
 
         let mut bounds = |selector: &'static str| {
-            cx.update_window(window.into(), |_, window, _| {
-                window.debug_bounds(selector)
-            })
-            .unwrap()
-            .unwrap_or_else(|| panic!("{selector} was not rendered"))
+            cx.update_window(window.into(), |_, window, _| window.debug_bounds(selector))
+                .unwrap()
+                .unwrap_or_else(|| panic!("{selector} was not rendered"))
         };
 
         assert_eq!(bounds("cell-0").origin.x, px(0.));

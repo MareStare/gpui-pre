@@ -274,9 +274,7 @@ mod tests {
         cx.run_until_parked();
 
         let menu_bounds = window
-            .update(cx, |_, window, _| {
-                window.debug_bounds("NESTED_MENU")
-            })
+            .update(cx, |_, window, _| window.debug_bounds("NESTED_MENU"))
             .unwrap()
             .expect("NESTED_MENU debug bounds not found");
         assert_eq!(menu_bounds.size, size(px(50.), px(50.)));

@@ -81,10 +81,7 @@ impl FontMatch {
                 None => axis_values.push(*requested),
             }
         }
-        let family = HSTRING::from(get_name(
-            unsafe { face.GetFamilyNames()? },
-            locale,
-        )?);
+        let family = HSTRING::from(get_name(unsafe { face.GetFamilyNames()? }, locale)?);
         let resource = unsafe { face.cast::<IDWriteFontFace5>()?.GetFontResource()? };
         let ranges = read_array::<DWRITE_FONT_AXIS_RANGE>(
             unsafe { resource.GetFontAxisCount() },
@@ -403,11 +400,7 @@ impl Candidate {
         })
     }
 
-    fn into_match(
-        self,
-        requested: &FontAxisValues,
-        locale: &HSTRING,
-    ) -> Result<FontMatch> {
+    fn into_match(self, requested: &FontAxisValues, locale: &HSTRING) -> Result<FontMatch> {
         let face = unsafe {
             self.reference
                 .CreateFontFaceWithSimulations(self.simulations)?
