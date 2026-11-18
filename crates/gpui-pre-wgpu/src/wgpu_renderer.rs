@@ -2267,9 +2267,13 @@ impl WgpuRenderer {
     pub fn replace_surface<W: HasWindowHandle>(
         &mut self,
         window: &W,
-        config: WgpuSurfaceConfig,
+        mut config: WgpuSurfaceConfig,
         instance: &wgpu::Instance,
     ) -> anyhow::Result<()> {
+        // The surface keeps its present mode when the config asks for none.
+        config.preferred_present_mode = config
+            .preferred_present_mode
+            .or(self.config.preferred_present_mode);
         let window_handle = window
             .window_handle()
             .map_err(|e| anyhow::anyhow!("Failed to get window handle: {e}"))?;
@@ -2406,6 +2410,7 @@ impl WgpuRenderer {
             &self.atlas,
         )?;
         self.state = RendererState::Ready { surface, gpu };
+        self.last_frame_error = None;
 
         log::info!("GPU recovery complete");
         Ok(())
