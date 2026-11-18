@@ -227,6 +227,9 @@ gpui-pre version goes.
 - Debug bounds of any name: `Window::debug_bounds` in a headless app and
   `VisualTestContext::debug_bounds` take a name of any lifetime. The name is a
   debug selector, or the id of an element that takes presses.
+- Shadow spread radius: the spread of a box shadow grows its corner radii
+  as CSS does, so a ring around a round element stays round. An inset
+  shadow and an outline shape their corners by the same rule.
 
 ## License
 

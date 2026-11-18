@@ -5000,7 +5000,9 @@ impl Window {
                 blur_radius: shadow.blur_radius.scale(scale_factor),
                 bounds: self.cover_bounds(shadow_bounds),
                 content_mask,
-                corner_radii: corner_radii.scale(scale_factor),
+                corner_radii: corner_radii
+                    .spread(shadow.spread_radius)
+                    .scale(scale_factor),
                 color: shadow.color.opacity(opacity),
                 element_bounds,
                 element_corner_radii,
@@ -5031,15 +5033,7 @@ impl Window {
                 continue;
             }
             let hole = (bounds + shadow.offset).dilate(-shadow.spread_radius);
-            // Clamp at zero so a large spread can't produce negative radii, which would
-            // break the SDF in the shader.
-            let zero = Pixels::ZERO;
-            let hole_corner_radii = Corners {
-                top_left: (corner_radii.top_left - shadow.spread_radius).max(zero),
-                top_right: (corner_radii.top_right - shadow.spread_radius).max(zero),
-                bottom_right: (corner_radii.bottom_right - shadow.spread_radius).max(zero),
-                bottom_left: (corner_radii.bottom_left - shadow.spread_radius).max(zero),
-            };
+            let hole_corner_radii = corner_radii.spread(-shadow.spread_radius);
             self.next_frame.scene.insert_primitive(Shadow {
                 order: 0,
                 blur_radius: shadow.blur_radius.scale(scale_factor),
@@ -10477,6 +10471,64 @@ mod tests {
             )
             .size_full()
         }
+    }
+
+    struct ShadowTestView;
+
+    impl Render for ShadowTestView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().child(
+                div()
+                    .absolute()
+                    .left(px(40.))
+                    .top(px(30.))
+                    .size(px(10.))
+                    .rounded(px(5.))
+                    .shadow(vec![
+                        crate::BoxShadow::new(px(0.), px(0.), hsla(0., 1., 0.5, 1.))
+                            .spread_radius(px(2.)),
+                        crate::BoxShadow::new(px(0.), px(0.), hsla(0., 1., 0.5, 1.))
+                            .spread_radius(px(-1.))
+                            .inset(),
+                    ]),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn test_spread_shadow_keeps_a_round_element_round(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| ShadowTestView);
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+            let scale = window.scale_factor();
+            let shadows = window
+                .painted_shadows()
+                .into_iter()
+                .map(|shadow| {
+                    (
+                        shadow.inset,
+                        shadow.bounds.map(|value| px(value.0 / scale)),
+                        shadow.corner_radii.map(|value| px(value.0 / scale)),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                shadows,
+                [
+                    (
+                        0,
+                        Bounds::new(point(px(38.), px(28.)), size(px(14.), px(14.))),
+                        crate::Corners::all(px(7.)),
+                    ),
+                    (
+                        1,
+                        Bounds::new(point(px(39.), px(29.)), size(px(12.), px(12.))),
+                        crate::Corners::all(px(6.)),
+                    ),
+                ]
+            );
+        })
+        .unwrap();
     }
 
     fn test_underline_paint_at_scales(
