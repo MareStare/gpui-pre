@@ -24,15 +24,6 @@ struct WeightAxis {
     default: f32,
 }
 
-impl WeightAxis {
-    /// The weight of the axis nearest to `weight`, in whole units.
-    fn clamp(&self, weight: f32) -> u16 {
-        // `f32::clamp` panics on a malformed axis with a minimum above its
-        // maximum.
-        weight.max(self.min).min(self.max).round() as u16
-    }
-}
-
 /// The weight axis of the font, or `None` for a font with no weight axis.
 fn weight_axis(font: &CTFont) -> Option<WeightAxis> {
     // SAFETY: Core Text gives an array of variation axis dictionaries, with
@@ -88,7 +79,7 @@ pub(super) fn drawn_weight(font: &CTFont) -> Option<u16> {
 /// draws the weight of its axis nearest to the request.
 fn copy_weight(font: &CTFont, requested: FontWeight) -> Option<u16> {
     let axis = weight_axis(font)?;
-    let weight = axis.clamp(requested.0);
+    let weight = requested.nearest_on_axis(axis.min, axis.max);
     (own_weight(font, &axis) != weight).then_some(weight)
 }
 
@@ -101,7 +92,7 @@ fn match_properties(font: &FontKitFont, requested: FontWeight) -> Properties {
     if let Some(axis) = weight_axis(&native_font) {
         let weight = match weight_variation(&native_font) {
             Some(_) => own_weight(&native_font, &axis),
-            None => axis.clamp(requested.0),
+            None => requested.nearest_on_axis(axis.min, axis.max),
         };
         properties.weight = FontkitWeight(f32::from(weight));
     }

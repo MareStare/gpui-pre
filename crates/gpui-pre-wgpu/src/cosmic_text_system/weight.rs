@@ -29,12 +29,9 @@ fn weight_axis(font: FontRef<'_>) -> Option<RangeInclusive<f32>> {
 /// request clamped to `axis`. A static face draws its own weight `own`.
 fn drawn_weight(axis: Option<&RangeInclusive<f32>>, own: Weight, requested: Weight) -> Weight {
     match axis {
-        Some(axis) => {
-            // `f32::clamp` panics on a malformed axis with a minimum above
-            // its maximum.
-            let weight = f32::from(requested.0).max(*axis.start()).min(*axis.end());
-            Weight(weight.round() as u16)
-        }
+        Some(axis) => Weight(
+            gpui::FontWeight(f32::from(requested.0)).nearest_on_axis(*axis.start(), *axis.end()),
+        ),
         None => own,
     }
 }

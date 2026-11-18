@@ -1061,6 +1061,13 @@ impl FontWeight {
         Self::EXTRA_BOLD,
         Self::BLACK,
     ];
+
+    /// The weight of a weight axis from `min` to `max` nearest to this weight, in whole
+    /// units. A malformed axis with `min` above `max` gives `max`.
+    pub fn nearest_on_axis(self, min: f32, max: f32) -> u16 {
+        // `f32::clamp` panics when `min` is above `max`.
+        self.0.max(min).min(max).round() as u16
+    }
 }
 
 impl schemars::JsonSchema for FontWeight {
