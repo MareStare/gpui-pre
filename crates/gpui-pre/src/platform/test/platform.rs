@@ -857,8 +857,8 @@ impl Platform for TestPlatform {
         unimplemented!()
     }
 
-    fn set_cursor_style(&self, style: crate::CursorStyle) {
-        *self.active_cursor.lock() = style;
+    fn set_cursor(&self, cursor: crate::CursorRequest) {
+        *self.active_cursor.lock() = cursor.style;
     }
 
     fn hide_cursor_until_mouse_moves(&self) {}

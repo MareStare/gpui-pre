@@ -37,13 +37,13 @@ use crate::linux::{
 };
 use gpui::{
     Action, ActivityGuard, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorRequest,
-    CursorStyle, ForegroundExecutor, GraphicalEnvironment, Keymap, Menu, MenuItem, OwnedMenu,
-    PathPromptOptions, Platform, PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper,
-    PlatformTextSystem, PlatformWindow, PowerMode, Result, RunnableVariant, Task, ThermalState,
-    WindowAppearance, WindowButtonLayout, WindowParams, WindowingModes, WindowingRequest,
+    ForegroundExecutor, GraphicalEnvironment, Keymap, Menu, MenuItem, OwnedMenu, PathPromptOptions,
+    Platform, PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
+    PlatformWindow, PowerMode, Result, RunnableVariant, Task, ThermalState, WindowAppearance,
+    WindowButtonLayout, WindowParams, WindowingModes, WindowingRequest,
 };
 #[cfg(any(feature = "wayland", feature = "x11"))]
-use gpui::{Pixels, Point, px};
+use gpui::{CursorStyle, Pixels, Point, px};
 
 #[cfg(any(feature = "wayland", feature = "x11"))]
 pub(crate) const SCROLL_LINES: f32 = 3.0;
@@ -1061,10 +1061,6 @@ impl Platform for LinuxPlatform {
         Err(anyhow::Error::msg(
             "Platform<LinuxPlatform>::path_for_auxiliary_executable is not implemented yet",
         ))
-    }
-
-    fn set_cursor_style(&self, style: CursorStyle) {
-        self.set_cursor(style.into())
     }
 
     fn set_cursor(&self, cursor: CursorRequest) {

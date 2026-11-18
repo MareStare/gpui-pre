@@ -11,11 +11,11 @@ use dispatch2::DispatchQueue;
 use futures::channel::oneshot;
 use gpui::{
     Action, ActivationPolicy, ActivityGuard, AnyWindowHandle, BackgroundExecutor, ClipboardItem,
-    CursorRequest, CursorStyle, ForegroundExecutor, GraphicalEnvironment, KeyContext, Keymap, Menu,
-    MenuItem, OsMenu, OwnedMenu, PathPromptOptions, Platform, PlatformDisplay,
-    PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, PowerMode,
-    Result, SystemMenuType, Task, ThermalState, WindowAppearance, WindowKind, WindowParams,
-    WindowingRequest, popup::PopupNotSupportedError,
+    CursorRequest, ForegroundExecutor, GraphicalEnvironment, KeyContext, Keymap, Menu, MenuItem,
+    OsMenu, OwnedMenu, PathPromptOptions, Platform, PlatformDisplay, PlatformKeyboardLayout,
+    PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, PowerMode, Result, SystemMenuType,
+    Task, ThermalState, WindowAppearance, WindowKind, WindowParams, WindowingRequest,
+    popup::PopupNotSupportedError,
 };
 use gpui_apple::{
     keychain,
@@ -1211,12 +1211,8 @@ impl Platform for MacPlatform {
         }
     }
 
-    /// Match cursor style to one of the styles available
-    /// in macOS's [NSCursor](https://developer.apple.com/documentation/appkit/nscursor).
-    fn set_cursor_style(&self, style: CursorStyle) {
-        self.set_cursor(style.into());
-    }
-
+    /// Shows the image of the cursor in the active window, or the
+    /// [NSCursor](https://developer.apple.com/documentation/appkit/nscursor) of its style.
     fn set_cursor(&self, cursor: CursorRequest) {
         unsafe {
             set_active_window_cursor(cursor);

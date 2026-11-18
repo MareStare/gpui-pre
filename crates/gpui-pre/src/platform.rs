@@ -581,12 +581,8 @@ pub trait Platform: 'static {
     fn app_path(&self) -> Result<PathBuf>;
     fn path_for_auxiliary_executable(&self, name: &str) -> Result<PathBuf>;
 
-    fn set_cursor_style(&self, style: CursorStyle);
-
     /// Shows `cursor`. A platform with no image cursors shows its style.
-    fn set_cursor(&self, cursor: CursorRequest) {
-        self.set_cursor_style(cursor.style);
-    }
+    fn set_cursor(&self, cursor: CursorRequest);
 
     /// Hides the mouse cursor until the user moves the mouse over one of
     /// this application's windows.

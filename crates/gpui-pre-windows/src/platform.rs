@@ -1000,10 +1000,6 @@ impl Platform for WindowsPlatform {
         anyhow::bail!("not yet implemented");
     }
 
-    fn set_cursor_style(&self, style: CursorStyle) {
-        self.set_cursor(style.into());
-    }
-
     fn set_cursor(&self, cursor: CursorRequest) {
         let CursorRequest { style, image } = cursor;
         let image_cursor = image.as_ref().and_then(image_cursor::cursor);
