@@ -4,7 +4,7 @@
 //! The protocols: <https://wayland.app/protocols/wayland#wl_shm> and
 //! <https://wayland.app/protocols/viewporter>.
 
-use super::{cursor::Cursor, to_shape};
+use super::{cursor::CursorTheme, to_shape};
 use crate::linux::wayland::client::WaylandClientStatePtr;
 use crate::linux::{Globals, cursor_style_to_icon_names};
 use anyhow::{Context as _, Result};
@@ -14,10 +14,28 @@ use std::fs::File;
 use std::io::Write as _;
 use std::os::fd::{AsFd as _, FromRawFd as _};
 use std::sync::Arc;
-use wayland_client::QueueHandle;
-use wayland_client::protocol::{wl_buffer::WlBuffer, wl_shm, wl_surface::WlSurface};
+use wayland_client::protocol::{
+    wl_buffer::WlBuffer, wl_pointer::WlPointer, wl_shm, wl_surface::WlSurface,
+};
+use wayland_client::{Connection, QueueHandle};
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::WpCursorShapeDeviceV1;
+use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_tool_v2::ZwpTabletToolV2;
 use wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
+
+/// The buffers of the cursors that the pointer and the tablet tools show.
+pub(crate) struct CursorBuffers {
+    pub images: ImageCursors,
+    pub theme: CursorTheme,
+}
+
+impl CursorBuffers {
+    pub fn new(connection: &Connection, globals: &Globals, theme_size: u32) -> Self {
+        Self {
+            images: ImageCursors::new(globals),
+            theme: CursorTheme::new(connection, globals, theme_size),
+        }
+    }
+}
 
 /// The shm buffers of the images, by image.
 pub(crate) struct ImageCursors {
@@ -38,7 +56,7 @@ impl Drop for CursorBuffer {
 }
 
 impl ImageCursors {
-    pub fn new(globals: &Globals) -> Self {
+    fn new(globals: &Globals) -> Self {
         Self {
             shm: globals.shm.clone(),
             qh: globals.qh.clone(),
@@ -78,31 +96,28 @@ impl CursorSurface {
         Self { surface, viewport }
     }
 
-    /// Shows `cursor` on a pointer device. `set_surface` gives the device
-    /// this surface and the hotspot. Without an image, or when the image
-    /// fails, the shape device shows the style. Without a shape device, the
-    /// theme icon of the style shows at the buffer scale `scale`.
+    /// Shows `cursor` on `target`. Without an image, or when the image fails,
+    /// the shape device shows the style. Without a shape device, the theme
+    /// icon of the style shows.
     pub fn show_cursor(
         &self,
         cursor: &CursorRequest,
-        images: &mut ImageCursors,
-        theme: &mut Cursor,
-        shape_device: Option<&WpCursorShapeDeviceV1>,
-        serial: u32,
-        scale: i32,
-        set_surface: impl FnOnce(&WlSurface, i32, i32),
+        buffers: &mut CursorBuffers,
+        target: CursorTarget<'_>,
     ) {
         if let Some(image) = &cursor.image
-            && let Some((x, y)) = self.show(images, image)
+            && let Some((x, y)) = self.show(&mut buffers.images, image)
         {
-            set_surface(&self.surface, x, y);
+            target.set_surface(&self.surface, x, y);
             return;
         }
-        if let Some(shape_device) = shape_device {
-            shape_device.set_shape(serial, to_shape(cursor.style));
+        if let Some(shape_device) = target.shape_device {
+            shape_device.set_shape(target.serial, to_shape(cursor.style));
             return;
         }
-        let Some(icon) = theme.icon(cursor_style_to_icon_names(cursor.style), scale) else {
+        let scale = target.scale;
+        let names = cursor_style_to_icon_names(cursor.style);
+        let Some(icon) = buffers.theme.icon(names, scale) else {
             return;
         };
         if let Some(viewport) = &self.viewport {
@@ -112,7 +127,7 @@ impl CursorSurface {
         let (width, height) = icon.dimensions();
         let (x, y) = icon.hotspot();
         let scale = scale as u32;
-        set_surface(&self.surface, (x / scale) as i32, (y / scale) as i32);
+        target.set_surface(&self.surface, (x / scale) as i32, (y / scale) as i32);
         self.surface.attach(Some(icon), 0, 0);
         self.surface
             .damage(0, 0, (width / scale) as i32, (height / scale) as i32);
@@ -153,6 +168,34 @@ impl CursorSurface {
         self.surface.commit();
         let (x, y) = image.hotspot();
         Some((logical(x), logical(y)))
+    }
+}
+
+/// A device that a cursor surface shows on.
+pub(crate) enum CursorDevice<'a> {
+    Pointer(&'a WlPointer),
+    TabletTool(&'a ZwpTabletToolV2),
+}
+
+/// The device that shows a cursor and its state.
+pub(crate) struct CursorTarget<'a> {
+    pub device: CursorDevice<'a>,
+    pub shape_device: Option<&'a WpCursorShapeDeviceV1>,
+
+    /// The serial of the enter event of the device.
+    pub serial: u32,
+
+    /// The scale of the output under the device.
+    pub scale: i32,
+}
+
+impl CursorTarget<'_> {
+    /// Gives the device `surface` with the hotspot `(x, y)`.
+    fn set_surface(&self, surface: &WlSurface, x: i32, y: i32) {
+        match self.device {
+            CursorDevice::Pointer(pointer) => pointer.set_cursor(self.serial, Some(surface), x, y),
+            CursorDevice::TabletTool(tool) => tool.set_cursor(self.serial, Some(surface), x, y),
+        }
     }
 }
 

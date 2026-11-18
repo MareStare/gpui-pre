@@ -95,8 +95,7 @@ use crate::linux::{
     read_fd_with_timeout, reveal_path_internal,
     wayland::{
         clipboard::{Clipboard, DataOffer, FILE_LIST_MIME_TYPE, TEXT_MIME_TYPES},
-        cursor::Cursor,
-        image_cursor::{CursorSurface, ImageCursors},
+        image_cursor::{CursorBuffers, CursorDevice, CursorSurface, CursorTarget},
         serial::{ActivationContext, Serial, SerialKind, SerialTracker},
         tablet::{TabletContext, Tablets},
         window::WaylandWindow,
@@ -416,13 +415,12 @@ pub(crate) struct WaylandClientState {
     loop_handle: LoopHandle<'static, ()>,
     /// The cursor of the windows. None until a window sets one.
     requested_cursor: Option<CursorRequest>,
-    image_cursors: ImageCursors,
+    cursor_buffers: CursorBuffers,
     cursor_surface: CursorSurface,
     cursor_hidden_window: Option<WaylandWindowStatePtr>,
     clipboard: Clipboard,
     data_offers: Vec<DataOffer<WlDataOffer>>,
     primary_data_offer: Option<DataOffer<ZwpPrimarySelectionOfferV1>>,
-    cursor: Cursor,
     startup_activation_token: Option<String>,
     /// The environment this connection was made in, without its activation token.
     graphical_environment: GraphicalEnvironment,
@@ -622,8 +620,7 @@ impl WaylandClientState {
             globals: &self.globals,
             windows: &self.windows,
             serial_tracker: &mut self.serial_tracker,
-            image_cursors: &mut self.image_cursors,
-            theme: &mut self.cursor,
+            cursor_buffers: &mut self.cursor_buffers,
             cursor: self.requested_cursor.as_ref(),
         }
     }
@@ -945,8 +942,7 @@ impl WaylandClientState {
 
     /// Shows `cursor` on the pointer and on the tablet tools.
     fn set_cursor(&mut self, cursor: CursorRequest) {
-        self.tablets
-            .set_cursor(&cursor, &mut self.image_cursors, &mut self.cursor);
+        self.tablets.set_cursor(&cursor, &mut self.cursor_buffers);
         self.requested_cursor = Some(cursor);
 
         // Don't clobber the invisible cursor; restore reads back from `requested_cursor`.
@@ -992,15 +988,14 @@ impl WaylandClientState {
             .mouse_focused_window
             .as_ref()
             .map_or(1, |window| window.primary_output_scale());
-        self.cursor_surface.show_cursor(
-            cursor,
-            &mut self.image_cursors,
-            &mut self.cursor,
-            self.cursor_shape_device.as_ref(),
+        let target = CursorTarget {
+            device: CursorDevice::Pointer(wl_pointer),
+            shape_device: self.cursor_shape_device.as_ref(),
             serial,
             scale,
-            |surface, x, y| wl_pointer.set_cursor(serial, Some(surface), x, y),
-        );
+        };
+        self.cursor_surface
+            .show_cursor(cursor, &mut self.cursor_buffers, target);
     }
 }
 
@@ -1187,9 +1182,8 @@ impl WaylandConnection {
             .as_ref()
             .map(|primary_selection_manager| primary_selection_manager.get_device(&seat, &qh, ()));
 
-        let cursor = Cursor::new(&conn, &globals, 24);
         let tablets = Tablets::new(globals.tablet_manager.as_ref(), &seat, &qh);
-        let image_cursors = ImageCursors::new(&globals);
+        let cursor_buffers = CursorBuffers::new(&conn, &globals, 24);
         let cursor_surface = CursorSurface::new(&globals);
 
         let state = Rc::new(RefCell::new(WaylandClientState {
@@ -1255,13 +1249,12 @@ impl WaylandConnection {
             loop_handle: handle.clone(),
             enter_token: None,
             requested_cursor: None,
-            image_cursors,
+            cursor_buffers,
             cursor_surface,
             cursor_hidden_window: None,
             clipboard: Clipboard::new(conn.clone(), handle.clone()),
             data_offers: Vec::new(),
             primary_data_offer: None,
-            cursor,
             startup_activation_token: activation_token,
             graphical_environment: GraphicalEnvironment {
                 activation_token: None,
@@ -1314,13 +1307,13 @@ impl WaylandConnection {
                     XDPEvent::CursorTheme(theme) => {
                         if let Some(client) = client.0.upgrade() {
                             let mut client = client.borrow_mut();
-                            client.cursor.set_theme(theme);
+                            client.cursor_buffers.theme.set_theme(theme);
                         }
                     }
                     XDPEvent::CursorSize(size) => {
                         if let Some(client) = client.0.upgrade() {
                             let mut client = client.borrow_mut();
-                            client.cursor.set_size(size);
+                            client.cursor_buffers.theme.set_size(size);
                         }
                     }
                 }

@@ -13,8 +13,7 @@
 
 use super::{
     ClickState, WaylandClientStatePtr,
-    cursor::Cursor,
-    image_cursor::{CursorSurface, ImageCursors},
+    image_cursor::{CursorBuffers, CursorDevice, CursorSurface, CursorTarget},
     serial::{SerialKind, SerialTracker},
     window::WaylandWindowStatePtr,
 };
@@ -53,8 +52,7 @@ pub(super) struct TabletContext<'a> {
     pub globals: &'a Globals,
     pub windows: &'a HashMap<ObjectId, WaylandWindowStatePtr>,
     pub serial_tracker: &'a mut SerialTracker,
-    pub image_cursors: &'a mut ImageCursors,
-    pub theme: &'a mut Cursor,
+    pub cursor_buffers: &'a mut CursorBuffers,
 
     /// The cursor of the windows. None until a window sets one.
     pub cursor: Option<&'a CursorRequest>,
@@ -106,14 +104,9 @@ impl Tablets {
     }
 
     /// Shows `cursor` as the cursor of each tool near a window.
-    pub(crate) fn set_cursor(
-        &self,
-        cursor: &CursorRequest,
-        images: &mut ImageCursors,
-        theme: &mut Cursor,
-    ) {
+    pub(crate) fn set_cursor(&self, cursor: &CursorRequest, buffers: &mut CursorBuffers) {
         for tool in self.tools.values() {
-            tool.set_cursor(cursor, images, theme);
+            tool.set_cursor(cursor, buffers);
         }
     }
 }
@@ -151,19 +144,17 @@ impl TabletTool {
         }
     }
 
-    fn set_cursor(&self, cursor: &CursorRequest, images: &mut ImageCursors, theme: &mut Cursor) {
+    fn set_cursor(&self, cursor: &CursorRequest, buffers: &mut CursorBuffers) {
         let Some(window) = &self.window else {
             return;
         };
-        self.cursor_surface.show_cursor(
-            cursor,
-            images,
-            theme,
-            self.cursor_shape_device.as_ref(),
-            self.enter_serial,
-            window.primary_output_scale(),
-            |surface, x, y| self.tool.set_cursor(self.enter_serial, Some(surface), x, y),
-        );
+        let target = CursorTarget {
+            device: CursorDevice::TabletTool(&self.tool),
+            shape_device: self.cursor_shape_device.as_ref(),
+            serial: self.enter_serial,
+            scale: window.primary_output_scale(),
+        };
+        self.cursor_surface.show_cursor(cursor, buffers, target);
     }
 
     fn destroy(&self) {
@@ -378,7 +369,7 @@ impl Dispatch<ZwpTabletToolV2, ()> for WaylandClientStatePtr {
                 entry.enter_serial = serial;
                 pending.proximity_in = true;
                 let cursor = context.cursor.cloned().unwrap_or_default();
-                entry.set_cursor(&cursor, context.image_cursors, context.theme);
+                entry.set_cursor(&cursor, context.cursor_buffers);
                 None
             }
             zwp_tablet_tool_v2::Event::ProximityOut => {

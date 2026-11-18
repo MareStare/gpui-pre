@@ -116,9 +116,10 @@ gpui-pre version goes.
   positions from 16.16 fixed point by 65536.
 - Image cursors: `Window::set_cursor_image` shows an RGBA image as the
   cursor of a hitbox, with a hotspot and a scale, on Windows, macOS, X11
-  and Wayland. On Wayland the tablet tools show it too. A platform that
-  cannot show the image shows the fallback style. The native cursor of an
-  image lives as long as the image.
+  and Wayland. On Wayland the tablet tools show it too, and the cursor
+  theme loads once for each scale of the outputs under the pointer and the
+  tools. A platform that cannot show the image shows the fallback style.
+  The native cursor of an image lives as long as the image.
 - Cursor warp: `Window::set_mouse_position` moves the mouse cursor of the
   system to a point of the window. Wayland uses `wp_pointer_warp_v1`
   while the pointer is over the window, and the compositor may refuse it.
