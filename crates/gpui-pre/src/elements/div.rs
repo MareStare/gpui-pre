@@ -6277,43 +6277,4 @@ mod tests {
         assert_eq!(bounds("cell-1").origin.x, px(100.));
         assert_eq!(bounds("cell-2").origin.x, px(300.));
     }
-
-    struct AutoFillGrid;
-
-    impl Render for AutoFillGrid {
-        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            div().size_full().child(
-                div()
-                    .w(px(360.))
-                    .grid()
-                    .grid_cols_auto_fill(px(100.))
-                    .children((0..4).map(|index| {
-                        div()
-                            .debug_selector(move || format!("cell-{index}"))
-                            .h(px(10.))
-                    })),
-            )
-        }
-    }
-
-    #[gpui::test]
-    fn grid_cols_auto_fill_fits_columns_and_shares_the_rest(cx: &mut TestAppContext) {
-        let window = cx.add_window(|_, _| AutoFillGrid);
-        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
-            .unwrap();
-
-        let mut bounds = |selector: &'static str| {
-            cx.update_window(window.into(), |_, window, _| {
-                window.rendered_frame.debug_bounds.get(selector).copied()
-            })
-            .unwrap()
-            .unwrap_or_else(|| panic!("{selector} was not rendered"))
-        };
-
-        // Three columns of at least 100 px fit in 360 px. They share the other 60 px.
-        assert_eq!(bounds("cell-0").size.width, px(120.));
-        assert_eq!(bounds("cell-1").origin.x, px(120.));
-        assert_eq!(bounds("cell-2").origin.x, px(240.));
-        assert_eq!(bounds("cell-3").origin, point(px(0.), px(10.)));
-    }
 }
