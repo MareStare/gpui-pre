@@ -664,6 +664,38 @@ impl WindowGpu {
         })
     }
 
+    /// Sets the size of the surface configuration for `size`, and drops the textures of
+    /// the old size. Returns whether it changed.
+    fn set_size(&mut self, size: Size<DevicePixels>) -> bool {
+        let (width, height) = surface_extent(size, self.core.max_texture_size);
+        if (width, height) == (self.surface_config.width, self.surface_config.height) {
+            return false;
+        }
+        self.surface_config.width = width;
+        self.surface_config.height = height;
+
+        #[cfg(not(target_family = "wasm"))]
+        {
+            self.core.offscreen_target = None;
+        }
+        let resources = &mut self.core.resources;
+
+        // Destroy old textures before allocating new ones to avoid GPU memory spikes.
+        // wgpu frees a texture that GPU work in flight uses after that work ends.
+        if let Some(ref texture) = resources.path_intermediate_texture {
+            texture.destroy();
+        }
+        if let Some(ref texture) = resources.path_msaa_texture {
+            texture.destroy();
+        }
+
+        // Invalidate intermediate textures - they will be lazily recreated
+        // in draw() after we confirm the surface is healthy. This avoids
+        // panics when the device/surface is in an invalid state during resize.
+        resources.invalidate_intermediate_textures();
+        true
+    }
+
     /// Sets the alpha mode of the surface configuration, and rebuilds the pipelines when
     /// it changes. Returns whether it changed.
     fn set_alpha_mode(&mut self, transparent: bool) -> bool {
@@ -1190,45 +1222,8 @@ impl WgpuRenderer {
     /// Records the new drawable size and reconfigures the surface when one is present.
     /// The size is kept even without GPU resources so that recovery restores it.
     pub fn update_drawable_size(&mut self, size: Size<DevicePixels>) {
-        if size == self.config.size {
-            return;
-        }
         self.config.size = size;
-
-        let Some(gpu) = self.gpu_mut() else {
-            return;
-        };
-        let (width, height) = surface_extent(size, gpu.core.max_texture_size);
-        if (width, height) == (gpu.surface_config.width, gpu.surface_config.height) {
-            return;
-        }
-        gpu.surface_config.width = width;
-        gpu.surface_config.height = height;
-
-        let core = &mut gpu.core;
-        #[cfg(not(target_family = "wasm"))]
-        {
-            core.offscreen_target = None;
-        }
-        let resources = &mut core.resources;
-
-        // Destroy old textures before allocating new ones to avoid GPU memory spikes.
-        // wgpu frees a texture that GPU work in flight uses after that work ends.
-        if let Some(ref texture) = resources.path_intermediate_texture {
-            texture.destroy();
-        }
-        if let Some(ref texture) = resources.path_msaa_texture {
-            texture.destroy();
-        }
-
-        // Invalidate intermediate textures - they will be lazily recreated
-        // in draw() after we confirm the surface is healthy. This avoids
-        // panics when the device/surface is in an invalid state during resize.
-        resources.invalidate_intermediate_textures();
-
-        if let RendererState::Ready { surface, gpu } = &self.state {
-            surface.configure(&gpu.core.resources.device, &gpu.surface_config);
-        }
+        self.change_gpu(|gpu| gpu.set_size(size));
     }
 
     pub fn set_subpixel_layout(&mut self, is_bgr: bool) {
@@ -1241,14 +1236,20 @@ impl WgpuRenderer {
 
     pub fn update_transparency(&mut self, transparent: bool) {
         self.config.transparent = transparent;
+        self.change_gpu(|gpu| gpu.set_alpha_mode(transparent));
+    }
+
+    /// Changes the GPU objects with `change`, and configures the surface when `change`
+    /// returns true.
+    fn change_gpu(&mut self, change: impl FnOnce(&mut WindowGpu) -> bool) {
         match &mut self.state {
             RendererState::Ready { surface, gpu } => {
-                if gpu.set_alpha_mode(transparent) {
+                if change(gpu) {
                     surface.configure(&gpu.core.resources.device, &gpu.surface_config);
                 }
             }
             RendererState::Unconfigured { gpu } => {
-                gpu.set_alpha_mode(transparent);
+                change(gpu);
             }
             RendererState::Lost | RendererState::Released => {}
         }
@@ -2436,15 +2437,12 @@ impl WgpuRenderer {
                 anyhow::bail!("Cannot replace the surface: GPU resources have been released")
             }
         };
-        let (width, height) = surface_extent(config.size, gpu.core.max_texture_size);
-        gpu.surface_config.width = width;
-        gpu.surface_config.height = height;
+        gpu.set_size(config.size);
         gpu.set_alpha_mode(config.transparent);
         if let Some(mode) = config.preferred_present_mode {
             gpu.surface_config.present_mode = mode;
         }
         surface.configure(&gpu.core.resources.device, &gpu.surface_config);
-        gpu.core.resources.invalidate_intermediate_textures();
         self.state = RendererState::Ready { surface, gpu };
         self.config = config;
 
