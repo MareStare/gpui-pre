@@ -13,7 +13,8 @@
 
 use super::{
     ClickState, WaylandClientStatePtr,
-    image_cursor::{ImageCursorSurface, ImageCursors},
+    cursor::Cursor,
+    image_cursor::{CursorSurface, ImageCursors},
     serial::{SerialKind, SerialTracker},
     window::WaylandWindowStatePtr,
 };
@@ -53,6 +54,7 @@ pub(super) struct TabletContext<'a> {
     pub windows: &'a HashMap<ObjectId, WaylandWindowStatePtr>,
     pub serial_tracker: &'a mut SerialTracker,
     pub image_cursors: &'a mut ImageCursors,
+    pub theme: &'a mut Cursor,
 
     /// The cursor of the windows. None until a window sets one.
     pub cursor: Option<&'a CursorRequest>,
@@ -104,9 +106,14 @@ impl Tablets {
     }
 
     /// Shows `cursor` as the cursor of each tool near a window.
-    pub(crate) fn set_cursor(&self, cursor: &CursorRequest, images: &mut ImageCursors) {
+    pub(crate) fn set_cursor(
+        &self,
+        cursor: &CursorRequest,
+        images: &mut ImageCursors,
+        theme: &mut Cursor,
+    ) {
         for tool in self.tools.values() {
-            tool.set_cursor(cursor, images);
+            tool.set_cursor(cursor, images, theme);
         }
     }
 }
@@ -116,9 +123,8 @@ struct TabletTool {
     tool: ZwpTabletToolV2,
     cursor_shape_device: Option<WpCursorShapeDeviceV1>,
 
-    /// The surface of an image cursor. A surface takes the cursor role of
-    /// one device only.
-    image_surface: ImageCursorSurface,
+    /// A surface takes the cursor role of one device only.
+    cursor_surface: CursorSurface,
     window: Option<WaylandWindowStatePtr>,
 
     /// The serial of the last `proximity_in`. The cursor requests need it.
@@ -137,7 +143,7 @@ impl TabletTool {
                 .cursor_shape_manager
                 .as_ref()
                 .map(|manager| manager.get_tablet_tool_v2(&tool, qh, ())),
-            image_surface: ImageCursorSurface::new(globals),
+            cursor_surface: CursorSurface::new(globals),
             tool,
             window: None,
             enter_serial: 0,
@@ -145,15 +151,17 @@ impl TabletTool {
         }
     }
 
-    fn set_cursor(&self, cursor: &CursorRequest, images: &mut ImageCursors) {
-        if self.window.is_none() {
+    fn set_cursor(&self, cursor: &CursorRequest, images: &mut ImageCursors, theme: &mut Cursor) {
+        let Some(window) = &self.window else {
             return;
-        }
-        self.image_surface.show_cursor(
+        };
+        self.cursor_surface.show_cursor(
             cursor,
             images,
+            theme,
             self.cursor_shape_device.as_ref(),
             self.enter_serial,
+            window.primary_output_scale(),
             |surface, x, y| self.tool.set_cursor(self.enter_serial, Some(surface), x, y),
         );
     }
@@ -374,7 +382,7 @@ impl Dispatch<ZwpTabletToolV2, ()> for WaylandClientStatePtr {
                 entry.enter_serial = serial;
                 pending.proximity_in = true;
                 let cursor = context.cursor.cloned().unwrap_or_default();
-                entry.set_cursor(&cursor, context.image_cursors);
+                entry.set_cursor(&cursor, context.image_cursors, context.theme);
                 None
             }
             zwp_tablet_tool_v2::Event::ProximityOut => {

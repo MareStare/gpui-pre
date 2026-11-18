@@ -4,9 +4,9 @@
 //! The protocols: <https://wayland.app/protocols/wayland#wl_shm> and
 //! <https://wayland.app/protocols/viewporter>.
 
-use super::to_shape;
-use crate::linux::Globals;
+use super::{cursor::Cursor, to_shape};
 use crate::linux::wayland::client::WaylandClientStatePtr;
+use crate::linux::{Globals, cursor_style_to_icon_names};
 use anyhow::{Context as _, Result};
 use gpui::{CursorImage, CursorImageCache, CursorRequest};
 use gpui_util::ResultExt as _;
@@ -58,9 +58,9 @@ impl ImageCursors {
     }
 }
 
-/// A surface of the cursor role that shows images. Each pointer device
-/// needs its own, since a surface takes one role.
-pub(crate) struct ImageCursorSurface {
+/// A surface of the cursor role that shows images and theme icons. Each
+/// pointer device needs its own, since a surface takes one role.
+pub(crate) struct CursorSurface {
     surface: WlSurface,
 
     /// Scales the buffer to the logical size of the image. Without the
@@ -68,7 +68,7 @@ pub(crate) struct ImageCursorSurface {
     viewport: Option<WpViewport>,
 }
 
-impl ImageCursorSurface {
+impl CursorSurface {
     pub fn new(globals: &Globals) -> Self {
         let surface = globals.compositor.create_surface(&globals.qh, ());
         let viewport = globals
@@ -79,28 +79,44 @@ impl ImageCursorSurface {
     }
 
     /// Shows `cursor` on a pointer device. `set_surface` gives the device
-    /// this surface and the hotspot of the image. Without an image, or when
-    /// the image fails, the shape device shows the style. Returns false
-    /// when it showed nothing.
+    /// this surface and the hotspot. Without an image, or when the image
+    /// fails, the shape device shows the style. Without a shape device, the
+    /// theme icon of the style shows at the buffer scale `scale`.
     pub fn show_cursor(
         &self,
         cursor: &CursorRequest,
         images: &mut ImageCursors,
+        theme: &mut Cursor,
         shape_device: Option<&WpCursorShapeDeviceV1>,
         serial: u32,
+        scale: i32,
         set_surface: impl FnOnce(&WlSurface, i32, i32),
-    ) -> bool {
+    ) {
         if let Some(image) = &cursor.image
             && let Some((x, y)) = self.show(images, image)
         {
             set_surface(&self.surface, x, y);
-            return true;
+            return;
         }
-        let Some(shape_device) = shape_device else {
-            return false;
+        if let Some(shape_device) = shape_device {
+            shape_device.set_shape(serial, to_shape(cursor.style));
+            return;
+        }
+        let Some(icon) = theme.icon(cursor_style_to_icon_names(cursor.style), scale) else {
+            return;
         };
-        shape_device.set_shape(serial, to_shape(cursor.style));
-        true
+        if let Some(viewport) = &self.viewport {
+            viewport.set_destination(-1, -1);
+        }
+        self.surface.set_buffer_scale(scale);
+        let (width, height) = icon.dimensions();
+        let (x, y) = icon.hotspot();
+        let scale = scale as u32;
+        set_surface(&self.surface, (x / scale) as i32, (y / scale) as i32);
+        self.surface.attach(Some(icon), 0, 0);
+        self.surface
+            .damage(0, 0, (width / scale) as i32, (height / scale) as i32);
+        self.surface.commit();
     }
 
     /// Attaches the image to the surface. Gives the hotspot in the logical
@@ -125,7 +141,10 @@ impl ImageCursorSurface {
             }
         };
         let logical = |length: u32| (length as f32 / scale).round() as i32;
-        let (width, height) = (logical(image.width()).max(1), logical(image.height()).max(1));
+        let (width, height) = (
+            logical(image.width()).max(1),
+            logical(image.height()).max(1),
+        );
         if let Some(viewport) = &self.viewport {
             viewport.set_destination(width, height);
         }
@@ -137,7 +156,7 @@ impl ImageCursorSurface {
     }
 }
 
-impl Drop for ImageCursorSurface {
+impl Drop for CursorSurface {
     fn drop(&mut self) {
         if let Some(viewport) = self.viewport.take() {
             viewport.destroy();

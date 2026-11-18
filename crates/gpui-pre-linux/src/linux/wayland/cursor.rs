@@ -4,15 +4,14 @@ use anyhow::{Context as _, anyhow};
 use gpui_util::ResultExt;
 
 use wayland_client::Connection;
-use wayland_client::protocol::wl_surface::WlSurface;
-use wayland_client::protocol::{wl_pointer::WlPointer, wl_shm::WlShm};
+use wayland_client::protocol::wl_shm::WlShm;
 use wayland_cursor::{CursorImageBuffer, CursorTheme};
 
+/// The cursor theme. It gives the buffer of each cursor icon.
 pub(crate) struct Cursor {
     loaded_theme: Option<LoadedTheme>,
     size: u32,
     scaled_size: u32,
-    surface: WlSurface,
     shm: WlShm,
     connection: Connection,
 }
@@ -23,20 +22,12 @@ pub(crate) struct LoadedTheme {
     scaled_size: u32,
 }
 
-impl Drop for Cursor {
-    fn drop(&mut self) {
-        self.loaded_theme.take();
-        self.surface.destroy();
-    }
-}
-
 impl Cursor {
     pub fn new(connection: &Connection, globals: &Globals, size: u32) -> Self {
         let mut this = Self {
             loaded_theme: None,
             size,
             scaled_size: size,
-            surface: globals.compositor.create_surface(&globals.qh, ()),
             shm: globals.shm.clone(),
             connection: connection.clone(),
         };
@@ -91,62 +82,41 @@ impl Cursor {
         self.set_scaled_size(size);
     }
 
-    pub fn set_icon(
-        &mut self,
-        wl_pointer: &WlPointer,
-        serial_id: u32,
-        cursor_icon_names: &[&str],
-        scale: i32,
-    ) {
+    /// The buffer of the first icon of `cursor_icon_names` in the theme,
+    /// or of the default icon, for a buffer scale of `scale`.
+    pub fn icon(&mut self, cursor_icon_names: &[&str], scale: i32) -> Option<&CursorImageBuffer> {
         self.set_scaled_size(self.size * scale as u32);
 
         let Some(loaded_theme) = &mut self.loaded_theme else {
             log::warn!("Wayland: Unable to load cursor themes");
-            return;
+            return None;
         };
         let theme = &mut loaded_theme.theme;
 
-        let buffer: &CursorImageBuffer;
-        'outer: {
-            for cursor_icon_name in cursor_icon_names {
-                if let Some(cursor) = theme.get_cursor(cursor_icon_name) {
-                    buffer = &cursor[0];
-                    break 'outer;
-                }
-            }
-
-            if let Some(cursor) = theme.get_cursor(DEFAULT_CURSOR_ICON_NAME) {
-                buffer = &cursor[0];
+        let found = cursor_icon_names
+            .iter()
+            .copied()
+            .find(|name| theme.get_cursor(name).is_some());
+        let name = match found {
+            Some(name) => name,
+            None if theme.get_cursor(DEFAULT_CURSOR_ICON_NAME).is_some() => {
                 log_cursor_icon_warning(anyhow!(
                     "wayland: Unable to get cursor icon {:?}. \
                     Using default cursor icon: '{}'",
                     cursor_icon_names,
                     DEFAULT_CURSOR_ICON_NAME
                 ));
-            } else {
+                DEFAULT_CURSOR_ICON_NAME
+            }
+            None => {
                 log_cursor_icon_warning(anyhow!(
                     "wayland: Unable to fallback on default cursor icon '{}' for theme '{}'",
                     DEFAULT_CURSOR_ICON_NAME,
                     loaded_theme.name.as_deref().unwrap_or("default")
                 ));
-                return;
+                return None;
             }
-        }
-
-        let (width, height) = buffer.dimensions();
-        let (hot_x, hot_y) = buffer.hotspot();
-
-        self.surface.set_buffer_scale(scale);
-
-        wl_pointer.set_cursor(
-            serial_id,
-            Some(&self.surface),
-            hot_x as i32 / scale,
-            hot_y as i32 / scale,
-        );
-
-        self.surface.attach(Some(buffer), 0, 0);
-        self.surface.damage(0, 0, width as i32, height as i32);
-        self.surface.commit();
+        };
+        theme.get_cursor(name).map(|cursor| &cursor[0])
     }
 }

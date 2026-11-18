@@ -90,13 +90,13 @@ use super::{
 
 use crate::linux::{
     DOUBLE_CLICK_INTERVAL, LinuxCommon, LinuxKeyboardLayout, PIPE_READ_TIMEOUT, SCROLL_LINES,
-    capslock_from_xkb, cursor_style_to_icon_names, get_xkb_compose_state, is_within_click_distance,
-    keystroke_from_xkb, keystroke_underlying_dead_key, modifiers_from_xkb, new_xkb_context,
-    open_uri_internal, read_fd_with_timeout, reveal_path_internal,
+    capslock_from_xkb, get_xkb_compose_state, is_within_click_distance, keystroke_from_xkb,
+    keystroke_underlying_dead_key, modifiers_from_xkb, new_xkb_context, open_uri_internal,
+    read_fd_with_timeout, reveal_path_internal,
     wayland::{
         clipboard::{Clipboard, DataOffer, FILE_LIST_MIME_TYPE, TEXT_MIME_TYPES},
         cursor::Cursor,
-        image_cursor::{ImageCursorSurface, ImageCursors},
+        image_cursor::{CursorSurface, ImageCursors},
         serial::{ActivationContext, Serial, SerialKind, SerialTracker},
         tablet::{TabletContext, Tablets},
         window::WaylandWindow,
@@ -417,7 +417,7 @@ pub(crate) struct WaylandClientState {
     /// The cursor of the windows. None until a window sets one.
     requested_cursor: Option<CursorRequest>,
     image_cursors: ImageCursors,
-    image_cursor_surface: ImageCursorSurface,
+    cursor_surface: CursorSurface,
     cursor_hidden_window: Option<WaylandWindowStatePtr>,
     clipboard: Clipboard,
     data_offers: Vec<DataOffer<WlDataOffer>>,
@@ -623,6 +623,7 @@ impl WaylandClientState {
             windows: &self.windows,
             serial_tracker: &mut self.serial_tracker,
             image_cursors: &mut self.image_cursors,
+            theme: &mut self.cursor,
             cursor: self.requested_cursor.as_ref(),
         }
     }
@@ -944,7 +945,8 @@ impl WaylandClientState {
 
     /// Shows `cursor` on the pointer and on the tablet tools.
     fn set_cursor(&mut self, cursor: CursorRequest) {
-        self.tablets.set_cursor(&cursor, &mut self.image_cursors);
+        self.tablets
+            .set_cursor(&cursor, &mut self.image_cursors, &mut self.cursor);
         self.requested_cursor = Some(cursor);
 
         // Don't clobber the invisible cursor; restore reads back from `requested_cursor`.
@@ -983,34 +985,21 @@ impl WaylandClientState {
         let Some(cursor) = &self.requested_cursor else {
             return;
         };
-        let wl_pointer = self.wl_pointer.clone();
-        let shown = self.image_cursor_surface.show_cursor(
-            cursor,
-            &mut self.image_cursors,
-            self.cursor_shape_device.as_ref(),
-            serial,
-            |surface, x, y| {
-                if let Some(wl_pointer) = &wl_pointer {
-                    wl_pointer.set_cursor(serial, Some(surface), x, y);
-                }
-            },
-        );
-        if shown {
-            return;
-        }
-        let style = cursor.style;
-        // cursor-shape-v1 isn't supported, set the cursor using a surface.
-        let (Some(window), Some(wl_pointer)) =
-            (self.mouse_focused_window.clone(), self.wl_pointer.clone())
-        else {
+        let Some(wl_pointer) = &self.wl_pointer else {
             return;
         };
-        let scale = window.primary_output_scale();
-        self.cursor.set_icon(
-            &wl_pointer,
+        let scale = self
+            .mouse_focused_window
+            .as_ref()
+            .map_or(1, |window| window.primary_output_scale());
+        self.cursor_surface.show_cursor(
+            cursor,
+            &mut self.image_cursors,
+            &mut self.cursor,
+            self.cursor_shape_device.as_ref(),
             serial,
-            cursor_style_to_icon_names(style),
             scale,
+            |surface, x, y| wl_pointer.set_cursor(serial, Some(surface), x, y),
         );
     }
 }
@@ -1201,7 +1190,7 @@ impl WaylandConnection {
         let cursor = Cursor::new(&conn, &globals, 24);
         let tablets = Tablets::new(globals.tablet_manager.as_ref(), &seat, &qh);
         let image_cursors = ImageCursors::new(&globals);
-        let image_cursor_surface = ImageCursorSurface::new(&globals);
+        let cursor_surface = CursorSurface::new(&globals);
 
         let state = Rc::new(RefCell::new(WaylandClientState {
             serial_tracker: SerialTracker::new(),
@@ -1267,7 +1256,7 @@ impl WaylandConnection {
             enter_token: None,
             requested_cursor: None,
             image_cursors,
-            image_cursor_surface,
+            cursor_surface,
             cursor_hidden_window: None,
             clipboard: Clipboard::new(conn.clone(), handle.clone()),
             data_offers: Vec::new(),
