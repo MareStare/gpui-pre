@@ -809,7 +809,7 @@ impl X11WindowState {
                 size_hints.min_size =
                     Some((f32::from(size.width) as i32, f32::from(size.height) as i32));
             }
-            size_hints.max_size = Some((max_texture_size as i32, max_texture_size as i32));
+            size_hints.max_size = max_texture_size.map(|size| (size as i32, size as i32));
             check_reply(
                 || {
                     format!(

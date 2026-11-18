@@ -602,10 +602,12 @@ impl WaylandWindowState {
 
             // Set max window size based on the GPU's maximum texture dimension.
             // This prevents the window from being resized larger than what the GPU can render.
-            let max_texture_size = renderer.max_texture_size() as i32;
-            xdg_state
-                .toplevel
-                .set_max_size(max_texture_size, max_texture_size);
+            if let Some(max_texture_size) = renderer.max_texture_size() {
+                let max_texture_size = max_texture_size as i32;
+                xdg_state
+                    .toplevel
+                    .set_max_size(max_texture_size, max_texture_size);
+            }
         }
 
         Ok(Self {

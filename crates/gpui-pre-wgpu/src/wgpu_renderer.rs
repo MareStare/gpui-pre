@@ -1140,9 +1140,10 @@ impl WgpuRenderer {
             .map_or("released", |core| core.adapter_info.backend.to_str())
     }
 
-    /// The largest side of a texture that the device holds, or zero without a device.
-    pub fn max_texture_size(&self) -> u32 {
-        self.core().map_or(0, |core| core.max_texture_size)
+    /// The largest side of a texture that the device holds. It is `None` once GPU
+    /// resources are released.
+    pub fn max_texture_size(&self) -> Option<u32> {
+        self.core().map(|core| core.max_texture_size)
     }
 
     pub fn draw(&mut self, scene: &Scene) -> bool {
