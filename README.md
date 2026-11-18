@@ -188,6 +188,8 @@ commit, then rebase the patch commits onto it.
   `Window::set_tooltip` keeps the place at the pointer. While a tooltip
   shows, and for 300 ms after its element lost the pointer, the next
   tooltip shows with no delay.
+- Element opacity: `Window::element_opacity` gives the opacity that the
+  current element draws with, in its prepaint and paint.
 
 ## License
 

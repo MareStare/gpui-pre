@@ -4671,9 +4671,9 @@ impl Window {
     }
 
     /// Obtain the current element opacity. This method should only be called during the
-    /// prepaint phase of element drawing.
+    /// prepaint or paint phase of element drawing.
     #[inline]
-    pub(crate) fn element_opacity(&self) -> f32 {
+    pub fn element_opacity(&self) -> f32 {
         self.invalidator.debug_assert_paint_or_prepaint();
         self.element_opacity
     }
