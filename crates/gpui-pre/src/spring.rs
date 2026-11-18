@@ -503,25 +503,47 @@ impl Interpolate for Rems {
     }
 }
 
+/// Interpolates the parts of two colors with premultiplied alpha, as CSS
+/// does, so the parts of a clear color add no tint on the way. Gives the
+/// parts and the alpha. A result with no alpha keeps the plain mix of the
+/// parts. See <https://www.w3.org/TR/css-color-4/#interpolation-alpha>.
+fn premultiplied<const N: usize>(
+    (from, from_alpha): ([f32; N], f32),
+    (to, to_alpha): ([f32; N], f32),
+    phase: f32,
+) -> ([f32; N], f32) {
+    let alpha = f32::interpolate(from_alpha, to_alpha, phase);
+    let parts = std::array::from_fn(|ix| {
+        if alpha > 0. {
+            f32::interpolate(from[ix] * from_alpha, to[ix] * to_alpha, phase) / alpha
+        } else {
+            f32::interpolate(from[ix], to[ix], phase)
+        }
+    });
+    (parts, alpha)
+}
+
 impl Interpolate for Rgba {
     fn interpolate(from: Self, to: Self, phase: f32) -> Self {
-        Self {
-            r: f32::interpolate(from.r, to.r, phase),
-            g: f32::interpolate(from.g, to.g, phase),
-            b: f32::interpolate(from.b, to.b, phase),
-            a: f32::interpolate(from.a, to.a, phase),
-        }
+        let ([r, g, b], a) = premultiplied(
+            ([from.r, from.g, from.b], from.a),
+            ([to.r, to.g, to.b], to.a),
+            phase,
+        );
+        Self { r, g, b, a }
     }
 }
 
+/// The hue takes no alpha, as in CSS.
 impl Interpolate for Hsla {
     fn interpolate(from: Self, to: Self, phase: f32) -> Self {
         let hue_delta = (to.h - from.h + 0.5).rem_euclid(1.0) - 0.5;
+        let ([s, l], a) = premultiplied(([from.s, from.l], from.a), ([to.s, to.l], to.a), phase);
         Self {
             h: (from.h + hue_delta * phase).rem_euclid(1.0),
-            s: f32::interpolate(from.s, to.s, phase),
-            l: f32::interpolate(from.l, to.l, phase),
-            a: f32::interpolate(from.a, to.a, phase),
+            s,
+            l,
+            a,
         }
     }
 }
@@ -764,9 +786,41 @@ mod tests {
         let result = AnimationPhase(0.5).interpolate(from, to);
 
         assert!(result.h < EPSILON || (1.0 - result.h) < EPSILON);
-        assert!((result.s - 0.75).abs() < EPSILON);
-        assert!((result.l - 0.625).abs() < EPSILON);
+        // The saturation and the lightness weigh by alpha.
+        assert!((result.s - 0.5 / 0.75).abs() < EPSILON);
+        assert!((result.l - 0.4375 / 0.75).abs() < EPSILON);
         assert!((result.a - 0.75).abs() < EPSILON);
+    }
+
+    #[test]
+    fn rgba_interpolation_premultiplies_alpha() {
+        let wash = Rgba {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: 0.2,
+        };
+        let blue = Rgba {
+            r: 0.0,
+            g: 0.4,
+            b: 1.0,
+            a: 1.0,
+        };
+        let half = AnimationPhase(0.5).interpolate(wash, blue);
+        // Half of 20 % white and half of the blue, over the mean alpha.
+        let part = |of: f32| (0.1 + of / 2.0) / 0.6;
+        for (got, want) in
+            [half.r, half.g, half.b, half.a]
+                .into_iter()
+                .zip([part(0.0), part(0.4), part(1.0), 0.6])
+        {
+            assert!((got - want).abs() < EPSILON, "{half:?}");
+        }
+
+        let clear = Rgba { a: 0.0, ..wash };
+        let none = AnimationPhase(0.5).interpolate(clear, Rgba { a: 0.0, ..blue });
+        assert_eq!(none.a, 0.0);
+        assert!((none.g - 0.7).abs() < EPSILON);
     }
 
     #[test]
