@@ -151,6 +151,12 @@ default-features = false
 [dependencies.unicode-segmentation]
 version = "1.10"
 
+[dev-dependencies.gpui]
+version = "=0.3.12"
+default-features = false
+features = ["headless"]
+package = "gpui-pre"
+
 [dev-dependencies.criterion]
 version = "0.8.2"
 features = ["html_reports"]
