@@ -1188,7 +1188,7 @@ mod tests {
             }
         });
         cx.run_until_parked();
-        let mut retarget = |target: Pixels, cx: &mut TestAppContext| {
+        let retarget = |target: Pixels, cx: &mut TestAppContext| {
             window
                 .update(cx, |view, _, cx| {
                     view.target = target;
