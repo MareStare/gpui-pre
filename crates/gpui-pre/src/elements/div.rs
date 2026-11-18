@@ -5576,19 +5576,7 @@ mod tests {
             .update_window(any_window, |_, window, cx| {
                 window.set_client_inset(px(20.));
                 window.draw(cx).clear(cx);
-                // 8px left of the right side of the frame, 12px above its bottom.
-                let frame = window.frame_bounds();
-                window.dispatch_event(
-                    MouseMoveEvent {
-                        position: point(frame.right() - px(8.), frame.bottom() - px(12.)),
-                        modifiers: Default::default(),
-                        pressed_button: None,
-                    }
-                    .to_platform_input(),
-                    cx,
-                );
-                window.draw(cx).clear(cx);
-                (window.viewport_size(), frame)
+                (window.viewport_size(), window.frame_bounds())
             })
             .unwrap();
         assert_eq!(
@@ -5598,17 +5586,13 @@ mod tests {
                 size(surface.width - px(40.), surface.height - px(40.))
             )
         );
+        // 8px left of the right side of the frame, 12px above its bottom.
+        let corner = point(frame.right() - px(8.), frame.bottom() - px(12.));
+        hover(&mut test_app, any_window, corner);
         test_app
             .dispatcher
             .advance_clock(DEFAULT_TOOLTIP_SHOW_DELAY);
-        test_app.run_until_parked();
-        let tooltip = test_app
-            .update_window(any_window, |_, window, cx| {
-                window.draw(cx).clear(cx);
-                window.tooltip_bounds.as_ref().map(|tooltip| tooltip.bounds)
-            })
-            .unwrap()
-            .expect("the tooltip shows");
+        let tooltip = redraw(&mut test_app, any_window).expect("the tooltip shows");
         // The element fills the window, so the tooltip has no room under or above it and
         // moves into the frame.
         assert_eq!(frame.intersect(&tooltip), tooltip, "{frame:?}");
