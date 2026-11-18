@@ -197,6 +197,9 @@ commit, then rebase the patch commits onto it.
   the box of an element, with a gap of `offset`, as `outline` and
   `outline-offset` in CSS. A negative offset draws it inside the box. The
   line follows the round corners of the box, and draws over its content.
+- Spring colors: `Interpolate` for `Rgba` and `Hsla` mixes with
+  premultiplied alpha, as CSS does, so a clear color adds no tint on the
+  way.
 
 ## License
 
