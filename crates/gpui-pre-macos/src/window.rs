@@ -3320,7 +3320,7 @@ fn update_window_scale_factor(window_state: &Rc<Mutex<MacWindowState>>) {
         }
     }
 
-    lock.renderer.update_drawable_size(drawable_size);
+    lock.renderer.resize(drawable_size).log_err();
 
     if let Some(mut callback) = lock.resize_callback.take() {
         let content_size = lock.content_size();
@@ -3518,7 +3518,7 @@ extern "C" fn set_frame_size(this: &AnyObject, _: Sel, size: NSSize) {
 
     let scale_factor = lock.scale_factor();
     let drawable_size = new_size.to_device_pixels(scale_factor);
-    lock.renderer.update_drawable_size(drawable_size);
+    lock.renderer.resize(drawable_size).log_err();
 
     if let Some(mut callback) = lock.resize_callback.take() {
         let content_size = lock.content_size();

@@ -26,6 +26,13 @@ pub trait NativeRenderer {
     type WgpuTarget;
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas>;
+
+    /// Resizes the drawable of the window.
+    fn resize(&mut self, size: Size<DevicePixels>) -> Result<()>;
+
+    /// Sets whether the window shows what is behind it. The default does nothing, for a
+    /// renderer that takes the background at each frame.
+    fn update_transparency(&mut self, _transparent: bool) {}
 }
 
 /// The renderer of a window: wgpu, or the native renderer of the platform.
@@ -107,6 +114,25 @@ impl<N: NativeRenderer> WindowRenderer<N> {
         match self {
             Self::Wgpu { renderer, .. } => renderer.renderer().sprite_atlas().clone(),
             Self::Native(renderer) => renderer.sprite_atlas(),
+        }
+    }
+
+    pub fn resize(&mut self, size: Size<DevicePixels>) -> Result<()> {
+        match self {
+            Self::Wgpu { renderer, .. } => {
+                renderer.renderer_mut().update_drawable_size(size);
+                Ok(())
+            }
+            Self::Native(renderer) => renderer.resize(size),
+        }
+    }
+
+    /// Sets whether the window shows what is behind it. The wgpu renderer sets the alpha
+    /// mode of the surface. A surface that offers only an opaque alpha mode stays opaque.
+    pub fn update_transparency(&mut self, transparent: bool) {
+        match self {
+            Self::Wgpu { renderer, .. } => renderer.renderer_mut().update_transparency(transparent),
+            Self::Native(renderer) => renderer.update_transparency(transparent),
         }
     }
 }

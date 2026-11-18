@@ -22,6 +22,10 @@ impl NativeRenderer for DirectXRenderer {
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
         DirectXRenderer::sprite_atlas(self)
     }
+
+    fn resize(&mut self, size: Size<DevicePixels>) -> Result<()> {
+        DirectXRenderer::resize(self, size)
+    }
 }
 
 pub(crate) fn new_window_renderer(
@@ -67,10 +71,6 @@ pub(crate) trait WindowRendererExt {
         background_appearance: WindowBackgroundAppearance,
     ) -> Result<gpui::PendingImage>;
     fn gpu_specs(&self) -> Result<GpuSpecs>;
-    fn update_transparency(&mut self, transparent: bool);
-    fn resize(&mut self, size: Size<DevicePixels>) -> Result<()>;
-    fn handle_device_lost(&mut self, directx_devices: &DirectXDevices) -> Result<()>;
-    fn mark_drawable(&mut self);
 }
 
 impl WindowRendererExt for WindowRenderer {
@@ -108,41 +108,6 @@ impl WindowRendererExt for WindowRenderer {
                 .gpu_specs()
                 .context("GPU resources released"),
             Self::Native(renderer) => renderer.gpu_specs(),
-        }
-    }
-
-    fn update_transparency(&mut self, transparent: bool) {
-        match self {
-            // The swapchain of a window handle often offers only an opaque alpha mode.
-            // The window then stays opaque.
-            Self::Wgpu { renderer, .. } => renderer.renderer_mut().update_transparency(transparent),
-            // The renderer takes the background appearance at each frame.
-            Self::Native(_) => {}
-        }
-    }
-
-    fn resize(&mut self, size: Size<DevicePixels>) -> Result<()> {
-        match self {
-            Self::Wgpu { renderer, .. } => {
-                renderer.renderer_mut().update_drawable_size(size);
-                Ok(())
-            }
-            Self::Native(renderer) => renderer.resize(size),
-        }
-    }
-
-    fn handle_device_lost(&mut self, directx_devices: &DirectXDevices) -> Result<()> {
-        match self {
-            // The wgpu renderer has its own device and recovers it in `draw`.
-            Self::Wgpu { .. } => Ok(()),
-            Self::Native(renderer) => renderer.handle_device_lost(directx_devices),
-        }
-    }
-
-    fn mark_drawable(&mut self) {
-        match self {
-            Self::Wgpu { .. } => {}
-            Self::Native(renderer) => renderer.mark_drawable(),
         }
     }
 }

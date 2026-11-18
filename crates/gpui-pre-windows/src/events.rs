@@ -1343,11 +1343,9 @@ impl WindowsWindowInner {
         }
         let devices = lparam.0 as *const DirectXDevices;
         let devices = unsafe { &*devices };
-        if let Err(err) = self
-            .state
-            .renderer
-            .borrow_mut()
-            .handle_device_lost(&devices)
+        // The wgpu renderer has its own device and recovers it when it draws.
+        if let Some(renderer) = self.state.renderer.borrow_mut().native_mut()
+            && let Err(err) = renderer.handle_device_lost(devices)
         {
             panic!("Device lost: {err}");
         }
@@ -1398,7 +1396,9 @@ impl WindowsWindowInner {
         if force_render {
             // Re-enable drawing after a device loss recovery. The forced render
             // will rebuild the scene with fresh atlas textures.
-            self.state.renderer.borrow_mut().mark_drawable();
+            if let Some(renderer) = self.state.renderer.borrow_mut().native_mut() {
+                renderer.mark_drawable();
+            }
         }
         let (signal_at, signal_source) = self.state.frame_signal.take().map_or(
             (None, FrameRequestSource::NativeCallback),

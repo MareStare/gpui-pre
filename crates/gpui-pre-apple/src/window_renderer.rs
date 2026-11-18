@@ -23,6 +23,15 @@ impl NativeRenderer for MetalRenderer {
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
         MetalRenderer::sprite_atlas(self).clone()
     }
+
+    fn resize(&mut self, size: Size<DevicePixels>) -> Result<()> {
+        self.update_drawable_size(size);
+        Ok(())
+    }
+
+    fn update_transparency(&mut self, transparent: bool) {
+        MetalRenderer::update_transparency(self, transparent);
+    }
 }
 
 /// Creates the renderer of a window. The view of the window takes the layer of the
@@ -75,8 +84,6 @@ pub trait WindowRendererExt {
     fn layer(&self) -> Option<&CAMetalLayer>;
     fn layer_ptr(&self) -> *mut CAMetalLayer;
     fn set_presents_with_transaction(&mut self, presents_with_transaction: bool);
-    fn update_drawable_size(&mut self, size: Size<DevicePixels>);
-    fn update_transparency(&mut self, transparent: bool);
     fn destroy(&mut self);
     fn draw(&mut self, scene: &Scene);
     fn render_to_pending_image(&mut self, scene: &Scene) -> Result<gpui::PendingImage>;
@@ -107,21 +114,6 @@ impl WindowRendererExt for Renderer {
             Self::Native(renderer) => {
                 renderer.set_presents_with_transaction(presents_with_transaction)
             }
-        }
-    }
-
-    fn update_drawable_size(&mut self, size: Size<DevicePixels>) {
-        match self {
-            Self::Wgpu { renderer, .. } => renderer.renderer_mut().update_drawable_size(size),
-            Self::Native(renderer) => renderer.update_drawable_size(size),
-        }
-    }
-
-    fn update_transparency(&mut self, transparent: bool) {
-        match self {
-            // The surface configuration sets the opacity of the layer.
-            Self::Wgpu { renderer, .. } => renderer.renderer_mut().update_transparency(transparent),
-            Self::Native(renderer) => renderer.update_transparency(transparent),
         }
     }
 
