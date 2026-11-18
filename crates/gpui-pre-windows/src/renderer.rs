@@ -67,6 +67,7 @@ pub(crate) trait WindowRendererExt {
         background_appearance: WindowBackgroundAppearance,
     ) -> Result<gpui::PendingImage>;
     fn gpu_specs(&self) -> Result<GpuSpecs>;
+    fn update_transparency(&mut self, transparent: bool);
     fn resize(&mut self, size: Size<DevicePixels>) -> Result<()>;
     fn handle_device_lost(&mut self, directx_devices: &DirectXDevices) -> Result<()>;
     fn mark_drawable(&mut self);
@@ -107,6 +108,16 @@ impl WindowRendererExt for WindowRenderer {
                 .gpu_specs()
                 .context("GPU resources released"),
             Self::Native(renderer) => renderer.gpu_specs(),
+        }
+    }
+
+    fn update_transparency(&mut self, transparent: bool) {
+        match self {
+            // The swapchain of a window handle often offers only an opaque alpha mode.
+            // The window then stays opaque.
+            Self::Wgpu { renderer, .. } => renderer.renderer_mut().update_transparency(transparent),
+            // The renderer takes the background appearance at each frame.
+            Self::Native(_) => {}
         }
     }
 

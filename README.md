@@ -53,7 +53,13 @@ gpui-pre version goes.
   window asks for it, and transparent windows show what is behind them.
   An unknown `GPUI_RENDERER` logs a warning and picks wgpu. On Windows the
   wgpu renderer takes the DirectWrite text contrast and ClearType glyphs
-  as BGRA. On macOS the wgpu renderer tries the integrated GPU first.
+  as BGRA, and a change of the window background sets the alpha mode of the
+  surface. The HWND swapchain of DX12 offers only an opaque alpha mode, and
+  so do common Vulkan drivers, so a transparent, blurred or Mica window of
+  the wgpu renderer draws opaque. `GPUI_RENDERER=dx11` draws these
+  backgrounds. DX12 with `WGPU_DX12_PRESENTATION_SYSTEM=visual` offers a
+  premultiplied alpha mode. On macOS the wgpu renderer tries the integrated
+  GPU first.
 - Startup log: `GPUI_STARTUP_LOG` logs the time of the startup stages of
   the renderers.
 - Startup speed: the render pipelines build in parallel, wgpu does not

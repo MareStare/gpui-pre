@@ -941,6 +941,10 @@ impl PlatformWindow for WindowsWindow {
 
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance) {
         self.state.background_appearance.set(background_appearance);
+        self.state
+            .renderer
+            .borrow_mut()
+            .update_transparency(background_appearance != WindowBackgroundAppearance::Opaque);
         let hwnd = self.0.hwnd;
 
         // using Dwm APIs for Mica and MicaAlt backdrops.
