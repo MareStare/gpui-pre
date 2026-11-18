@@ -291,6 +291,9 @@ pub struct Style {
     /// Box shadow of the element
     pub box_shadow: Vec<BoxShadow>,
 
+    /// The outline of the element, drawn over its content
+    pub outline: Option<Outline>,
+
     /// The text style of this element
     #[refineable]
     pub text: TextStyleRefinement,
@@ -389,6 +392,47 @@ impl BoxShadow {
     pub fn inset(mut self) -> Self {
         self.inset = true;
         self
+    }
+}
+
+/// The possible values of the outline property: a line around the
+/// border box of an element that takes no space in the layout. It follows
+/// the rounded corners of the element.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Outline {
+    /// The color of the line.
+    pub color: Hsla,
+    /// The width of the line.
+    pub width: Pixels,
+    /// The gap between the border box and the line, as `outline-offset`
+    /// in CSS. A negative offset draws the line inside the box.
+    pub offset: Pixels,
+}
+
+impl Outline {
+    /// The bounds and the corner radii of the outer edge of the line around
+    /// an element of `bounds` and `corner_radii`. A sharp corner stays
+    /// sharp.
+    pub fn outer(
+        &self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+    ) -> (Bounds<Pixels>, Corners<Pixels>) {
+        let reach = self.offset + self.width;
+        let grow = |radius: Pixels| {
+            if radius > Pixels::ZERO {
+                (radius + reach).max(Pixels::ZERO)
+            } else {
+                Pixels::ZERO
+            }
+        };
+        let corners = Corners {
+            top_left: grow(corner_radii.top_left),
+            top_right: grow(corner_radii.top_right),
+            bottom_right: grow(corner_radii.bottom_right),
+            bottom_left: grow(corner_radii.bottom_left),
+        };
+        (bounds.dilate(reach), corners)
     }
 }
 
@@ -755,6 +799,23 @@ impl Style {
             ));
         }
 
+        if let Some(outline) = self
+            .outline
+            .filter(|outline| !outline.color.is_transparent() && outline.width > Pixels::ZERO)
+        {
+            let (outer, outer_radii) = outline.outer(bounds, corner_radii);
+            let mut background = outline.color;
+            background.a = 0.;
+            window.paint_quad(quad(
+                outer,
+                outer_radii,
+                background,
+                Edges::all(outline.width),
+                outline.color,
+                BorderStyle::Solid,
+            ));
+        }
+
         #[cfg(debug_assertions)]
         if self.debug_below {
             cx.remove_global::<DebugBelow>();
@@ -806,6 +867,7 @@ impl Default for Style {
             border_style: BorderStyle::default(),
             corner_radii: Corners::default(),
             box_shadow: Default::default(),
+            outline: None,
             text: TextStyleRefinement::default(),
             mouse_cursor: None,
             opacity: None,
@@ -1333,6 +1395,40 @@ mod tests {
     use crate::{blue, green, px, red, yellow};
 
     use super::*;
+
+    #[test]
+    fn outline_grows_round_corners_by_its_reach() {
+        let outline = Outline {
+            color: red(),
+            width: px(2.),
+            offset: px(1.),
+        };
+        let bounds = Bounds::new(point(px(100.), px(50.)), size(px(20.), px(10.)));
+        let corners = Corners {
+            top_left: px(4.),
+            top_right: px(0.),
+            bottom_right: px(4.),
+            bottom_left: px(0.),
+        };
+        let (outer, radii) = outline.outer(bounds, corners);
+        assert_eq!(
+            outer,
+            Bounds::new(point(px(97.), px(47.)), size(px(26.), px(16.)))
+        );
+        assert_eq!(radii.top_left, px(7.));
+        assert_eq!(radii.top_right, px(0.));
+
+        let inside = Outline {
+            offset: px(-3.),
+            ..outline
+        };
+        let (outer, radii) = inside.outer(bounds, corners);
+        assert_eq!(
+            outer,
+            Bounds::new(point(px(101.), px(51.)), size(px(18.), px(8.)))
+        );
+        assert_eq!(radii.top_left, px(3.));
+    }
 
     #[test]
     fn test_basic_highlight_style_combination() {

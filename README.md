@@ -193,6 +193,10 @@ commit, then rebase the patch commits onto it.
   `Window::with_element_opacity` multiplies the opacity of the elements
   that a closure draws, so an element can fade its child by the bounds
   that the child paints at.
+- Outline: `Styled::outline` draws a line of a width and a color around
+  the box of an element, with a gap of `offset`, as `outline` and
+  `outline-offset` in CSS. A negative offset draws it inside the box. The
+  line follows the round corners of the box, and draws over its content.
 
 ## License
 
