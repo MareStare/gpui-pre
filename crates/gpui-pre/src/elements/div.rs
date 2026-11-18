@@ -6256,7 +6256,7 @@ mod tests {
 
         let mut bounds = |selector: &'static str| {
             cx.update_window(window.into(), |_, window, _| {
-                window.rendered_frame.debug_bounds(selector)
+                window.debug_bounds(selector)
             })
             .unwrap()
             .unwrap_or_else(|| panic!("{selector} was not rendered"))

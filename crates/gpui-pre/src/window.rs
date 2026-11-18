@@ -1153,16 +1153,6 @@ impl Frame {
         });
     }
 
-    /// The bounds of the last element painted with the name.
-    #[cfg(any(test, feature = "headless"))]
-    pub(crate) fn debug_bounds(&self, name: &str) -> Option<Bounds<Pixels>> {
-        self.named_elements
-            .iter()
-            .rev()
-            .find(|element| element.name.as_str() == name)
-            .map(|element| element.bounds)
-    }
-
     pub(crate) fn new(dispatch_tree: DispatchTree) -> Self {
         Frame {
             focus: None,
@@ -3202,6 +3192,19 @@ impl Window {
             .iter()
             .filter(|element| !element.visible.is_empty())
             .map(|element| (element.name.as_str(), element.visible))
+    }
+
+    /// The bounds of the element with the name in the most recently rendered frame. When several
+    /// elements have the name, it gives the one painted last. The name of an element is its debug
+    /// selector, or the id of an element that takes presses.
+    #[cfg(any(test, feature = "headless"))]
+    pub fn debug_bounds(&self, name: &str) -> Option<Bounds<Pixels>> {
+        self.rendered_frame
+            .named_elements
+            .iter()
+            .rev()
+            .find(|element| element.name.as_str() == name)
+            .map(|element| element.bounds)
     }
 
     /// Returns the quads in the most recently rendered frame's scene, so tests can assert on
