@@ -412,13 +412,19 @@ pub struct Outline {
 impl Outline {
     /// The bounds and the corner radii of the outer edge of the line around
     /// an element of `bounds` and `corner_radii`. A sharp corner stays
-    /// sharp.
+    /// sharp. `None` when a negative offset leaves no space inside the
+    /// line.
     fn outer(
         &self,
         bounds: Bounds<Pixels>,
         corner_radii: Corners<Pixels>,
-    ) -> (Bounds<Pixels>, Corners<Pixels>) {
+    ) -> Option<(Bounds<Pixels>, Corners<Pixels>)> {
         let reach = self.offset + self.width;
+        let outer = bounds.dilate(reach);
+        let line = self.width * 2.;
+        if outer.size.width <= line || outer.size.height <= line {
+            return None;
+        }
         let grow = |radius: Pixels| {
             if radius > Pixels::ZERO {
                 (radius + reach).max(Pixels::ZERO)
@@ -432,7 +438,7 @@ impl Outline {
             bottom_right: grow(corner_radii.bottom_right),
             bottom_left: grow(corner_radii.bottom_left),
         };
-        (bounds.dilate(reach), corners)
+        Some((outer, corners))
     }
 }
 
@@ -802,8 +808,8 @@ impl Style {
         if let Some(outline) = self
             .outline
             .filter(|outline| !outline.color.is_transparent() && outline.width > Pixels::ZERO)
+            && let Some((outer, outer_radii)) = outline.outer(bounds, corner_radii)
         {
-            let (outer, outer_radii) = outline.outer(bounds, corner_radii);
             let mut background = outline.color;
             background.a = 0.;
             window.paint_quad(quad(
@@ -1410,7 +1416,7 @@ mod tests {
             bottom_right: px(4.),
             bottom_left: px(0.),
         };
-        let (outer, radii) = outline.outer(bounds, corners);
+        let (outer, radii) = outline.outer(bounds, corners).unwrap();
         assert_eq!(
             outer,
             Bounds::new(point(px(97.), px(47.)), size(px(26.), px(16.)))
@@ -1422,12 +1428,22 @@ mod tests {
             offset: px(-3.),
             ..outline
         };
-        let (outer, radii) = inside.outer(bounds, corners);
+        let (outer, radii) = inside.outer(bounds, corners).unwrap();
         assert_eq!(
             outer,
             Bounds::new(point(px(101.), px(51.)), size(px(18.), px(8.)))
         );
         assert_eq!(radii.top_left, px(3.));
+
+        // The box is 10 px high. The line meets itself at an offset of
+        // -5 px and passes itself beyond.
+        for offset in [-5., -20.] {
+            let collapsed = Outline {
+                offset: px(offset),
+                ..outline
+            };
+            assert_eq!(collapsed.outer(bounds, corners), None, "{offset}");
+        }
     }
 
     #[test]
