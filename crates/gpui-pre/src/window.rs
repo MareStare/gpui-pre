@@ -1069,9 +1069,7 @@ pub(crate) struct Frame {
     /// The frame draws a one-shot animation or a spring before its end.
     pub(crate) animating: bool,
     #[cfg(any(test, feature = "headless"))]
-    pub(crate) debug_bounds: FxHashMap<String, Bounds<Pixels>>,
-    #[cfg(any(test, feature = "headless"))]
-    debug_bounds_records: Vec<DebugBoundsRecord>,
+    named_elements: Vec<NamedElement>,
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) next_inspector_instance_ids: FxHashMap<Rc<crate::InspectorElementPath>, usize>,
     #[cfg(any(feature = "inspector", debug_assertions))]
@@ -1089,10 +1087,32 @@ pub(crate) struct PrepaintStateIndex {
     line_layout_index: LineLayoutIndex,
 }
 
+/// The name of an element in the records of a frame.
+#[cfg(any(test, feature = "headless"))]
+#[derive(Clone)]
+pub(crate) enum ElementName {
+    /// The debug selector of the element.
+    Selector(SharedString),
+
+    /// The id of an element that takes presses. Its text is made on the first read.
+    Id(ElementId, std::cell::OnceCell<String>),
+}
+
+#[cfg(any(test, feature = "headless"))]
+impl ElementName {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Selector(selector) => selector,
+            Self::Id(id, text) => text.get_or_init(|| id.to_string()),
+        }
+    }
+}
+
 /// A named element of a frame.
 #[cfg(any(test, feature = "headless"))]
-pub(crate) struct DebugBoundsRecord {
-    selector: String,
+#[derive(Clone)]
+pub(crate) struct NamedElement {
+    name: ElementName,
     bounds: Bounds<Pixels>,
 
     /// The part of `bounds` inside the content masks of the ancestors of the element.
@@ -1103,7 +1123,7 @@ pub(crate) struct DebugBoundsRecord {
 pub(crate) struct PaintIndex {
     scene_index: usize,
     #[cfg(any(test, feature = "headless"))]
-    debug_bounds_index: usize,
+    named_elements_index: usize,
     mouse_listeners_index: usize,
     input_handlers_index: usize,
     cursor_styles_index: usize,
@@ -1115,18 +1135,29 @@ pub(crate) struct PaintIndex {
 
 impl Frame {
     #[cfg(any(test, feature = "headless"))]
-    pub(crate) fn record_debug_bounds(
+    pub(crate) fn record_named_element(
         &mut self,
-        selector: String,
+        name: ElementName,
         bounds: Bounds<Pixels>,
         visible: Bounds<Pixels>,
     ) {
-        self.debug_bounds.insert(selector.clone(), bounds);
-        self.debug_bounds_records.push(DebugBoundsRecord {
-            selector,
+        self.named_elements.push(NamedElement {
+            name,
             bounds,
             visible,
         });
+    }
+
+    /// The bounds of the last element painted with the debug selector.
+    #[cfg(any(test, feature = "headless"))]
+    pub(crate) fn debug_bounds(&self, selector: &str) -> Option<Bounds<Pixels>> {
+        self.named_elements
+            .iter()
+            .rev()
+            .find(|element| {
+                matches!(&element.name, ElementName::Selector(name) if name.as_ref() == selector)
+            })
+            .map(|element| element.bounds)
     }
 
     pub(crate) fn new(dispatch_tree: DispatchTree) -> Self {
@@ -1147,9 +1178,7 @@ impl Frame {
             animating: false,
 
             #[cfg(any(test, feature = "headless"))]
-            debug_bounds: FxHashMap::default(),
-            #[cfg(any(test, feature = "headless"))]
-            debug_bounds_records: Vec::new(),
+            named_elements: Vec::new(),
 
             #[cfg(any(feature = "inspector", debug_assertions))]
             next_inspector_instance_ids: FxHashMap::default(),
@@ -1177,10 +1206,7 @@ impl Frame {
         self.animating = false;
 
         #[cfg(any(test, feature = "headless"))]
-        {
-            self.debug_bounds.clear();
-            self.debug_bounds_records.clear();
-        }
+        self.named_elements.clear();
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         {
@@ -3162,16 +3188,17 @@ impl Window {
         &self.rendered_frame.scene
     }
 
-    /// The selector and the visible part of the bounds of each element with a name in the most
-    /// recently rendered frame, in paint order. An element with no visible part is left out. One
-    /// selector can show several times.
+    /// The name and the visible part of the bounds of each element with a name in the most
+    /// recently rendered frame, in paint order. The name of an element is its debug selector, or
+    /// the id of an element that takes presses. An element with no visible part is left out. One
+    /// name can show several times.
     #[cfg(any(test, feature = "headless"))]
     pub fn named_element_bounds(&self) -> impl Iterator<Item = (&str, Bounds<Pixels>)> {
         self.rendered_frame
-            .debug_bounds_records
+            .named_elements
             .iter()
-            .filter(|record| !record.visible.is_empty())
-            .map(|record| (record.selector.as_str(), record.visible))
+            .filter(|element| !element.visible.is_empty())
+            .map(|element| (element.name.as_str(), element.visible))
     }
 
     /// Returns the quads in the most recently rendered frame's scene, so tests can assert on
@@ -4390,7 +4417,7 @@ impl Window {
         PaintIndex {
             scene_index: self.next_frame.scene.len(),
             #[cfg(any(test, feature = "headless"))]
-            debug_bounds_index: self.next_frame.debug_bounds_records.len(),
+            named_elements_index: self.next_frame.named_elements.len(),
             mouse_listeners_index: self.next_frame.mouse_listeners.len(),
             input_handlers_index: self.next_frame.input_handlers.len(),
             cursor_styles_index: self.next_frame.cursor_styles.len(),
@@ -4404,15 +4431,10 @@ impl Window {
     pub(crate) fn reuse_paint(&mut self, range: Range<PaintIndex>) {
         // Cached elements still exist in the frame even when their paint methods don't run.
         #[cfg(any(test, feature = "headless"))]
-        for record in &self.rendered_frame.debug_bounds_records
-            [range.start.debug_bounds_index..range.end.debug_bounds_index]
-        {
-            self.next_frame.record_debug_bounds(
-                record.selector.clone(),
-                record.bounds,
-                record.visible,
-            );
-        }
+        self.next_frame.named_elements.extend_from_slice(
+            &self.rendered_frame.named_elements
+                [range.start.named_elements_index..range.end.named_elements_index],
+        );
         self.next_frame.cursor_styles.extend(
             self.rendered_frame.cursor_styles
                 [range.start.cursor_styles_index..range.end.cursor_styles_index]

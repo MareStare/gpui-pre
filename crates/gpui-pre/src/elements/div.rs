@@ -95,15 +95,18 @@ impl Interactivity {
     /// The name of the element in the records of the frame: its debug selector, or the id of an
     /// element that takes presses.
     #[cfg(any(test, feature = "headless"))]
-    fn element_name(&self) -> Option<String> {
+    fn element_name(&self) -> Option<crate::window::ElementName> {
+        use crate::window::ElementName;
+
+        if let Some(selector) = &self.debug_selector {
+            return Some(ElementName::Selector(selector.clone()));
+        }
         let takes_presses = !self.click_listeners.is_empty()
             || !self.aux_click_listeners.is_empty()
             || !self.mouse_down_listeners.is_empty()
             || self.drag_listener.is_some();
-        self.debug_selector.clone().or_else(|| {
-            let id = self.element_id.as_ref().filter(|_| takes_presses)?;
-            Some(id.to_string())
-        })
+        let id = self.element_id.as_ref().filter(|_| takes_presses)?;
+        Some(ElementName::Id(id.clone(), Default::default()))
     }
 
     /// Create an `Interactivity`, capturing the caller location in debug mode.
@@ -916,18 +919,18 @@ pub trait InteractiveElement: Sized {
     }
 
     /// Set a key that can be used to look up this element's bounds
-    /// in the [`crate::VisualTestContext::debug_bounds`] map.
+    /// with [`crate::VisualTestContext::debug_bounds`].
     ///
     /// Selectors are recorded with the `headless` feature. Elsewhere this
     /// is a no-op.
     #[cfg(any(test, feature = "headless"))]
     fn debug_selector(mut self, f: impl FnOnce() -> String) -> Self {
-        self.interactivity().debug_selector = Some(f());
+        self.interactivity().debug_selector = Some(f().into());
         self
     }
 
     /// Set a key that can be used to look up this element's bounds
-    /// in the [`crate::VisualTestContext::debug_bounds`] map.
+    /// with [`crate::VisualTestContext::debug_bounds`].
     ///
     /// Selectors are recorded with the `headless` feature. Elsewhere this
     /// is a no-op.
@@ -2314,7 +2317,7 @@ pub struct Interactivity {
     pub(crate) source_location: Option<&'static core::panic::Location<'static>>,
 
     #[cfg(any(test, feature = "headless"))]
-    pub(crate) debug_selector: Option<String>,
+    pub(crate) debug_selector: Option<SharedString>,
 }
 
 impl Interactivity {
@@ -2652,7 +2655,9 @@ impl Interactivity {
                 #[cfg(any(test, feature = "headless"))]
                 if let Some(name) = self.element_name() {
                     let visible = bounds.intersect(&window.content_mask().bounds);
-                    window.next_frame.record_debug_bounds(name, bounds, visible);
+                    window
+                        .next_frame
+                        .record_named_element(name, bounds, visible);
                 }
 
                 self.paint_hover_group_handler(window, cx);
@@ -6267,7 +6272,7 @@ mod tests {
 
         let mut bounds = |selector: &'static str| {
             cx.update_window(window.into(), |_, window, _| {
-                window.rendered_frame.debug_bounds.get(selector).copied()
+                window.rendered_frame.debug_bounds(selector)
             })
             .unwrap()
             .unwrap_or_else(|| panic!("{selector} was not rendered"))
