@@ -865,6 +865,15 @@ pub trait InteractiveElement: Sized {
         self
     }
 
+    /// Designate this div as a tab group whose tab order wraps: from a focus
+    /// inside it, [`Window::focus_next`] and [`Window::focus_prev`] go to the
+    /// tab stops inside it and wrap at its ends. Useful for a modal view,
+    /// such as a dialog.
+    fn tab_wrap(mut self) -> Self {
+        self.interactivity().tab_wrap = true;
+        self.tab_group()
+    }
+
     /// Set the keymap context for this element. This will be used to determine
     /// which action to dispatch from the keymap.
     fn key_context<C, E>(mut self, key_context: C) -> Self
@@ -2301,6 +2310,7 @@ pub struct Interactivity {
     pub(crate) hitbox_behavior: HitboxBehavior,
     pub(crate) tab_index: Option<isize>,
     pub(crate) tab_group: bool,
+    pub(crate) tab_wrap: bool,
     pub(crate) tab_stop: bool,
 
     pub(crate) a11y_action_listeners:
@@ -2672,7 +2682,7 @@ impl Interactivity {
                             window.with_content_mask(
                                 style.overflow_mask(bounds, window.rem_size()),
                                 |window| {
-                                    window.with_tab_group(tab_group, |window| {
+                                    window.with_tab_group(tab_group, self.tab_wrap, |window| {
                                         // Register the container's own focus handle *inside* its
                                         // tab group, so that focusing the container and then
                                         // calling `focus_next` descends into this group's first
@@ -6088,6 +6098,64 @@ mod tests {
             .unwrap();
 
         assert_eq!(focused, Some(item_b.id));
+    }
+
+    /// A dialog-like view: a wrapping tab group with two stops, after a stop
+    /// outside it.
+    struct WrappingTabGroup {
+        outside: FocusHandle,
+        first: FocusHandle,
+        last: FocusHandle,
+    }
+
+    impl Render for WrappingTabGroup {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().child(div().track_focus(&self.outside)).child(
+                div()
+                    .tab_wrap()
+                    .child(div().track_focus(&self.first))
+                    .child(div().track_focus(&self.last)),
+            )
+        }
+    }
+
+    /// `focus_next` from the last stop of a wrapping group goes back to its
+    /// first stop, and `focus_prev` from its first stop goes to its last.
+    #[test]
+    fn focus_steps_wrap_inside_a_wrapping_tab_group() {
+        let mut cx = TestAppContext::single();
+        let (outside, first, last) = cx.update(|cx| {
+            (
+                cx.focus_handle().tab_stop(true),
+                cx.focus_handle().tab_stop(true),
+                cx.focus_handle().tab_stop(true),
+            )
+        });
+        let window: AnyWindowHandle = cx
+            .add_window({
+                let (outside, first, last) = (outside, first.clone(), last.clone());
+                move |_, _| WrappingTabGroup {
+                    outside,
+                    first,
+                    last,
+                }
+            })
+            .into();
+        cx.update_window(window, |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+
+        let (after_last, before_first) = cx
+            .update_window(window, |_, window, cx| {
+                window.focus(&last, cx);
+                window.focus_next(cx);
+                let after_last = window.focused(cx).map(|handle| handle.id);
+                window.focus_prev(cx);
+                (after_last, window.focused(cx).map(|handle| handle.id))
+            })
+            .unwrap();
+
+        assert_eq!(after_last, Some(first.id));
+        assert_eq!(before_first, Some(last.id));
     }
 
     #[gpui::test]
