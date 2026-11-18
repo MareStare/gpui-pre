@@ -2,7 +2,7 @@
 
 - `main` holds the published gpui-pre sources and every patch that mart calls. Mart pins a commit of `main`.
 - Rewrite no commit of `main` and no commit that mart pinned. Fix a patch in a new commit.
-- Land each patch on `main` from a short-lived `mart/<topic>` branch off `main`, as a fast-forward after a rebase. Delete the branch after it lands.
+- Land each patch on `main` from a short-lived `mart/<topic>` branch off `main`, as a fast-forward after a rebase. Land a branch with a commit that mart pinned by a `git merge --no-ff`. Delete the branch after it lands.
 - Tag the head of a dropped branch with commits that no other ref holds as `archive/<branch>`, then delete the branch.
 - Drop a patch in a new commit on `main` when mart drops its last caller.
 - Describe each patch in the `## Patches` list of `README.md`, in the commit that changes it.
