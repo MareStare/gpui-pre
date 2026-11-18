@@ -246,6 +246,8 @@ gpui-pre version goes.
   before it to the containers outside. `Window::tab_step_pending` tells the
   focus listeners of the draw that a tab step moved the focus. A tab step
   to the element that has the focus leaves no step pending.
+- Drag threshold per element: `drag_threshold` sets how far the pointer
+  moves with the button down before a drag of the element starts.
 
 ## License
 

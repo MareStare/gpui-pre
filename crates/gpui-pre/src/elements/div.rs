@@ -677,6 +677,13 @@ impl Interactivity {
         });
     }
 
+    /// Sets how far the pointer moves with the left button down before a drag of this element
+    /// starts. The default is 2 pixels.
+    /// The imperative API equivalent to [`StatefulInteractiveElement::drag_threshold`].
+    pub fn drag_threshold(&mut self, threshold: Pixels) {
+        self.drag_threshold = Some(threshold);
+    }
+
     /// Registers a callback resolving a payload to offer the platform if a drag started by this
     /// element leaves the window. It is invoked at most once per drag gesture, when the pointer
     /// exits the viewport. Must be called after [`Self::on_drag`], with the same dragged value
@@ -1713,6 +1720,17 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Sets how far the pointer moves with the left button down before a drag of this element
+    /// starts. The default is 2 pixels.
+    /// The fluent API equivalent to [`Interactivity::drag_threshold`].
+    fn drag_threshold(mut self, threshold: Pixels) -> Self
+    where
+        Self: Sized,
+    {
+        self.interactivity().drag_threshold(threshold);
+        self
+    }
+
     /// Registers a callback resolving a payload to offer the platform if a drag started by this
     /// element leaves the window. It is invoked at most once per drag gesture, when the pointer
     /// exits the viewport. Must be called after [`Self::on_drag`], with the same dragged value
@@ -2340,6 +2358,7 @@ pub struct Interactivity {
     pub(crate) click_listeners: Vec<ClickListener>,
     pub(crate) aux_click_listeners: Vec<ClickListener>,
     pub(crate) drag_listener: Option<DragListener>,
+    pub(crate) drag_threshold: Option<Pixels>,
     pub(crate) hover_listener: Option<Box<dyn Fn(&bool, &mut Window, &mut App)>>,
     pub(crate) hover_listener_mode: HoverListenerMode,
     pub(crate) tooltip_builder: Option<TooltipBuilder>,
@@ -3091,6 +3110,7 @@ impl Interactivity {
         let drag_cursor_style = self.base_style.as_ref().mouse_cursor;
 
         let mut drag_listener = mem::take(&mut self.drag_listener);
+        let drag_threshold = self.drag_threshold.map_or(DRAG_THRESHOLD, f64::from);
         let drop_listeners = mem::take(&mut self.drop_listeners);
         let click_listeners = mem::take(&mut self.click_listeners);
         let aux_click_listeners = mem::take(&mut self.aux_click_listeners);
@@ -3175,7 +3195,7 @@ impl Interactivity {
                         let mut pending_mouse_down = pending_mouse_down.borrow_mut();
                         if let Some(mouse_down) = pending_mouse_down.clone()
                             && !cx.has_active_drag()
-                            && (event.position - mouse_down.position).magnitude() > DRAG_THRESHOLD
+                            && (event.position - mouse_down.position).magnitude() > drag_threshold
                             && let Some(listener) = drag_listener.take()
                             && mouse_down.button == MouseButton::Left
                         {

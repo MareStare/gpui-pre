@@ -10924,6 +10924,63 @@ mod tests {
             CursorStyle::IBeam
         );
     }
+
+    #[gpui::test]
+    fn test_drag_starts_past_the_threshold_of_the_element(cx: &mut TestAppContext) {
+        struct Row;
+
+        impl Render for Row {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(
+                    div()
+                        .id("row")
+                        .size(px(40.))
+                        .drag_threshold(px(4.))
+                        .on_drag((), |_, _, _, cx| cx.new(|_| Empty)),
+                )
+            }
+        }
+
+        let window = cx.add_window(|_, _| Row);
+        let press = point(px(10.), px(10.));
+        let update_result = cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+            window.dispatch_event(
+                MouseMoveEvent {
+                    position: press,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.dispatch_event(
+                MouseDownEvent {
+                    position: press,
+                    button: MouseButton::Left,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+            let drag_to = |x: f32| {
+                MouseMoveEvent {
+                    position: point(px(x), px(10.)),
+                    pressed_button: Some(MouseButton::Left),
+                    ..Default::default()
+                }
+                .to_platform_input()
+            };
+            // The default threshold of 2 pixels would start the drag here.
+            window.dispatch_event(drag_to(13.), cx);
+            assert!(!cx.has_active_drag());
+            window.dispatch_event(drag_to(15.), cx);
+            assert!(cx.has_active_drag());
+        });
+        assert!(
+            update_result.is_ok(),
+            "failed to run drag: {update_result:?}"
+        );
+    }
 }
 
 #[cfg(all(test, any(feature = "inspector", debug_assertions)))]
