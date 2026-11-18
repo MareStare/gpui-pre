@@ -6,23 +6,23 @@ use std::{ffi::c_void, ptr::NonNull, sync::Arc};
 
 use anyhow::Result;
 use gpui::{DevicePixels, PlatformAtlas, Scene, Size};
-use gpui_wgpu::{
-    StartedRenderer, TextContrast, WgpuWindowRenderer, time_window_renderer, wgpu, wgpu_requested,
-};
-use objc2::{rc::Retained, runtime::ProtocolObject};
-use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
+use gpui_wgpu::{NativeRenderer, TextContrast, WgpuWindowRenderer, WindowRenderer, wgpu};
+use objc2::rc::Retained;
+use objc2_quartz_core::CAMetalLayer;
 
 use crate::metal_renderer::{Context, MetalRenderer, configure_window_layer};
 
-pub enum Renderer {
-    Metal(MetalRenderer),
-    Wgpu(WgpuLayerRenderer),
-}
+pub type Renderer = WindowRenderer<MetalRenderer>;
 
-/// A wgpu renderer that draws to the backing layer of a view.
-pub struct WgpuLayerRenderer {
-    renderer: WgpuWindowRenderer,
-    layer: Retained<CAMetalLayer>,
+impl NativeRenderer for MetalRenderer {
+    const NAME: &'static str = "metal";
+
+    /// The backing layer of the view.
+    type WgpuTarget = Retained<CAMetalLayer>;
+
+    fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
+        MetalRenderer::sprite_atlas(self).clone()
+    }
 }
 
 /// Creates the renderer of a window. The view of the window takes the layer of the
@@ -32,168 +32,117 @@ pub fn new_renderer(
     bounds: Size<f32>,
     transparent: bool,
     use_display_p3: bool,
-) -> anyhow::Result<Renderer> {
-    time_window_renderer(
-        || {
-            if wgpu_requested("metal") {
-                match WgpuLayerRenderer::new(bounds, transparent, use_display_p3) {
-                    Ok(renderer) => return Ok(Renderer::Wgpu(renderer)),
-                    Err(error) => log::error!("Using the Metal renderer: {error:#}"),
-                }
-            }
-            MetalRenderer::new(context, transparent, use_display_p3).map(Renderer::Metal)
-        },
-        |renderer| match renderer {
-            Renderer::Metal(_) => StartedRenderer::Native("metal"),
-            Renderer::Wgpu(layer) => {
-                StartedRenderer::Wgpu(layer.renderer.renderer().backend_name())
-            }
-        },
+) -> Result<Renderer> {
+    Renderer::start(
+        || new_wgpu(bounds, transparent, use_display_p3),
+        || MetalRenderer::new(context, transparent, use_display_p3),
     )
 }
 
-impl WgpuLayerRenderer {
-    fn new(bounds: Size<f32>, transparent: bool, use_display_p3: bool) -> anyhow::Result<Self> {
-        let layer = CAMetalLayer::new();
-        configure_window_layer(&layer, transparent, use_display_p3);
-        // The scale factor of the view is not known yet. The first resize gives the
-        // drawable size.
-        let size = bounds.map(|pixels| DevicePixels(pixels as i32));
-        let layer_ptr = NonNull::from(&*layer).cast::<c_void>();
-        // wgpu sets the color space of the layer when it configures the surface.
-        let color_space = if use_display_p3 {
-            wgpu::SurfaceColorSpace::DisplayP3
-        } else {
-            wgpu::SurfaceColorSpace::Auto
-        };
-        // SAFETY: `layer_ptr` points to `layer`, a `CAMetalLayer`. The renderer is
-        // dropped before `layer`.
-        let mut renderer = unsafe {
-            WgpuWindowRenderer::new_metal_layer(layer_ptr, size, transparent, color_space)
-        }?;
-        // The Metal renderer blends Core Text glyphs with no gamma or contrast correction.
-        renderer.renderer_mut().set_text_contrast(TextContrast {
-            gamma: 1.0,
-            grayscale_enhanced_contrast: 0.0,
-            subpixel_enhanced_contrast: 0.0,
-        });
-        Ok(Self { renderer, layer })
-    }
+/// Creates a wgpu renderer that draws to a layer for the view.
+fn new_wgpu(
+    bounds: Size<f32>,
+    transparent: bool,
+    use_display_p3: bool,
+) -> Result<(WgpuWindowRenderer, Retained<CAMetalLayer>)> {
+    let layer = CAMetalLayer::new();
+    configure_window_layer(&layer, transparent, use_display_p3);
+    // The scale factor of the view is not known yet. The first resize gives the
+    // drawable size.
+    let size = bounds.map(|pixels| DevicePixels(pixels as i32));
+    let layer_ptr = NonNull::from(&*layer).cast::<c_void>();
+    // wgpu sets the color space of the layer when it configures the surface.
+    let color_space = if use_display_p3 {
+        wgpu::SurfaceColorSpace::DisplayP3
+    } else {
+        wgpu::SurfaceColorSpace::Auto
+    };
+    // SAFETY: `layer_ptr` points to `layer`, a `CAMetalLayer`. The window renderer
+    // drops the wgpu renderer before `layer`.
+    let mut renderer =
+        unsafe { WgpuWindowRenderer::new_metal_layer(layer_ptr, size, transparent, color_space) }?;
+    // The Metal renderer blends Core Text glyphs with no gamma or contrast correction.
+    renderer.renderer_mut().set_text_contrast(TextContrast {
+        gamma: 1.0,
+        grayscale_enhanced_contrast: 0.0,
+        subpixel_enhanced_contrast: 0.0,
+    });
+    Ok((renderer, layer))
 }
 
-impl Renderer {
-    /// Whether the renderer draws the custom surfaces of the scene.
-    pub const fn draws_custom_surfaces(&self) -> bool {
-        matches!(self, Self::Wgpu(_))
-    }
+/// The operations of a window renderer that only macOS has.
+pub trait WindowRendererExt {
+    fn layer(&self) -> Option<&CAMetalLayer>;
+    fn layer_ptr(&self) -> *mut CAMetalLayer;
+    fn set_presents_with_transaction(&mut self, presents_with_transaction: bool);
+    fn update_drawable_size(&mut self, size: Size<DevicePixels>);
+    fn update_transparency(&mut self, transparent: bool);
+    fn destroy(&mut self);
+    fn draw(&mut self, scene: &Scene);
+    fn render_to_pending_image(&mut self, scene: &Scene) -> Result<gpui::PendingImage>;
+}
 
-    /// Whether the renderer draws to the drawables of a `CAMetalDisplayLink`. wgpu takes
-    /// each drawable from the layer itself, which a display link does not allow.
-    pub const fn draws_with_display_link_drawables(&self) -> bool {
-        matches!(self, Self::Metal(_))
-    }
-
-    pub fn set_frame_drawable(
-        &mut self,
-        drawable: Option<Retained<ProtocolObject<dyn CAMetalDrawable>>>,
-    ) -> Option<Retained<ProtocolObject<dyn CAMetalDrawable>>> {
+impl WindowRendererExt for Renderer {
+    fn layer(&self) -> Option<&CAMetalLayer> {
         match self {
-            Self::Metal(renderer) => renderer.set_frame_drawable(drawable),
-            Self::Wgpu(_) => drawable,
+            Self::Wgpu { target, .. } => Some(target),
+            Self::Native(renderer) => renderer.layer(),
         }
     }
 
-    pub fn set_display_link_attached(&mut self, attached: bool) {
-        if let Self::Metal(renderer) = self {
-            renderer.set_display_link_attached(attached);
+    fn layer_ptr(&self) -> *mut CAMetalLayer {
+        match self {
+            Self::Wgpu { target, .. } => Retained::as_ptr(target).cast_mut(),
+            Self::Native(renderer) => renderer.layer_ptr(),
         }
     }
 
-    pub fn gpu_failure(&self) -> Option<gpui::GpuFailure> {
+    fn set_presents_with_transaction(&mut self, presents_with_transaction: bool) {
         match self {
-            Self::Metal(_) => None,
-            Self::Wgpu(renderer) => renderer.renderer.renderer().gpu_failure(),
-        }
-    }
-
-    pub fn layer(&self) -> Option<&CAMetalLayer> {
-        match self {
-            Self::Metal(renderer) => renderer.layer(),
-            Self::Wgpu(renderer) => Some(&renderer.layer),
-        }
-    }
-
-    pub fn layer_ptr(&self) -> *mut CAMetalLayer {
-        match self {
-            Self::Metal(renderer) => renderer.layer_ptr(),
-            Self::Wgpu(renderer) => Retained::as_ptr(&renderer.layer).cast_mut(),
-        }
-    }
-
-    pub fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
-        match self {
-            Self::Metal(renderer) => renderer.sprite_atlas().clone(),
-            Self::Wgpu(renderer) => renderer.renderer.renderer().sprite_atlas().clone(),
-        }
-    }
-
-    pub fn set_presents_with_transaction(&mut self, presents_with_transaction: bool) {
-        match self {
-            Self::Metal(renderer) => {
-                renderer.set_presents_with_transaction(presents_with_transaction)
-            }
             // wgpu reads the flag of the layer at each frame and presents in the
             // transaction when it is set.
-            Self::Wgpu(renderer) => renderer
-                .layer
-                .setPresentsWithTransaction(presents_with_transaction),
+            Self::Wgpu { target, .. } => {
+                target.setPresentsWithTransaction(presents_with_transaction)
+            }
+            Self::Native(renderer) => {
+                renderer.set_presents_with_transaction(presents_with_transaction)
+            }
         }
     }
 
-    pub fn update_drawable_size(&mut self, size: Size<DevicePixels>) {
+    fn update_drawable_size(&mut self, size: Size<DevicePixels>) {
         match self {
-            Self::Metal(renderer) => renderer.update_drawable_size(size),
-            Self::Wgpu(renderer) => renderer.renderer.renderer_mut().update_drawable_size(size),
+            Self::Wgpu { renderer, .. } => renderer.renderer_mut().update_drawable_size(size),
+            Self::Native(renderer) => renderer.update_drawable_size(size),
         }
     }
 
-    pub fn update_transparency(&mut self, transparent: bool) {
+    fn update_transparency(&mut self, transparent: bool) {
         match self {
-            Self::Metal(renderer) => renderer.update_transparency(transparent),
             // The surface configuration sets the opacity of the layer.
-            Self::Wgpu(renderer) => renderer
-                .renderer
-                .renderer_mut()
-                .update_transparency(transparent),
+            Self::Wgpu { renderer, .. } => renderer.renderer_mut().update_transparency(transparent),
+            Self::Native(renderer) => renderer.update_transparency(transparent),
         }
     }
 
-    pub fn destroy(&mut self) {
+    fn destroy(&mut self) {
         match self {
-            Self::Metal(renderer) => renderer.destroy(),
-            Self::Wgpu(renderer) => renderer.renderer.renderer_mut().destroy(),
+            Self::Wgpu { renderer, .. } => renderer.renderer_mut().destroy(),
+            Self::Native(renderer) => renderer.destroy(),
         }
     }
 
-    pub fn draw(&mut self, scene: &Scene) {
+    fn draw(&mut self, scene: &Scene) {
         match self {
-            Self::Metal(renderer) => renderer.draw(scene),
-            Self::Wgpu(renderer) => renderer.renderer.draw(scene),
+            Self::Wgpu { renderer, .. } => renderer.draw(scene),
+            Self::Native(renderer) => renderer.draw(scene),
         }
     }
 
-    /// Tells whether the next frame must build the scene again, and clears the flag.
-    pub fn take_force_render(&mut self) -> bool {
+    fn render_to_pending_image(&mut self, scene: &Scene) -> Result<gpui::PendingImage> {
         match self {
-            Self::Metal(_) => false,
-            Self::Wgpu(renderer) => renderer.renderer.take_force_render(),
-        }
-    }
-
-    pub fn render_to_pending_image(&mut self, scene: &Scene) -> Result<gpui::PendingImage> {
-        match self {
-            Self::Metal(renderer) => renderer.render_to_pending_image(scene),
-            Self::Wgpu(renderer) => renderer.renderer.render_to_pending_image(scene),
+            Self::Wgpu { renderer, .. } => renderer.render_to_pending_image(scene),
+            Self::Native(renderer) => renderer.render_to_pending_image(scene),
         }
     }
 }

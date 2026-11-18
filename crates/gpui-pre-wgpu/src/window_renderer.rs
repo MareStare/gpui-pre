@@ -1,14 +1,115 @@
-//! The wgpu renderer of a native window, for the platforms that also have a native
-//! renderer. The windows of a thread share one device.
+//! The renderer of a native window, for the platforms that also have a native
+//! renderer. The default is wgpu. `GPUI_RENDERER` can pick the native renderer, and
+//! a window whose wgpu renderer fails to start uses the native renderer too. The wgpu
+//! renderers of a thread share one device.
 
 use std::rc::Rc;
+use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
-use gpui::{DevicePixels, Scene, Size};
+use gpui::{DevicePixels, GpuFailure, PlatformAtlas, Scene, Size};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
+use crate::renderer_choice::wgpu_requested;
+use crate::startup_log::{StartedRenderer, time_window_renderer};
 use crate::wgpu_renderer::{SurfaceSource, WindowSource};
 use crate::{GpuContext, WgpuRenderer, WgpuSurfaceConfig};
+
+/// The native renderer of a platform.
+pub trait NativeRenderer {
+    /// The value of `GPUI_RENDERER` that picks the renderer. The startup log names the
+    /// renderer `native:<NAME>`.
+    const NAME: &'static str;
+
+    /// What the wgpu renderer of the platform draws to. It lives as long as the wgpu
+    /// renderer.
+    type WgpuTarget;
+
+    fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas>;
+}
+
+/// The renderer of a window: wgpu, or the native renderer of the platform.
+pub enum WindowRenderer<N: NativeRenderer> {
+    Wgpu {
+        renderer: WgpuWindowRenderer,
+
+        /// Drops after `renderer`.
+        target: N::WgpuTarget,
+    },
+    Native(N),
+}
+
+impl<N: NativeRenderer> WindowRenderer<N> {
+    /// Starts the renderer of a window, and logs the time of the start. It starts the
+    /// wgpu renderer with `new_wgpu`, unless `GPUI_RENDERER` picks the native renderer.
+    /// It starts the native renderer with `new_native` in that case, and when the wgpu
+    /// renderer fails to start.
+    pub fn start(
+        new_wgpu: impl FnOnce() -> Result<(WgpuWindowRenderer, N::WgpuTarget)>,
+        new_native: impl FnOnce() -> Result<N>,
+    ) -> Result<Self> {
+        time_window_renderer(
+            || {
+                if wgpu_requested(N::NAME) {
+                    match new_wgpu() {
+                        Ok((renderer, target)) => return Ok(Self::Wgpu { renderer, target }),
+                        Err(error) => log::error!("Using the {} renderer: {error:#}", N::NAME),
+                    }
+                }
+                new_native().map(Self::Native)
+            },
+            |renderer| match renderer {
+                Self::Wgpu { renderer, .. } => {
+                    StartedRenderer::Wgpu(renderer.renderer().backend_name())
+                }
+                Self::Native(_) => StartedRenderer::Native(N::NAME),
+            },
+        )
+    }
+
+    pub fn native(&self) -> Option<&N> {
+        match self {
+            Self::Wgpu { .. } => None,
+            Self::Native(renderer) => Some(renderer),
+        }
+    }
+
+    pub fn native_mut(&mut self) -> Option<&mut N> {
+        match self {
+            Self::Wgpu { .. } => None,
+            Self::Native(renderer) => Some(renderer),
+        }
+    }
+
+    /// Whether the renderer draws the custom surfaces of the scene.
+    pub fn draws_custom_surfaces(&self) -> bool {
+        matches!(self, Self::Wgpu { .. })
+    }
+
+    /// Tells whether the next frame must build the scene again, and clears the flag.
+    pub fn take_force_render(&mut self) -> bool {
+        match self {
+            Self::Wgpu { renderer, .. } => renderer.take_force_render(),
+            Self::Native(_) => false,
+        }
+    }
+
+    /// The GPU error that stays after the wgpu renderer dropped its GPU caches to
+    /// recover. A native renderer has none.
+    pub fn gpu_failure(&self) -> Option<GpuFailure> {
+        match self {
+            Self::Wgpu { renderer, .. } => renderer.renderer().gpu_failure(),
+            Self::Native(_) => None,
+        }
+    }
+
+    pub fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
+        match self {
+            Self::Wgpu { renderer, .. } => renderer.renderer().sprite_atlas().clone(),
+            Self::Native(renderer) => renderer.sprite_atlas(),
+        }
+    }
+}
 
 thread_local! {
     static WINDOW_CONTEXT: GpuContext = Rc::default();

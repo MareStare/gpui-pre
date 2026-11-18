@@ -3,6 +3,7 @@ use crate::{
     TISGetInputSourceProperty, TimerFrames, WindowFrameSource, events::platform_input_from_native,
     image_cursor, kTISPropertyInputSourceIsASCIICapable, kTISPropertyInputSourceType,
     kTISTypeKeyboardInputMode, ns_string, pen::pen_event, renderer,
+    renderer::WindowRendererExt as _,
 };
 use anyhow::Result;
 use block2::RcBlock;
@@ -864,7 +865,9 @@ impl MacWindowState {
                 });
                 if let Some(source) = source {
                     metal_frames.replace(Some(source));
-                    self.renderer.set_display_link_attached(true);
+                    if let Some(renderer) = self.renderer.native_mut() {
+                        renderer.set_display_link_attached(true);
+                    }
                     true
                 } else {
                     false
@@ -893,7 +896,9 @@ impl MacWindowState {
                     // Detach the link rather than pause it, so that a synchronous
                     // draw can use the layer's `nextDrawable`.
                     metal_frames.replace(None);
-                    self.renderer.set_display_link_attached(false);
+                    if let Some(renderer) = self.renderer.native_mut() {
+                        renderer.set_display_link_attached(false);
+                    }
                 }
             }
             FrameSource::DisplayLink(Some(frame_source)) => frame_source.stop(),
@@ -1165,9 +1170,10 @@ impl MacWindow {
             let native_view: *mut AnyObject = msg_send![native_view, initWithFrame: content_bounds];
             assert!(!native_view.is_null());
 
-            let metal_frames = (MetalFrameSource::is_available()
-                && renderer.draws_with_display_link_drawables())
-            .then(Rc::<MetalFrames>::default);
+            // Only the Metal renderer draws to the drawables of a display link. wgpu takes
+            // each drawable from the layer itself, which a display link does not allow.
+            let metal_frames = (MetalFrameSource::is_available() && renderer.native().is_some())
+                .then(Rc::<MetalFrames>::default);
             let state = Rc::new_cyclic(|state: &Weak<Mutex<MacWindowState>>| {
                 let state = state.clone();
                 let timer_frames = TimerFrames::new(
@@ -2280,7 +2286,7 @@ impl PlatformWindow for MacWindow {
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
-        self.0.lock().renderer.sprite_atlas().clone()
+        self.0.lock().renderer.sprite_atlas()
     }
 
     fn gpu_specs(&self) -> Option<gpui::GpuSpecs> {
@@ -3589,10 +3595,14 @@ fn metal_frame(
         return;
     };
     let metal_frames = metal_frames.clone();
-    let Some(mut callback) = lock.request_frame_callback.take() else {
+    let state = &mut *lock;
+    let Some(renderer) = state.renderer.native_mut() else {
         return;
     };
-    lock.renderer.set_frame_drawable(Some(update.drawable()));
+    let Some(mut callback) = state.request_frame_callback.take() else {
+        return;
+    };
+    renderer.set_frame_drawable(Some(update.drawable()));
     let options = lock.take_frame_options(signal_at, FrameRequestSource::NativeCallback);
     drop(lock);
     metal_frames.begin_frame();
@@ -3601,7 +3611,10 @@ fn metal_frame(
     lock.request_frame_callback = Some(callback);
     // A frame with nothing to draw leaves its drawable unused; releasing it
     // lets the link hand it out again.
-    let used_drawable = lock.renderer.set_frame_drawable(None).is_none();
+    let used_drawable = lock
+        .renderer
+        .native_mut()
+        .is_none_or(|renderer| renderer.set_frame_drawable(None).is_none());
     metal_frames.end_frame(used_drawable);
 }
 

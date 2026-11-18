@@ -13,7 +13,7 @@ fn startup_log_enabled() -> bool {
 }
 
 /// The renderer that a window renderer start gave.
-pub enum StartedRenderer {
+pub(crate) enum StartedRenderer {
     /// A wgpu renderer with the name of its backend, e.g. `vulkan`. Its log name is
     /// that name.
     Wgpu(&'static str),
@@ -44,7 +44,7 @@ pub(crate) fn time_startup_stage<T>(stage: &str, work: impl FnOnce() -> T) -> T 
 ///
 /// A start that gives a renderer logs the stage `window-renderer` with the renderer
 /// that `name_of` gives. A start that fails logs the stage `window-renderer-failed`.
-pub fn time_window_renderer<R>(
+pub(crate) fn time_window_renderer<R>(
     start: impl FnOnce() -> anyhow::Result<R>,
     name_of: impl FnOnce(&R) -> StartedRenderer,
 ) -> anyhow::Result<R> {

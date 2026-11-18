@@ -2,7 +2,7 @@
 
 /// Tells whether the windows draw with wgpu. `native` is the value of `GPUI_RENDERER`
 /// that picks the native renderer of the platform.
-pub fn wgpu_requested(native: &str) -> bool {
+pub(crate) fn wgpu_requested(native: &str) -> bool {
     wgpu_requested_by(std::env::var("GPUI_RENDERER").ok().as_deref(), native)
 }
 

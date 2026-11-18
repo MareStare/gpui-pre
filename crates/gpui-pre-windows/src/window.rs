@@ -143,7 +143,7 @@ impl WindowsWindowState {
         };
         let border_offset = WindowBorderOffset::default();
         let restore_from_minimized = None;
-        let renderer = WindowRenderer::new(
+        let renderer = new_window_renderer(
             hwnd,
             directx_devices,
             disable_direct_composition,

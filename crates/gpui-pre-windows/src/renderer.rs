@@ -5,155 +5,133 @@
 use std::{num::NonZeroIsize, sync::Arc};
 
 use anyhow::{Context as _, Result};
-use gpui::{
-    DevicePixels, GpuFailure, GpuSpecs, PlatformAtlas, Scene, Size, WindowBackgroundAppearance,
-};
-use gpui_wgpu::{
-    StartedRenderer, TextContrast, WgpuWindowRenderer, time_window_renderer, wgpu_requested,
-};
+use gpui::{DevicePixels, GpuSpecs, PlatformAtlas, Scene, Size, WindowBackgroundAppearance};
+use gpui_wgpu::{NativeRenderer, TextContrast, WgpuWindowRenderer};
 use raw_window_handle as rwh;
 
 use crate::{DirectXDevices, DirectXRenderer, HWND};
 
-pub(crate) enum WindowRenderer {
-    DirectX(DirectXRenderer),
-    Wgpu(WgpuWindowRenderer),
+pub(crate) type WindowRenderer = gpui_wgpu::WindowRenderer<DirectXRenderer>;
+
+impl NativeRenderer for DirectXRenderer {
+    const NAME: &'static str = "dx11";
+
+    /// The wgpu renderer draws to the window itself.
+    type WgpuTarget = ();
+
+    fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
+        DirectXRenderer::sprite_atlas(self)
+    }
 }
 
-impl WindowRenderer {
-    pub(crate) fn new(
-        hwnd: HWND,
-        directx_devices: &DirectXDevices,
-        disable_direct_composition: bool,
-        size: Size<DevicePixels>,
-    ) -> Result<Self> {
-        time_window_renderer(
-            || Self::new_inner(hwnd, directx_devices, disable_direct_composition, size),
-            |renderer| match renderer {
-                Self::DirectX(_) => StartedRenderer::Native("dx11"),
-                Self::Wgpu(window) => StartedRenderer::Wgpu(window.renderer().backend_name()),
-            },
-        )
-    }
+pub(crate) fn new_window_renderer(
+    hwnd: HWND,
+    directx_devices: &DirectXDevices,
+    disable_direct_composition: bool,
+    size: Size<DevicePixels>,
+) -> Result<WindowRenderer> {
+    WindowRenderer::start(
+        || Ok((new_wgpu(hwnd, size)?, ())),
+        || {
+            DirectXRenderer::new(hwnd, directx_devices, disable_direct_composition)
+                .context("Creating DirectX renderer")
+        },
+    )
+}
 
-    fn new_inner(
-        hwnd: HWND,
-        directx_devices: &DirectXDevices,
-        disable_direct_composition: bool,
-        size: Size<DevicePixels>,
-    ) -> Result<Self> {
-        if wgpu_requested("dx11") {
-            match Self::new_wgpu(hwnd, size) {
-                Ok(renderer) => return Ok(renderer),
-                Err(error) => log::error!("{error:#}: falling back to Direct3D 11"),
-            }
-        }
-        let renderer = DirectXRenderer::new(hwnd, directx_devices, disable_direct_composition)
-            .context("Creating DirectX renderer")?;
-        Ok(Self::DirectX(renderer))
-    }
+fn new_wgpu(hwnd: HWND, size: Size<DevicePixels>) -> Result<WgpuWindowRenderer> {
+    // The window can be created with the default size of the system,
+    // which is no real size. The first resize gives the real size.
+    let mut window = WgpuWindowRenderer::new(RawWindow::new(hwnd), size, false)?;
+    let renderer = window.renderer_mut();
+    let font_info = DirectXRenderer::get_font_info();
+    renderer.set_text_contrast(TextContrast {
+        gamma: font_info.gamma,
+        grayscale_enhanced_contrast: font_info.grayscale_enhanced_contrast,
+        subpixel_enhanced_contrast: font_info.subpixel_enhanced_contrast,
+    });
+    renderer.set_subpixel_layout(font_info.is_bgr);
+    Ok(window)
+}
 
-    fn new_wgpu(hwnd: HWND, size: Size<DevicePixels>) -> Result<Self> {
-        // The window can be created with the default size of the system,
-        // which is no real size. The first resize gives the real size.
-        let mut window = WgpuWindowRenderer::new(RawWindow::new(hwnd), size, false)?;
-        let renderer = window.renderer_mut();
-        let font_info = DirectXRenderer::get_font_info();
-        renderer.set_text_contrast(TextContrast {
-            gamma: font_info.gamma,
-            grayscale_enhanced_contrast: font_info.grayscale_enhanced_contrast,
-            subpixel_enhanced_contrast: font_info.subpixel_enhanced_contrast,
-        });
-        renderer.set_subpixel_layout(font_info.is_bgr);
-        Ok(Self::Wgpu(window))
-    }
+/// The operations of a window renderer that only Windows has.
+pub(crate) trait WindowRendererExt {
+    fn draw(
+        &mut self,
+        scene: &Scene,
+        background_appearance: WindowBackgroundAppearance,
+    ) -> Result<()>;
+    fn render_to_pending_image(
+        &mut self,
+        scene: &Scene,
+        background_appearance: WindowBackgroundAppearance,
+    ) -> Result<gpui::PendingImage>;
+    fn gpu_specs(&self) -> Result<GpuSpecs>;
+    fn resize(&mut self, size: Size<DevicePixels>) -> Result<()>;
+    fn handle_device_lost(&mut self, directx_devices: &DirectXDevices) -> Result<()>;
+    fn mark_drawable(&mut self);
+}
 
-    /// Whether the renderer draws the custom surfaces of the scene.
-    pub(crate) const fn draws_custom_surfaces(&self) -> bool {
-        matches!(self, Self::Wgpu(_))
-    }
-
-    pub(crate) fn draw(
+impl WindowRendererExt for WindowRenderer {
+    fn draw(
         &mut self,
         scene: &Scene,
         background_appearance: WindowBackgroundAppearance,
     ) -> Result<()> {
         match self {
-            Self::DirectX(renderer) => renderer.draw(scene, background_appearance),
-            Self::Wgpu(renderer) => {
+            Self::Wgpu { renderer, .. } => {
                 renderer.draw(scene);
                 Ok(())
             }
+            Self::Native(renderer) => renderer.draw(scene, background_appearance),
         }
     }
 
-    /// Tells whether the next frame must build the scene again, and clears the flag.
-    pub(crate) fn take_force_render(&mut self) -> bool {
-        match self {
-            Self::DirectX(_) => false,
-            Self::Wgpu(renderer) => renderer.take_force_render(),
-        }
-    }
-
-    pub(crate) fn render_to_pending_image(
+    fn render_to_pending_image(
         &mut self,
         scene: &Scene,
         background_appearance: WindowBackgroundAppearance,
     ) -> Result<gpui::PendingImage> {
         match self {
-            Self::DirectX(renderer) => renderer
+            Self::Wgpu { renderer, .. } => renderer.render_to_pending_image(scene),
+            Self::Native(renderer) => renderer
                 .render_to_image(scene, background_appearance)
                 .map(gpui::PendingImage::ready),
-            Self::Wgpu(renderer) => renderer.render_to_pending_image(scene),
         }
     }
 
-    pub(crate) fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
+    fn gpu_specs(&self) -> Result<GpuSpecs> {
         match self {
-            Self::DirectX(renderer) => renderer.sprite_atlas(),
-            Self::Wgpu(renderer) => renderer.renderer().sprite_atlas().clone(),
-        }
-    }
-
-    pub(crate) fn gpu_specs(&self) -> Result<GpuSpecs> {
-        match self {
-            Self::DirectX(renderer) => renderer.gpu_specs(),
-            Self::Wgpu(renderer) => renderer
+            Self::Wgpu { renderer, .. } => renderer
                 .renderer()
                 .gpu_specs()
                 .context("GPU resources released"),
+            Self::Native(renderer) => renderer.gpu_specs(),
         }
     }
 
-    pub(crate) fn gpu_failure(&self) -> Option<GpuFailure> {
+    fn resize(&mut self, size: Size<DevicePixels>) -> Result<()> {
         match self {
-            Self::DirectX(_) => None,
-            Self::Wgpu(renderer) => renderer.renderer().gpu_failure(),
-        }
-    }
-
-    pub(crate) fn resize(&mut self, size: Size<DevicePixels>) -> Result<()> {
-        match self {
-            Self::DirectX(renderer) => renderer.resize(size),
-            Self::Wgpu(renderer) => {
+            Self::Wgpu { renderer, .. } => {
                 renderer.renderer_mut().update_drawable_size(size);
                 Ok(())
             }
+            Self::Native(renderer) => renderer.resize(size),
         }
     }
 
-    pub(crate) fn handle_device_lost(&mut self, directx_devices: &DirectXDevices) -> Result<()> {
+    fn handle_device_lost(&mut self, directx_devices: &DirectXDevices) -> Result<()> {
         match self {
-            Self::DirectX(renderer) => renderer.handle_device_lost(directx_devices),
             // The wgpu renderer has its own device and recovers it in `draw`.
-            Self::Wgpu(_) => Ok(()),
+            Self::Wgpu { .. } => Ok(()),
+            Self::Native(renderer) => renderer.handle_device_lost(directx_devices),
         }
     }
 
-    pub(crate) fn mark_drawable(&mut self) {
+    fn mark_drawable(&mut self) {
         match self {
-            Self::DirectX(renderer) => renderer.mark_drawable(),
-            Self::Wgpu(_) => {}
+            Self::Wgpu { .. } => {}
+            Self::Native(renderer) => renderer.mark_drawable(),
         }
     }
 }
