@@ -70,7 +70,9 @@ gpui-pre version goes.
   panic.
 - Adapter by name: the wgpu renderer tries first the adapter whose name
   contains `WGPU_ADAPTER_NAME`, case-insensitive. It ranks above the
-  adapter of `ZED_DEVICE_ID`. A window panics when no adapter has the name.
+  adapter of `ZED_DEVICE_ID`. The first window panics when no adapter has
+  the name. A recovery from a lost device with no such adapter fails, and
+  the renderer counts it as a failed frame and tries again.
 - Cached views: a cached view keeps its window control areas, such as
   the drag area of a title bar, in the frames that reuse its paint. Tests
   run the hit test of the window control areas with

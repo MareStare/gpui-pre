@@ -1,5 +1,7 @@
 // Modified for gpui-pre (snapshot of zed@d2a4fb6): adapt device queues and sRGB detection to wgpu 30.0.1.
 use crate::frame_failures::{FrameCheck, FrameFailures};
+#[cfg(not(target_family = "wasm"))]
+use crate::wgpu_context::ContextError;
 use crate::wgpu_custom_surface::as_wgpu_surface;
 use crate::{
     CompositorGpuHint, DeviceErrorState, WgpuAtlas, WgpuContext, WgpuSurfaceFrame,
@@ -404,8 +406,14 @@ impl WgpuRenderer {
                 (context, surface)
             }
             None => {
-                let (context, surface) =
-                    create_context_and_surface(source, compositor_gpu, &config, false)?;
+                let created = create_context_and_surface(source, compositor_gpu, &config, false);
+                let (context, surface) = match created {
+                    Ok(created) => created,
+                    // An error lets the window use a native renderer, and the wrong GPU
+                    // must fail loudly.
+                    Err(error @ ContextError::NoAdapterNamed(_)) => panic!("{error}"),
+                    Err(ContextError::Uncategorized(error)) => return Err(error),
+                };
                 (ctx_ref.insert(context), surface)
             }
         };
@@ -2635,45 +2643,41 @@ impl SurfaceSource for MetalLayerSource {
 }
 
 /// Creates the context on the first group of backends with an adapter that can draw
-/// to the window.
-///
-/// Panics when no group has the adapter that `WGPU_ADAPTER_NAME` names. An error
-/// lets the window use a native renderer, and the wrong GPU must fail loudly.
+/// to the window. It fails with `ContextError::NoAdapterNamed` only when no group has
+/// the adapter that `WGPU_ADAPTER_NAME` names.
 #[cfg(not(target_family = "wasm"))]
 fn create_context_and_surface(
     source: &(impl SurfaceSource + ?Sized),
     compositor_gpu: Option<CompositorGpuHint>,
     config: &WgpuSurfaceConfig,
     reject_software: bool,
-) -> anyhow::Result<(WgpuContext, wgpu::Surface<'static>)> {
-    let backend_groups = WgpuContext::backend_groups();
-    let group_count = backend_groups.len();
-    let mut groups_without_named_adapter = 0;
+) -> Result<(WgpuContext, wgpu::Surface<'static>), ContextError> {
+    let mut missing_name = None;
     let mut last_error = None;
-    for backends in backend_groups {
+    for backends in WgpuContext::backend_groups() {
         let instance = WgpuContext::instance(source.display(), backends);
-        let created = source.create_surface(&instance).and_then(|surface| {
-            let context = time_startup_stage("wgpu-context", || {
+        let created = match source.create_surface(&instance) {
+            Ok(surface) => time_startup_stage("wgpu-context", || {
                 WgpuContext::new(instance, &surface, config, compositor_gpu, reject_software)
-            })?;
-            Ok((context, surface))
-        });
-        match created {
+            })
+            .map(|context| (context, surface)),
+            Err(error) => Err(ContextError::Uncategorized(error)),
+        };
+        let error = match created {
             Ok(created) => return Ok(created),
-            Err(error) => {
-                log::info!("No adapter on {backends:?} can draw to the window: {error:#}");
-                if error.is::<crate::NoAdapterNamed>() {
-                    groups_without_named_adapter += 1;
-                }
-                last_error = Some(error);
-            }
+            Err(error) => error,
+        };
+        log::info!("No adapter on {backends:?} can draw to the window: {error}");
+        match error {
+            ContextError::NoAdapterNamed(name) => missing_name = Some(name),
+            ContextError::Uncategorized(error) => last_error = Some(error),
         }
     }
-    let error = last_error.unwrap_or_else(|| anyhow::anyhow!("No wgpu backends to try"));
-    if group_count > 0 && groups_without_named_adapter == group_count {
-        panic!("{error:#}");
-    }
-    Err(error)
+    Err(match (last_error, missing_name) {
+        (Some(error), _) => ContextError::Uncategorized(error),
+        (None, Some(name)) => ContextError::NoAdapterNamed(name),
+        (None, None) => anyhow::anyhow!("No wgpu backends to try").into(),
+    })
 }
 
 fn create_surface(

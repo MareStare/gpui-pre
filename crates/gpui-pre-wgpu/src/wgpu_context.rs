@@ -140,13 +140,13 @@ pub struct CompositorGpuHint {
 
 impl WgpuContext {
     #[cfg(not(target_family = "wasm"))]
-    pub fn new(
+    pub(crate) fn new(
         instance: wgpu::Instance,
         surface: &wgpu::Surface<'_>,
         config: &WgpuSurfaceConfig,
         compositor_gpu: Option<CompositorGpuHint>,
         reject_software: bool,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self, ContextError> {
         let device_id_filter = Self::device_id_filter();
         let adapter_name = Self::adapter_name_filter();
 
@@ -560,17 +560,20 @@ impl WgpuContext {
         config: &WgpuSurfaceConfig,
         compositor_gpu: Option<&CompositorGpuHint>,
         reject_software: bool,
-    ) -> anyhow::Result<(
-        wgpu::Adapter,
-        wgpu::Device,
-        wgpu::Queue,
-        bool,
-        TextureFormat,
-    )> {
+    ) -> Result<
+        (
+            wgpu::Adapter,
+            wgpu::Device,
+            wgpu::Queue,
+            bool,
+            TextureFormat,
+        ),
+        ContextError,
+    > {
         let mut adapters: Vec<_> = instance.enumerate_adapters(wgpu::Backends::all()).await;
 
         if adapters.is_empty() {
-            anyhow::bail!("No GPU adapters found");
+            return Err(anyhow::anyhow!("No GPU adapters found").into());
         }
 
         if let Some(device_id) = device_id_filter {
@@ -640,7 +643,7 @@ impl WgpuContext {
             }
         }
 
-        anyhow::bail!("No GPU adapter found that can configure the display surface")
+        Err(anyhow::anyhow!("No GPU adapter found that can configure the display surface").into())
     }
 
     /// Sort adapters into a single priority order. Tiers (from highest to lowest):
@@ -658,14 +661,14 @@ impl WgpuContext {
         adapter_name: Option<&str>,
         device_id_filter: Option<u32>,
         compositor_gpu: Option<&CompositorGpuHint>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), ContextError> {
         if let Some(name) = adapter_name {
             log::info!("WGPU_ADAPTER_NAME filter: {name:?}");
             if !adapters
                 .iter()
                 .any(|adapter| adapter_name_matches(&adapter.get_info().name, name))
             {
-                return Err(NoAdapterNamed(name.to_owned()).into());
+                return Err(ContextError::NoAdapterNamed(name.to_owned()));
             }
         }
         adapters.sort_by_key(|adapter| {
@@ -837,24 +840,37 @@ fn adapter_rank(
     )
 }
 
-/// The error of a `WGPU_ADAPTER_NAME` that matches no adapter.
+/// The error of a context that did not start.
 #[cfg(not(target_family = "wasm"))]
 #[derive(Debug)]
-pub(crate) struct NoAdapterNamed(String);
+pub(crate) enum ContextError {
+    /// No adapter has a name that contains `WGPU_ADAPTER_NAME`, the value of the field.
+    NoAdapterNamed(String),
+    Uncategorized(anyhow::Error),
+}
 
 #[cfg(not(target_family = "wasm"))]
-impl std::fmt::Display for NoAdapterNamed {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "No GPU adapter has a name that contains WGPU_ADAPTER_NAME={:?}",
-            self.0
-        )
+impl From<anyhow::Error> for ContextError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Uncategorized(error)
     }
 }
 
 #[cfg(not(target_family = "wasm"))]
-impl std::error::Error for NoAdapterNamed {}
+impl std::fmt::Display for ContextError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoAdapterNamed(name) => write!(
+                f,
+                "No GPU adapter has a name that contains WGPU_ADAPTER_NAME={name:?}"
+            ),
+            Self::Uncategorized(error) => write!(f, "{error:#}"),
+        }
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl std::error::Error for ContextError {}
 
 /// Tells whether `adapter` contains `name`, case-insensitive.
 #[cfg(not(target_family = "wasm"))]
