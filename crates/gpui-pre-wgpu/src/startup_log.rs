@@ -31,7 +31,7 @@ impl fmt::Display for StartedRenderer {
 }
 
 /// Runs `work` and logs its time as `stage`. It reads no clock while the log is off.
-pub fn time_startup_stage<T>(stage: &str, work: impl FnOnce() -> T) -> T {
+pub(crate) fn time_startup_stage<T>(stage: &str, work: impl FnOnce() -> T) -> T {
     let (result, time) = timed(work);
     if let Some(time) = time {
         eprintln!("{}", time.line(stage));

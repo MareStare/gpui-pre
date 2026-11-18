@@ -497,7 +497,7 @@ impl WgpuContext {
     /// 400 ms to enumerate its adapters on an Intel UHD iGPU, so it starts only when no
     /// Vulkan adapter can draw to the window. Apple platforms have Metal only.
     #[cfg(not(target_family = "wasm"))]
-    pub fn backend_groups() -> Vec<wgpu::Backends> {
+    pub(crate) fn backend_groups() -> Vec<wgpu::Backends> {
         if let Some(backends) = wgpu::Backends::from_env() {
             vec![backends]
         } else if cfg!(windows) {

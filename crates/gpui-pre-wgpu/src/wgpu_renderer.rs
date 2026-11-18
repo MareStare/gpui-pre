@@ -1,12 +1,10 @@
 // Modified for gpui-pre (snapshot of zed@d2a4fb6): adapt device queues and sRGB detection to wgpu 30.0.1.
 use crate::frame_failures::{FrameCheck, FrameFailures};
+use crate::startup_log::time_startup_stage;
 #[cfg(not(target_family = "wasm"))]
 use crate::wgpu_context::ContextError;
 use crate::wgpu_custom_surface::as_wgpu_surface;
-use crate::{
-    CompositorGpuHint, DeviceErrorState, WgpuAtlas, WgpuContext, WgpuSurfaceFrame,
-    time_startup_stage,
-};
+use crate::{CompositorGpuHint, DeviceErrorState, WgpuAtlas, WgpuContext, WgpuSurfaceFrame};
 #[cfg(not(target_family = "wasm"))]
 use crate::{StartedRenderer, time_window_renderer};
 use anyhow::{Context as _, Result};
