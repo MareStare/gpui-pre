@@ -2510,6 +2510,26 @@ impl Corners<Pixels> {
             .max(self.bottom_right)
             .max(self.bottom_left)
     }
+
+    /// The corner radii of the shape that grows by `distance` out of a box
+    /// with these radii. A negative `distance` shrinks the shape into the
+    /// box. The shape follows the spread shape of a box shadow in CSS:
+    /// <https://www.w3.org/TR/css-backgrounds-3/#shadow-shape>. A radius
+    /// that is smaller than the distance grows less, and a sharp corner
+    /// stays sharp.
+    #[must_use]
+    pub(crate) fn spread(&self, distance: Pixels) -> Self {
+        self.map(|&radius| {
+            if distance <= Pixels::ZERO {
+                (radius + distance).max(Pixels::ZERO)
+            } else if radius >= distance {
+                radius + distance
+            } else {
+                let ratio = radius / distance;
+                radius + distance * (1. + (ratio - 1.).powi(3))
+            }
+        })
+    }
 }
 
 impl<T: Div<f32, Output = T> + Ord + Clone + Debug + Default + PartialEq> Corners<T> {
@@ -4036,6 +4056,34 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spread_grows_each_corner_as_a_css_shadow() {
+        let corners = Corners {
+            top_left: px(10.),
+            top_right: px(0.),
+            bottom_right: px(30.),
+            bottom_left: px(3.),
+        };
+        assert_eq!(
+            corners.spread(px(20.)),
+            Corners {
+                top_left: px(27.5),
+                top_right: px(0.),
+                bottom_right: px(50.),
+                bottom_left: px(3. + 20. * (1. + (0.15f32 - 1.).powi(3))),
+            }
+        );
+        assert_eq!(
+            corners.spread(px(-5.)),
+            Corners {
+                top_left: px(5.),
+                top_right: px(0.),
+                bottom_right: px(25.),
+                bottom_left: px(0.),
+            }
+        );
+    }
 
     #[test]
     fn test_pixels_to_i32() {

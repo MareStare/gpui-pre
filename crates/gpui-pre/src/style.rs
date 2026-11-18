@@ -411,28 +411,14 @@ pub struct Outline {
 
 impl Outline {
     /// The bounds and the corner radii of the outer edge of the line around
-    /// an element of `bounds` and `corner_radii`. A sharp corner stays
-    /// sharp.
+    /// an element of `bounds` and `corner_radii`.
     fn outer(
         &self,
         bounds: Bounds<Pixels>,
         corner_radii: Corners<Pixels>,
     ) -> (Bounds<Pixels>, Corners<Pixels>) {
         let reach = self.offset + self.width;
-        let grow = |radius: Pixels| {
-            if radius > Pixels::ZERO {
-                (radius + reach).max(Pixels::ZERO)
-            } else {
-                Pixels::ZERO
-            }
-        };
-        let corners = Corners {
-            top_left: grow(corner_radii.top_left),
-            top_right: grow(corner_radii.top_right),
-            bottom_right: grow(corner_radii.bottom_right),
-            bottom_left: grow(corner_radii.bottom_left),
-        };
-        (bounds.dilate(reach), corners)
+        (bounds.dilate(reach), corner_radii.spread(reach))
     }
 }
 

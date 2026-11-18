@@ -200,6 +200,9 @@ commit, then rebase the patch commits onto it.
 - Spring colors: `Interpolate` for `Rgba` and `Hsla` mixes with
   premultiplied alpha, as CSS does, so a clear color adds no tint on the
   way.
+- Shadow spread radius: the spread of a box shadow grows its corner radii
+  as CSS does, so a ring around a round element stays round. An inset
+  shadow and an outline shape their corners by the same rule.
 
 ## License
 
