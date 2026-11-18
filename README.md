@@ -190,6 +190,9 @@ commit, then rebase the patch commits onto it.
   tooltip shows with no delay.
 - Element opacity: `Window::element_opacity` gives the opacity that the
   current element draws with, in its prepaint and paint.
+  `Window::with_element_opacity` multiplies the opacity of the elements
+  that a closure draws, so an element can fade its child by the bounds
+  that the child paints at.
 
 ## License
 

@@ -4580,7 +4580,10 @@ impl Window {
         result
     }
 
-    pub(crate) fn with_element_opacity<R>(
+    /// Multiplies the opacity of the elements that `f` draws by `opacity`.
+    /// This method should only be called during the prepaint or paint phase
+    /// of element drawing.
+    pub fn with_element_opacity<R>(
         &mut self,
         opacity: Option<f32>,
         f: impl FnOnce(&mut Self) -> R,
