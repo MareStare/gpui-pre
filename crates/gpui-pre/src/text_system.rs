@@ -738,15 +738,39 @@ impl WindowTextSystem {
         wrap_width: Option<Pixels>,
         line_clamp: Option<usize>,
     ) -> Result<SmallVec<[WrappedLine; 1]>> {
+        self.shape_text_with_break_points(text, font_size, runs, wrap_width, line_clamp, None)
+    }
+
+    /// Shapes the text as [`Self::shape_text`] does. When `break_points` is given, the text
+    /// wraps only at its sorted byte offsets, in place of the Unicode line break rules.
+    pub(crate) fn shape_text_with_break_points(
+        &self,
+        text: SharedString,
+        font_size: Pixels,
+        runs: &[TextRun],
+        wrap_width: Option<Pixels>,
+        line_clamp: Option<usize>,
+        break_points: Option<&[usize]>,
+    ) -> Result<SmallVec<[WrappedLine; 1]>> {
         let mut runs = runs.iter().filter(|run| run.len > 0).cloned().peekable();
         let mut font_runs = self.font_runs_buffer.take();
 
         let mut lines = SmallVec::new();
         let max_wrap_lines = line_clamp;
         let mut wrapped_lines = 0;
+        let mut line_break_points = Vec::new();
 
-        let mut process_line = |line_text: SharedString, line_start, line_end| {
+        let mut process_line = |line_text: SharedString, line_start: usize, line_end: usize| {
             font_runs.clear();
+            line_break_points.clear();
+            if let Some(points) = break_points {
+                line_break_points.extend(
+                    points
+                        .iter()
+                        .filter(|point| (line_start + 1..line_end).contains(point))
+                        .map(|point| point - line_start),
+                );
+            }
 
             let mut decoration_runs = <Vec<DecorationRun>>::new();
             let mut run_start = line_start;
@@ -804,6 +828,7 @@ impl WindowTextSystem {
                 &font_runs,
                 wrap_width,
                 max_wrap_lines.map(|max| max.saturating_sub(wrapped_lines)),
+                break_points.map(|_| line_break_points.as_slice()),
             );
             wrapped_lines += layout.wrap_boundaries.len();
 
