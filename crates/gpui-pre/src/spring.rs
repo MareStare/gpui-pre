@@ -174,13 +174,15 @@ impl SpringConfig {
     /// Tests both displacement and velocity against a positional tolerance.
     ///
     /// Velocity is compared with `epsilon * natural_frequency`, giving it the
-    /// corresponding animated-units-per-second scale.
+    /// corresponding animated-units-per-second scale. A spring that jumps is
+    /// settled when it is on its target, at any velocity.
     pub fn is_settled(&self, state: SpringState, target: f32, epsilon: f32) -> bool {
         let (natural_frequency, _) = self.canonical();
         epsilon.is_finite()
             && epsilon >= 0.0
             && (state.position - target).abs() <= epsilon
-            && state.velocity.abs() <= epsilon * natural_frequency
+            && (natural_frequency.is_infinite()
+                || state.velocity.abs() <= epsilon * natural_frequency)
     }
 
     /// Returns a conservative time after which the spring remains settled.
@@ -741,7 +743,9 @@ mod tests {
             let state = config.step(away, 1.0, delta_time);
             assert_eq!((state.position, state.velocity), (1.0, 0.0));
             assert!(config.is_settled(state, 1.0, EPSILON));
+            assert!(config.is_settled(state, 1.0, 0.0));
         }
+        assert!(!config.is_settled(away, 1.0, EPSILON));
         assert_eq!(config.settle_time(away, 1.0, EPSILON), Duration::ZERO);
     }
 
