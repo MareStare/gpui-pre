@@ -449,10 +449,8 @@ impl<E: IntoElement + 'static> Element for AnimationElement<E> {
             let mut element = (self.animator)(element, animation_ix, delta).into_any_element();
 
             if !done {
-                if self.animations[animation_ix..]
-                    .iter()
-                    .all(|animation| animation.oneshot)
-                {
+                // The animation that draws the next frame decides.
+                if self.animations[state.animation_ix].oneshot {
                     window.next_frame.animating = true;
                 }
                 match self.animations[animation_ix].max_fps {
@@ -566,8 +564,8 @@ mod tests {
     use std::{cell::RefCell, rc::Rc, time::Duration};
 
     use crate::{
-        Animation, Context, InteractiveElement, Pixels, Render, SpringAnimation, SpringConfig,
-        TestAppContext, WindowHandle, div, prelude::*, px, size,
+        Animation, Context, Entity, InteractiveElement, Pixels, Render, SpringAnimation,
+        SpringConfig, StyleRefinement, TestAppContext, WindowHandle, div, prelude::*, px, size,
     };
 
     use super::*;
@@ -634,6 +632,50 @@ mod tests {
 
     /// A one-shot animation beside a repeating one.
     struct OneShotTestView;
+
+    /// A one-shot intro that a repeating animation follows.
+    struct IntroTestView;
+
+    impl Render for IntroTestView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(div().with_animations(
+                "intro-animation",
+                vec![
+                    Animation::new(Duration::from_secs(1)),
+                    Animation::new(Duration::from_secs(1)).repeat(),
+                ],
+                |this, _, _| this,
+            ))
+        }
+    }
+
+    /// A cached view with a one-shot animation at a low frame rate, in a
+    /// view that draws on its own.
+    struct CachedOneShotTestView {
+        child: Entity<ThrottledOneShotView>,
+    }
+
+    impl Render for CachedOneShotTestView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(
+                self.child
+                    .clone()
+                    .cached(StyleRefinement::default().size_full()),
+            )
+        }
+    }
+
+    struct ThrottledOneShotView;
+
+    impl Render for ThrottledOneShotView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().with_animation(
+                "throttled-one-shot-animation",
+                Animation::new(Duration::from_secs(1)).with_max_fps(2.0),
+                |this, _| this,
+            )
+        }
+    }
 
     impl Render for OneShotTestView {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
@@ -1039,6 +1081,48 @@ mod tests {
             .advance_clock(Duration::from_secs(300 * 24 * 60 * 60) + Duration::from_millis(500));
         simulate_next_frame(&window, cx);
         assert_eq!(*first_deltas.borrow().last().unwrap(), 0.25);
+    }
+
+    #[gpui::test]
+    fn test_a_frame_is_animating_during_a_one_shot_intro(cx: &mut TestAppContext) {
+        let window = cx.open_window(size(px(100.), px(100.)), |_, _| IntroTestView);
+        cx.run_until_parked();
+        let animating = |cx: &mut TestAppContext| {
+            window
+                .update(cx, |_, window, _| window.animating())
+                .unwrap()
+        };
+        assert!(animating(cx));
+
+        cx.executor().advance_clock(Duration::from_millis(1100));
+        simulate_next_frame(&window, cx);
+        assert!(!animating(cx), "the repeat after the intro does not count");
+    }
+
+    #[gpui::test]
+    fn test_a_cached_view_keeps_its_one_shot_animation_animating(cx: &mut TestAppContext) {
+        let window = cx.open_window(size(px(100.), px(100.)), |_, cx| CachedOneShotTestView {
+            child: cx.new(|_| ThrottledOneShotView),
+        });
+        cx.run_until_parked();
+        let animating = |cx: &mut TestAppContext| {
+            window
+                .update(cx, |_, window, _| window.animating())
+                .unwrap()
+        };
+        assert!(animating(cx));
+
+        // The outer view draws again before the timer of the frame rate
+        // fires. The cached view draws from its cache.
+        cx.executor().advance_clock(Duration::from_millis(100));
+        window.update(cx, |_, _, cx| cx.notify()).unwrap();
+        cx.run_until_parked();
+        assert!(animating(cx));
+
+        cx.executor().advance_clock(Duration::from_secs(2));
+        cx.run_until_parked();
+        simulate_next_frame(&window, cx);
+        assert!(!animating(cx));
     }
 
     #[gpui::test]

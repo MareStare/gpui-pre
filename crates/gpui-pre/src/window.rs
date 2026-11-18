@@ -2986,8 +2986,9 @@ impl Window {
     }
 
     /// Whether the last frame drew a one-shot animation before its end. Such
-    /// an animation draws more frames until it ends. A repeating animation
-    /// does not count.
+    /// an animation draws more frames until it ends. A repeating animation,
+    /// and the repeating part of a chain, do not count. A cached view that
+    /// draws from its cache counts as it did when it last rendered.
     pub fn animating(&self) -> bool {
         self.rendered_frame.animating
     }

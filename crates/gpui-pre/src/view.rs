@@ -327,6 +327,9 @@ struct ViewElementState {
     /// The entities the view accessed while it was last drawn, in any phase,
     /// restored when its prepaint is reused so the window stays subscribed.
     accessed_entities: FxHashSet<EntityId>,
+    /// The view drew a one-shot animation before its end, restored when its
+    /// prepaint is reused so the frame still tells it.
+    animating: bool,
 }
 
 struct ViewElementCacheKey {
@@ -561,6 +564,7 @@ fn prepaint_view(
                     window.reuse_prepaint(element_state.prepaint_range.clone());
                     cx.entities
                         .extend_accessed(element_state.accessed_entities.iter().copied());
+                    window.next_frame.animating |= element_state.animating;
                     let prepaint_end = window.prepaint_index();
                     element_state.prepaint_range = prepaint_start..prepaint_end;
 
@@ -568,6 +572,7 @@ fn prepaint_view(
                 }
 
                 let refreshing = mem::replace(&mut window.refreshing, true);
+                let animating_before = mem::take(&mut window.next_frame.animating);
                 let prepaint_start = window.prepaint_index();
                 let (element, accessed_entities) = cx.detect_accessed_entities(|cx| {
                     let mut element = render(window, cx);
@@ -578,11 +583,14 @@ fn prepaint_view(
 
                 let prepaint_end = window.prepaint_index();
                 window.refreshing = refreshing;
+                let animating = window.next_frame.animating;
+                window.next_frame.animating |= animating_before;
 
                 (
                     Some(element),
                     ViewElementState {
                         accessed_entities,
+                        animating,
                         prepaint_range: prepaint_start..prepaint_end,
                         paint_range: PaintIndex::default()..PaintIndex::default(),
                         cache_key: ViewElementCacheKey {
