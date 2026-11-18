@@ -14,9 +14,6 @@ thread_local! {
     static WINDOW_CONTEXT: GpuContext = Rc::default();
 }
 
-/// The largest side of a window surface.
-const MAX_SIDE: i32 = 16384;
-
 pub struct WgpuWindowRenderer {
     renderer: WgpuRenderer,
     source: Box<dyn SurfaceSource>,
@@ -61,9 +58,8 @@ impl WgpuWindowRenderer {
         transparent: bool,
         color_space: wgpu::SurfaceColorSpace,
     ) -> Result<Self> {
-        let side = |side: DevicePixels| DevicePixels(side.0.clamp(1, MAX_SIDE));
         let config = WgpuSurfaceConfig {
-            size: size.map(side),
+            size,
             transparent,
             preferred_present_mode: None,
         };
