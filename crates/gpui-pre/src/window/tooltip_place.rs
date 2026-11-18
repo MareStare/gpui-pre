@@ -11,21 +11,10 @@ pub(super) fn at_pointer(
     size: Size<Pixels>,
     area: Bounds<Pixels>,
 ) -> Bounds<Pixels> {
-    let x = place_on_axis(pointer.x, size.width, area.left(), area.right());
-    let y = place_on_axis(pointer.y, size.height, area.top(), area.bottom());
+    let gap = px(1.);
+    let x = Span::x(area).place(pointer.x - gap, pointer.x + gap, size.width);
+    let y = Span::y(area).place(pointer.y - gap, pointer.y + gap, size.height);
     Bounds::new(point(x, y), size)
-}
-
-fn place_on_axis(pointer: Pixels, length: Pixels, start: Pixels, end: Pixels) -> Pixels {
-    let after = pointer + px(1.);
-    if after + length <= end {
-        return after;
-    }
-    let before = pointer - length - px(1.);
-    if before >= start {
-        return before;
-    }
-    (end - length).max(start)
 }
 
 /// The bounds of a tooltip of `size` for the element at `anchor`. The
@@ -38,16 +27,49 @@ pub(super) fn under_element(
     size: Size<Pixels>,
     area: Bounds<Pixels>,
 ) -> Bounds<Pixels> {
-    let centered = anchor.center().x - size.width / 2.;
-    let x = centered.min(area.right() - size.width).max(area.left());
-    let y = if anchor.bottom() + size.height <= area.bottom() {
-        anchor.bottom()
-    } else if anchor.top() - size.height >= area.top() {
-        anchor.top() - size.height
-    } else {
-        (area.bottom() - size.height).max(area.top())
-    };
+    let x = Span::x(area).fit(anchor.center().x - size.width / 2., size.width);
+    let y = Span::y(area).place(anchor.top(), anchor.bottom(), size.height);
     Bounds::new(point(x, y), size)
+}
+
+/// The part of an axis that a tooltip must stay in.
+struct Span {
+    start: Pixels,
+    end: Pixels,
+}
+
+impl Span {
+    fn x(area: Bounds<Pixels>) -> Self {
+        Self {
+            start: area.left(),
+            end: area.right(),
+        }
+    }
+
+    fn y(area: Bounds<Pixels>) -> Self {
+        Self {
+            start: area.top(),
+            end: area.bottom(),
+        }
+    }
+
+    /// The start of a segment of `length` that starts at `after` when it fits there, else ends
+    /// at `before` when it fits there, else moves into the span.
+    fn place(&self, before: Pixels, after: Pixels, length: Pixels) -> Pixels {
+        if after + length <= self.end {
+            after
+        } else if before - length >= self.start {
+            before - length
+        } else {
+            self.fit(after, length)
+        }
+    }
+
+    /// The start of a segment of `length` at `start`, moved into the span. A segment longer than
+    /// the span starts at the start of the span.
+    fn fit(&self, start: Pixels, length: Pixels) -> Pixels {
+        start.min(self.end - length).max(self.start)
+    }
 }
 
 #[cfg(test)]
