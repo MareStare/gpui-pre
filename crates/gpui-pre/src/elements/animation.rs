@@ -345,7 +345,12 @@ impl<E: IntoElement + 'static> Element for SpringAnimationElement<E> {
                         let mut done = true;
                         let coordinates = state.springs.iter_mut().zip(&state.target);
                         for ((spring, &target), &tolerance) in coordinates.zip(&self.tolerances) {
-                            if state.config.is_settled(*spring, target, tolerance) {
+                            // A target that is not a number rests at once. A
+                            // spring that it broke rests at the next target.
+                            let broken = !(target.is_finite()
+                                && spring.position.is_finite()
+                                && spring.velocity.is_finite());
+                            if broken || state.config.is_settled(*spring, target, tolerance) {
                                 *spring = SpringState {
                                     position: target,
                                     velocity: 0.0,
@@ -1167,6 +1172,38 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(*rendered_values.borrow().last().unwrap(), px(100.0));
         assert_eq!(simulate_next_frame(&window, cx), 0);
+    }
+
+    #[gpui::test]
+    fn test_spring_animation_rests_at_a_target_that_is_not_a_number(cx: &mut TestAppContext) {
+        let rendered_values = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.open_window(size(px(100.0), px(100.0)), {
+            let rendered_values = rendered_values.clone();
+            move |_, _| SpringAnimationTestView {
+                target: px(0.0),
+                initial: None,
+                playback: SpringPlayback::Running,
+                rendered_values,
+            }
+        });
+        cx.run_until_parked();
+        let mut retarget = |target: Pixels, cx: &mut TestAppContext| {
+            window
+                .update(cx, |view, _, cx| {
+                    view.target = target;
+                    cx.notify();
+                })
+                .unwrap();
+            cx.run_until_parked();
+            cx.executor().advance_clock(Duration::from_millis(16));
+            let frames = simulate_next_frame(&window, cx);
+            (*rendered_values.borrow().last().unwrap(), frames)
+        };
+
+        let (value, frames) = retarget(px(f32::NAN), cx);
+        assert!(value.0.is_nan());
+        assert_eq!(frames, 0, "a target that is not a number draws no frames");
+        assert_eq!(retarget(px(50.0), cx), (px(50.0), 0));
     }
 
     #[gpui::test]
