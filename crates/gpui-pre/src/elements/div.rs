@@ -106,7 +106,7 @@ impl Interactivity {
             || !self.mouse_down_listeners.is_empty()
             || self.drag_listener.is_some();
         let id = self.element_id.as_ref().filter(|_| takes_presses)?;
-        Some(ElementName::Id(id.clone(), Default::default()))
+        Some(ElementName::id(id.clone()))
     }
 
     /// Create an `Interactivity`, capturing the caller location in debug mode.

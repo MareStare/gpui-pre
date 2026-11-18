@@ -1096,15 +1096,19 @@ pub(crate) enum ElementName {
     Selector(SharedString),
 
     /// The id of an element that takes presses. Its text is made on the first read.
-    Id(ElementId, std::cell::OnceCell<String>),
+    Id(ElementId, std::cell::OnceCell<SharedString>),
 }
 
 #[cfg(any(test, feature = "headless"))]
 impl ElementName {
+    pub(crate) fn id(id: ElementId) -> Self {
+        Self::Id(id, std::cell::OnceCell::new())
+    }
+
     fn as_str(&self) -> &str {
         match self {
             Self::Selector(selector) => selector,
-            Self::Id(id, text) => text.get_or_init(|| id.to_string()),
+            Self::Id(id, text) => text.get_or_init(|| id.to_string().into()),
         }
     }
 }
@@ -1149,15 +1153,13 @@ impl Frame {
         });
     }
 
-    /// The bounds of the last element painted with the debug selector.
+    /// The bounds of the last element painted with the name.
     #[cfg(any(test, feature = "headless"))]
-    pub(crate) fn debug_bounds(&self, selector: &str) -> Option<Bounds<Pixels>> {
+    pub(crate) fn debug_bounds(&self, name: &str) -> Option<Bounds<Pixels>> {
         self.named_elements
             .iter()
             .rev()
-            .find(|element| {
-                matches!(&element.name, ElementName::Selector(name) if name.as_ref() == selector)
-            })
+            .find(|element| element.name.as_str() == name)
             .map(|element| element.bounds)
     }
 

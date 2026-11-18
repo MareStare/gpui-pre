@@ -1046,10 +1046,10 @@ impl VisualTestContext {
         self.simulate_window_scale_factor_change(self.window, scale_factor)
     }
 
-    /// Returns the bounds of the element with the given debug selector, see
-    /// [`crate::InteractiveElement::debug_selector`], in the last rendered frame. When several
-    /// elements have the selector, it returns the one painted last. The id of an element that
-    /// takes presses is no selector.
+    /// Returns the bounds of the element with the given name in the last rendered frame. The name
+    /// of an element is its debug selector, see [`crate::InteractiveElement::debug_selector`], or
+    /// the id of an element that takes presses. When several elements have the name, it returns
+    /// the one painted last.
     pub fn debug_bounds(&mut self, selector: &str) -> Option<Bounds<Pixels>> {
         self.update(|window, _| window.rendered_frame.debug_bounds(selector))
     }

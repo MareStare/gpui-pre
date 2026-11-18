@@ -223,8 +223,9 @@ gpui-pre version goes.
   reports client decorations with `simulate_decorations`.
 - Painted shadows: `Window::painted_shadows` gives the shadows of the last
   frame to tests, as `painted_quads` gives its quads.
-- Debug bounds of any selector: `VisualTestContext::debug_bounds` takes a
-  selector of any lifetime.
+- Debug bounds of any name: `VisualTestContext::debug_bounds` takes a name of
+  any lifetime. The name is a debug selector, or the id of an element that
+  takes presses.
 
 ## License
 
