@@ -1850,6 +1850,22 @@ mod tests {
     use std::sync::Arc;
     use windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_METRICS;
 
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn letter_spacing_keeps_a_combining_mark_with_its_base() -> Result<()> {
+        gpui::letter_spacing_conformance::combining_mark_keeps_its_base(Arc::new(
+            DirectWriteTextSystem::new()?,
+        ))
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn letter_spacing_turns_off_ligatures() -> Result<()> {
+        gpui::letter_spacing_conformance::spacing_turns_off_ligatures(Arc::new(
+            DirectWriteTextSystem::new()?,
+        ))
+    }
+
     #[test]
     fn tabs_preserve_native_advances_and_cursor() -> Result<()> {
         let platform_text_system = Arc::new(DirectWriteTextSystem::new()?);

@@ -257,6 +257,19 @@ gpui-pre version goes.
 - Drag threshold per element: `drag_threshold` sets how far the pointer
   moves with the button down before a drag of the element starts. The
   default, `DRAG_THRESHOLD`, is public.
+- Letter spacing: `Styled::letter_spacing` and `TextStyle::letter_spacing`
+  set the extra space between adjacent characters, in `Em` of the font
+  size of each text. `WindowTextSystem::shape_spaced_line` shapes a line
+  with such a spacing. A line has one spacing, so `TextRun` keeps its
+  fields and the crates that build one by a struct literal still compile.
+  The layout cache moves the shaped glyphs apart after the platform
+  shaping, so it works the same on each platform. Grapheme clusters are
+  the units: a mark stays with its base and a ligature is one unit. A line
+  has no gap at its ends, and a unit with no advance gets no gap, as CSS
+  Text 3 states.
+  A spaced line takes its fonts with `liga`, `clig` and `calt` off, unless
+  their features set them. A wrap or a truncation adds the spacing between
+  the grapheme clusters of each row, as the shaped line does.
 
 ## License
 

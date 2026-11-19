@@ -820,6 +820,22 @@ mod tests {
     };
     use std::sync::Arc;
 
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn letter_spacing_keeps_a_combining_mark_with_its_base() -> anyhow::Result<()> {
+        gpui::letter_spacing_conformance::combining_mark_keeps_its_base(Arc::new(
+            AppleTextSystem::new(),
+        ))
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn letter_spacing_turns_off_ligatures() -> anyhow::Result<()> {
+        gpui::letter_spacing_conformance::spacing_turns_off_ligatures(Arc::new(
+            AppleTextSystem::new(),
+        ))
+    }
+
     #[test]
     fn test_reload_family_with_features_and_fallbacks() {
         let fonts = AppleTextSystem::new();

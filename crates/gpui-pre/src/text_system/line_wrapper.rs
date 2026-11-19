@@ -1,6 +1,6 @@
-use crate::{FontId, Pixels, SharedString, TextRun, TextSystem, px};
+use crate::{Em, FontId, Pixels, SharedString, TextRun, TextSystem, px};
 use collections::HashMap;
-use std::{borrow::Cow, iter, sync::Arc};
+use std::{borrow::Cow, iter, iter::Peekable, sync::Arc};
 use unicode_segmentation::UnicodeSegmentation;
 
 /// Determines whether to truncate text from the start or end.
@@ -31,6 +31,7 @@ pub struct LineWrapper {
     text_system: Arc<TextSystem>,
     pub(crate) font_id: FontId,
     pub(crate) font_size: Pixels,
+    letter_spacing: Pixels,
     char_widths: CharWidthCache,
     text_buffer: String,
 }
@@ -64,9 +65,19 @@ impl LineWrapper {
             text_system,
             font_id,
             font_size,
+            letter_spacing: px(0.),
             char_widths,
             text_buffer: String::new(),
         }
+    }
+
+    /// Sets the extra space between adjacent grapheme clusters, at the font size of
+    /// the wrapper.
+    ///
+    /// The wrapper counts the space as a shaped line does: between the grapheme
+    /// clusters with an advance, with none at the ends of a line or a row.
+    pub fn set_letter_spacing(&mut self, letter_spacing: Em) {
+        self.letter_spacing = letter_spacing.to_pixels(self.font_size);
     }
 
     pub(crate) fn into_char_widths(self) -> CharWidthCache {
@@ -93,7 +104,11 @@ impl LineWrapper {
             text_system,
             font_id,
             font_size,
+            letter_spacing,
         } = self;
+        let gap = *letter_spacing;
+        // Each row counts the gap before its first grapheme cluster too.
+        let row_limit = wrap_width + gap;
         text.clear();
         for fragment in fragments {
             match fragment {
@@ -165,9 +180,12 @@ impl LineWrapper {
                 };
 
                 width += item_width;
-                if width > wrap_width && grapheme_index > last_wrap_ix {
+                if is_grapheme_boundary && item_width != px(0.) {
+                    width += gap;
+                }
+                if width > row_limit && grapheme_index > last_wrap_ix {
                     let wrap_at_candidate = last_candidate_ix > last_wrap_ix
-                        && width - last_candidate_width <= wrap_width;
+                        && width - last_candidate_width <= row_limit;
 
                     let carried_width = if wrap_at_candidate {
                         width - last_candidate_width
@@ -195,12 +213,14 @@ impl LineWrapper {
                         IndentAdjustment::ExtraColumns(extra) => {
                             if let Some(base_indent) = base_indent {
                                 let candidate = base_indent.saturating_add(extra);
-                                let candidate_indent_width = width_for_char(' ') * candidate as f32;
+                                let candidate_indent_width =
+                                    (width_for_char(' ') + gap) * candidate as f32;
                                 // Reserve headroom for any carried suffix from an earlier word boundary
                                 // (and at least 2 columns for a full-width character) so the continuation
                                 // line does not immediately exceed wrap width.
-                                let min_headroom = carried_width.max(width_for_char(' ') * 2.0);
-                                if candidate_indent_width + min_headroom > wrap_width {
+                                let min_headroom =
+                                    carried_width.max((width_for_char(' ') + gap) * 2.0);
+                                if candidate_indent_width + min_headroom > row_limit {
                                     0
                                 } else {
                                     Self::MAX_INDENT.min(candidate)
@@ -223,7 +243,7 @@ impl LineWrapper {
                     }
                     last_candidate_ix = 0;
 
-                    let indent_width = width_for_char(' ') * next_indent as f32;
+                    let indent_width = (width_for_char(' ') + gap) * next_indent as f32;
                     width += indent_width;
                     width_before_grapheme += indent_width;
 
@@ -245,21 +265,21 @@ impl LineWrapper {
         truncation_affix: &str,
         truncate_from: TruncateFrom,
     ) -> Option<usize> {
-        let mut width = px(0.);
-        let suffix_width = truncation_affix
-            .chars()
-            .map(|c| self.width_for_char(c))
-            .fold(px(0.0), |a, x| a + x);
+        // The line has no spacing before its first grapheme cluster.
+        let mut width = -self.letter_spacing;
+        let suffix_width = self.spaced_width(truncation_affix);
         let mut truncate_ix = 0;
 
         match truncate_from {
             TruncateFrom::Start => {
+                let mut starts =
+                    self.grapheme_starts(|| line.grapheme_indices(true).rev().map(|(ix, _)| ix));
                 for (ix, c) in line.char_indices().rev() {
                     if width + suffix_width < truncate_width {
                         truncate_ix = ix;
                     }
 
-                    let char_width = self.width_for_char(c);
+                    let char_width = self.spaced_width_for_char(c, starts.take(ix));
                     width += char_width;
 
                     if width.floor() > truncate_width {
@@ -268,12 +288,14 @@ impl LineWrapper {
                 }
             }
             TruncateFrom::End => {
+                let mut starts =
+                    self.grapheme_starts(|| line.grapheme_indices(true).map(|(ix, _)| ix));
                 for (ix, c) in line.char_indices() {
                     if width + suffix_width < truncate_width {
                         truncate_ix = ix;
                     }
 
-                    let char_width = self.width_for_char(c);
+                    let char_width = self.spaced_width_for_char(c, starts.take(ix));
                     width += char_width;
 
                     if width.floor() > truncate_width {
@@ -293,15 +315,9 @@ impl LineWrapper {
         truncate_width: Pixels,
         truncation_affix: &str,
     ) -> Option<(usize, usize)> {
-        let suffix_width = truncation_affix
-            .chars()
-            .map(|c| self.width_for_char(c))
-            .fold(px(0.0), |a, x| a + x);
-
-        let total_width: Pixels = line
-            .chars()
-            .map(|c| self.width_for_char(c))
-            .fold(px(0.0), |a, x| a + x);
+        let suffix_width = self.spaced_width(truncation_affix);
+        let total_width = self.spaced_width(line);
+        let truncate_width = self.spaced_limit(truncate_width);
 
         if total_width <= truncate_width {
             return None;
@@ -317,8 +333,9 @@ impl LineWrapper {
 
         let mut front_width = px(0.);
         let mut front_end_ix = 0usize;
+        let mut starts = self.grapheme_starts(|| line.grapheme_indices(true).map(|(ix, _)| ix));
         for (ix, c) in line.char_indices() {
-            let char_width = self.width_for_char(c);
+            let char_width = self.spaced_width_for_char(c, starts.take(ix));
             if front_width + char_width > front_budget {
                 break;
             }
@@ -328,8 +345,10 @@ impl LineWrapper {
 
         let mut back_width = px(0.);
         let mut back_start_ix = line.len();
+        let mut starts =
+            self.grapheme_starts(|| line.grapheme_indices(true).rev().map(|(ix, _)| ix));
         for (ix, c) in line.char_indices().rev() {
-            let char_width = self.width_for_char(c);
+            let char_width = self.spaced_width_for_char(c, starts.take(ix));
             if back_width + char_width > back_budget {
                 break;
             }
@@ -429,10 +448,8 @@ impl LineWrapper {
             return self.truncate_line(text, wrap_width, truncation_affix, runs, truncate_from);
         }
 
-        let affix_width: Pixels = truncation_affix
-            .chars()
-            .map(|c| self.width_for_char(c))
-            .sum();
+        let affix_width = self.spaced_width(truncation_affix);
+        let row_limit = self.spaced_limit(wrap_width);
 
         let mut width = px(0.);
         let mut line = 0usize;
@@ -444,10 +461,12 @@ impl LineWrapper {
         let mut truncate_ix = 0usize;
 
         let mut break_indices = Self::break_indices(&text).peekable();
+        let mut starts = self.grapheme_starts(|| text.grapheme_indices(true).map(|(ix, _)| ix));
         for (ix, c) in text.char_indices() {
             // Consume boundaries on newlines too, so skipping an empty line does not
             // leave the iterator stuck before subsequent text.
             let is_break = break_indices.next_if_eq(&ix).is_some();
+            let starts_grapheme = starts.take(ix);
             if c == '\n' {
                 if line >= max_lines - 1 && !text[ix + 1..].trim().is_empty() {
                     // Newline on the last allowed line with real content
@@ -477,7 +496,7 @@ impl LineWrapper {
                 continue;
             }
 
-            let char_width = self.width_for_char(c);
+            let char_width = self.spaced_width_for_char(c, starts_grapheme);
 
             if is_break && first_non_whitespace_ix.is_some() {
                 last_candidate_ix = ix;
@@ -492,7 +511,7 @@ impl LineWrapper {
 
             if line < max_lines - 1 {
                 // Before the last line: replicate wrap_line's boundary logic.
-                if width > wrap_width && ix > last_wrap_ix {
+                if width > row_limit && ix > last_wrap_ix {
                     if let (None, Some(first_nw)) = (indent, first_non_whitespace_ix) {
                         indent = Some(Self::MAX_INDENT.min((first_nw - last_wrap_ix) as u32));
                     }
@@ -507,7 +526,7 @@ impl LineWrapper {
                     }
 
                     if let Some(ind) = indent {
-                        width += self.width_for_char(' ') * ind as f32;
+                        width += self.spaced_width(" ") * ind as f32;
                     }
 
                     line += 1;
@@ -516,11 +535,11 @@ impl LineWrapper {
             } else {
                 // On the last line: track the furthest point where the affix
                 // still fits, and stop as soon as the line overflows.
-                if width + affix_width <= wrap_width {
+                if width + affix_width <= row_limit {
                     truncate_ix = ix + c.len_utf8();
                 }
 
-                if width > wrap_width {
+                if width > row_limit {
                     let truncated = text[..truncate_ix]
                         .trim_end_matches(|c: char| c.is_whitespace() || c.is_ascii_punctuation());
                     let result = SharedString::from(format!("{truncated}{truncation_affix}"));
@@ -556,6 +575,54 @@ impl LineWrapper {
             self.font_id,
             self.font_size,
         )
+    }
+
+    /// The width of the char `c`, with the letter spacing before it when it starts a
+    /// grapheme cluster and has an advance.
+    fn spaced_width_for_char(&mut self, c: char, starts_grapheme: bool) -> Pixels {
+        let width = self.width_for_char(c);
+        if starts_grapheme && width != px(0.) {
+            width + self.letter_spacing
+        } else {
+            width
+        }
+    }
+
+    /// The width of `text` with the letter spacing before each grapheme cluster.
+    fn spaced_width(&mut self, text: &str) -> Pixels {
+        let mut starts = self.grapheme_starts(|| text.grapheme_indices(true).map(|(ix, _)| ix));
+        text.char_indices()
+            .map(|(ix, c)| self.spaced_width_for_char(c, starts.take(ix)))
+            .sum()
+    }
+
+    /// The starts of the grapheme clusters from `starts`, when the wrapper has letter
+    /// spacing.
+    fn grapheme_starts<I: Iterator<Item = usize>>(
+        &self,
+        starts: impl FnOnce() -> I,
+    ) -> GraphemeStarts<I> {
+        GraphemeStarts((self.letter_spacing != px(0.)).then(|| starts().peekable()))
+    }
+
+    /// The limit for a width with the letter spacing before each grapheme cluster.
+    /// A line has no spacing before its first grapheme cluster.
+    fn spaced_limit(&self, width: Pixels) -> Pixels {
+        width + self.letter_spacing
+    }
+}
+
+/// The starts of the grapheme clusters of a text, in the order of a walk over its
+/// chars. Empty when the wrapper has no letter spacing.
+struct GraphemeStarts<I: Iterator<Item = usize>>(Option<Peekable<I>>);
+
+impl<I: Iterator<Item = usize>> GraphemeStarts<I> {
+    /// Whether the char at `ix` starts a grapheme cluster. Each call takes the next
+    /// char of the walk.
+    fn take(&mut self, ix: usize) -> bool {
+        self.0
+            .as_mut()
+            .is_some_and(|starts| starts.next_if_eq(&ix).is_some())
     }
 }
 
@@ -758,7 +825,9 @@ impl Boundary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Font, FontFeatures, FontStyle, FontWeight, TestAppContext, TestDispatcher, font};
+    use crate::{
+        Font, FontFeatures, FontStyle, FontWeight, TestAppContext, TestDispatcher, em, font,
+    };
     #[cfg(target_os = "macos")]
     use crate::{TextRun, WindowTextSystem, WrapBoundary};
 
@@ -1185,6 +1254,140 @@ mod tests {
             "aa bbb cccc 🦀🦀🦀🦀…",
             "…",
         );
+    }
+
+    /// The width of `graphemes` one-char graphemes in a shaped line with `gap`
+    /// between them.
+    fn shaped_width(wrapper: &mut LineWrapper, graphemes: usize, gap: Pixels) -> Pixels {
+        wrapper.width_for_char('a') * graphemes as f32 + gap * (graphemes - 1) as f32
+    }
+
+    #[test]
+    fn letter_spacing_truncates_at_the_shaped_width() {
+        let text = "abcd";
+        for letter_spacing in [em(0.125), em(-0.125)] {
+            let mut wrapper = build_wrapper();
+            wrapper.set_letter_spacing(letter_spacing);
+            let shaped = shaped_width(&mut wrapper, text.len(), letter_spacing.to_pixels(px(16.)));
+            for from in [TruncateFrom::Start, TruncateFrom::End] {
+                assert_eq!(
+                    wrapper.should_truncate_line(text, shaped + px(0.01), "", from),
+                    None,
+                    "{letter_spacing:?} {from:?}"
+                );
+                assert!(
+                    wrapper
+                        .should_truncate_line(text, shaped - px(1.), "", from)
+                        .is_some(),
+                    "{letter_spacing:?} {from:?}"
+                );
+            }
+            assert_eq!(
+                wrapper.should_truncate_line_middle(text, shaped + px(0.01), ""),
+                None,
+                "{letter_spacing:?}"
+            );
+            assert!(
+                wrapper
+                    .should_truncate_line_middle(text, shaped - px(1.), "")
+                    .is_some(),
+                "{letter_spacing:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn letter_spacing_wraps_at_the_shaped_width() {
+        let text = "abcd";
+        for letter_spacing in [em(0.125), em(-0.125)] {
+            let mut wrapper = build_wrapper();
+            wrapper.set_letter_spacing(letter_spacing);
+            let shaped = shaped_width(&mut wrapper, text.len(), letter_spacing.to_pixels(px(16.)));
+            let mut boundaries = |width| {
+                wrapper
+                    .wrap_line(
+                        &[LineFragment::text(text)],
+                        width,
+                        IndentAdjustment::NoIndent,
+                    )
+                    .map(|boundary| boundary.ix)
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                boundaries(shaped + px(0.01)),
+                [0usize; 0],
+                "{letter_spacing:?}"
+            );
+            assert_eq!(boundaries(shaped - px(1.)), [3], "{letter_spacing:?}");
+        }
+    }
+
+    #[test]
+    fn letter_spacing_goes_only_before_a_grapheme() {
+        let mut wrapper = build_wrapper();
+        let char_width = wrapper.width_for_char('e');
+        let letter_spacing = em(0.125);
+        let gap = letter_spacing.to_pixels(px(16.));
+        wrapper.set_letter_spacing(letter_spacing);
+        // Three chars in two graphemes: the combining mark gets no gap.
+        let text = "e\u{301}x";
+        assert_eq!(wrapper.spaced_width(text), char_width * 3. + gap * 2.);
+        let shaped = char_width * 3. + gap;
+        assert_eq!(
+            wrapper.should_truncate_line(text, shaped + px(0.01), "", TruncateFrom::End),
+            None
+        );
+        let boundaries: Vec<_> = wrapper
+            .wrap_line(
+                &[LineFragment::text(text)],
+                shaped + px(0.01),
+                IndentAdjustment::NoIndent,
+            )
+            .collect();
+        assert_eq!(boundaries, []);
+    }
+
+    #[test]
+    fn letter_spacing_keeps_the_rounding_of_a_truncation() {
+        let mut wrapper = build_wrapper();
+        // Two chars of 24.458 px with a gap of 1.584 px take 50.5 px, and the truncation
+        // rounds that down to 50 px.
+        wrapper.char_widths.ascii[usize::from(b'a')] = Some(px(24.458));
+        wrapper.set_letter_spacing(em(0.099));
+        for from in [TruncateFrom::Start, TruncateFrom::End] {
+            assert_eq!(
+                wrapper.should_truncate_line("aa", px(50.2), "", from),
+                None,
+                "{from:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn letter_spacing_skips_a_grapheme_with_no_advance() {
+        let mut wrapper = build_wrapper();
+        let zero_width_space = '\u{200b}';
+        wrapper.char_widths.other.insert(zero_width_space, px(0.));
+        let char_width = wrapper.width_for_char('a');
+        let letter_spacing = em(0.125);
+        let gap = letter_spacing.to_pixels(px(16.));
+        wrapper.set_letter_spacing(letter_spacing);
+        // The zero-width space is a grapheme with no advance, so one gap is left.
+        let text = "a\u{200b}b";
+        let shaped = char_width * 2. + gap;
+        assert_eq!(wrapper.spaced_width(text), shaped + gap);
+        assert_eq!(
+            wrapper.should_truncate_line(text, shaped + px(0.01), "", TruncateFrom::End),
+            None
+        );
+        let boundaries: Vec<_> = wrapper
+            .wrap_line(
+                &[LineFragment::text(text)],
+                shaped + px(0.01),
+                IndentAdjustment::NoIndent,
+            )
+            .collect();
+        assert_eq!(boundaries, []);
     }
 
     #[test]

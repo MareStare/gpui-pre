@@ -1,4 +1,6 @@
-use crate::{FontId, GlyphId, Pixels, PlatformTextSystem, Point, SharedString, Size, point, px};
+use crate::{
+    Em, FontId, GlyphId, Pixels, PlatformTextSystem, Point, SharedString, Size, point, px,
+};
 use collections::{FxHashMap, FxHashSet};
 use itertools::Itertools;
 use smallvec::SmallVec;
@@ -13,10 +15,10 @@ use std::{
     },
 };
 
-use super::LineWrapper;
+use super::{LetterGaps, LineWrapper, apply_letter_spacing};
 
 /// A laid out and styled line of text
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct LineLayout {
     /// The font size for this line
     pub font_size: Pixels,
@@ -197,6 +199,7 @@ impl LineLayout {
     fn compute_wrap_boundaries(
         &self,
         text: &str,
+        letter_gaps: &LetterGaps,
         wrap_width: Pixels,
         max_lines: Option<usize>,
         break_points: Option<&[BreakPoint]>,
@@ -251,10 +254,11 @@ impl LineLayout {
                     )
                 })
             })
-            .dedup_by(|(_, previous_index, ..), (_, index, ..)| previous_index == index)
+            .enumerate()
+            .dedup_by(|(_, (_, previous_index, _)), (_, (_, index, _))| previous_index == index)
             .peekable();
 
-        'glyphs: while let Some((boundary, index, x)) = glyphs.next() {
+        'glyphs: while let Some((_, (boundary, index, x))) = glyphs.next() {
             let byte = text.as_bytes()[index];
             if byte == b'\n' {
                 continue;
@@ -293,13 +297,15 @@ impl LineLayout {
                 current_segment = Some((segment, start.map_or(0, |point| point.index)..end));
             }
 
-            let next_x = glyphs.peek().map_or(self.width, |(_, _, x)| *x);
+            let content_end = glyphs.peek().map_or(self.width, |&(ix, (_, _, x))| {
+                letter_gaps.content_end_before(ix, x)
+            });
 
             // A row that is still too wide after a break at the candidate
             // breaks again before this glyph. The spaces at the end of a
             // row hang past the edge, as in CSS.
             loop {
-                let width = next_x - last_boundary_x;
+                let width = content_end - last_boundary_x;
                 let overflows = byte != b' ' && width > wrap_width && boundary > last_boundary;
                 if !overflows {
                     break;
@@ -346,6 +352,9 @@ pub struct WrappedLineLayout {
 
     /// The width of the line, if it was wrapped
     pub wrap_width: Option<Pixels>,
+
+    /// The gaps of the letter spacing of the line.
+    pub(crate) letter_gaps: LetterGaps,
 }
 
 /// A boundary at which a line was wrapped
@@ -652,6 +661,7 @@ impl LineLayoutCache {
         text: Text,
         font_size: Pixels,
         runs: &[FontRun],
+        letter_spacing: Em,
         wrap_width: Option<Pixels>,
         max_lines: Option<usize>,
         break_points: Option<&[BreakPoint]>,
@@ -665,6 +675,7 @@ impl LineLayoutCache {
             text: text.as_ref(),
             font_size,
             runs,
+            letter_spacing,
             wrap_width,
             force_width: None,
             break_points,
@@ -688,10 +699,19 @@ impl LineLayoutCache {
         } else {
             drop(state);
             let text = SharedString::from(text);
-            let unwrapped_layout = self.layout_line::<&SharedString>(&text, font_size, runs, None);
+            let unspaced_layout =
+                self.layout_line::<&SharedString>(&text, font_size, runs, Em::ZERO, None);
+            let (unwrapped_layout, letter_gaps) = if letter_spacing == Em::ZERO {
+                (unspaced_layout, LetterGaps::NONE)
+            } else {
+                let mut layout = LineLayout::clone(&unspaced_layout);
+                let letter_gaps = apply_letter_spacing(&mut layout, &text, letter_spacing);
+                (Arc::new(layout), letter_gaps)
+            };
             let wrap_boundaries = if let Some(wrap_width) = wrap_width {
                 unwrapped_layout.compute_wrap_boundaries(
                     text.as_ref(),
+                    &letter_gaps,
                     wrap_width,
                     max_lines,
                     break_points,
@@ -704,11 +724,13 @@ impl LineLayoutCache {
                 unwrapped_layout,
                 wrap_boundaries,
                 wrap_width,
+                letter_gaps,
             });
             let key = Arc::new(CacheKey {
                 text,
                 font_size,
                 runs: SmallVec::from(runs),
+                letter_spacing,
                 wrap_width,
                 force_width: None,
                 break_points: break_points.map(Box::from),
@@ -730,6 +752,7 @@ impl LineLayoutCache {
         text: Text,
         font_size: Pixels,
         runs: &[FontRun],
+        letter_spacing: Em,
         force_width: Option<Pixels>,
     ) -> Arc<LineLayout>
     where
@@ -741,6 +764,7 @@ impl LineLayoutCache {
             text: text.as_ref(),
             font_size,
             runs,
+            letter_spacing,
             wrap_width: None,
             force_width,
             break_points: None,
@@ -770,11 +794,13 @@ impl LineLayoutCache {
             if let Some(force_width) = force_width {
                 apply_force_width_to_layout(&mut layout, force_width);
             }
+            apply_letter_spacing(&mut layout, &text, letter_spacing);
 
             let key = Arc::new(CacheKey {
                 text,
                 font_size,
                 runs: SmallVec::from(runs),
+                letter_spacing,
                 wrap_width: None,
                 force_width,
                 break_points: None,
@@ -851,6 +877,7 @@ struct CacheKey {
     text: SharedString,
     font_size: Pixels,
     runs: SmallVec<[FontRun; 1]>,
+    letter_spacing: Em,
     wrap_width: Option<Pixels>,
     force_width: Option<Pixels>,
     break_points: Option<Box<[BreakPoint]>>,
@@ -861,6 +888,7 @@ struct CacheKeyRef<'a> {
     text: &'a str,
     font_size: Pixels,
     runs: &'a [FontRun],
+    letter_spacing: Em,
     wrap_width: Option<Pixels>,
     force_width: Option<Pixels>,
     break_points: Option<&'a [BreakPoint]>,
@@ -886,6 +914,7 @@ impl AsCacheKeyRef for CacheKey {
             text: &self.text,
             font_size: self.font_size,
             runs: self.runs.as_slice(),
+            letter_spacing: self.letter_spacing,
             wrap_width: self.wrap_width,
             force_width: self.force_width,
             break_points: self.break_points.as_deref(),
@@ -921,7 +950,7 @@ impl AsCacheKeyRef for CacheKeyRef<'_> {
 mod tests {
     use super::*;
     use crate::{
-        GlyphId, NoopTextSystem, TextRun, TextSystem, WindowTextSystem, WrappedLine, font,
+        GlyphId, NoopTextSystem, TextRun, TextSystem, WindowTextSystem, WrappedLine, em, font,
     };
 
     #[test]
@@ -957,6 +986,7 @@ mod tests {
                 SharedString::from(text),
                 px(10.),
                 &runs,
+                Em::ZERO,
                 Some(px(24.)),
                 None,
                 Some(break_points),
@@ -972,6 +1002,99 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    fn mono_run(len: usize) -> TextRun {
+        TextRun {
+            len,
+            font: font(".ZedMono"),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn letter_spacing_wraps_a_line_that_fits_without_it() {
+        let text_system =
+            WindowTextSystem::new(Arc::new(TextSystem::new(Arc::new(NoopTextSystem::new()))));
+        // Four glyphs of 6 px fit a row of 24 px. A spacing of 0.1 em is 1 px.
+        let shape = |letter_spacing| {
+            text_system
+                .shape_text_with_break_points(
+                    SharedString::from("abcd"),
+                    px(10.),
+                    &[mono_run(4)],
+                    em(letter_spacing),
+                    Some(px(24.)),
+                    None,
+                    None,
+                )
+                .unwrap()
+        };
+        assert!(shape(0.)[0].layout.wrap_boundaries().is_empty());
+        let lines = shape(0.1);
+        assert_eq!(lines[0].layout.wrap_boundaries().len(), 1);
+        assert_eq!(lines[0].layout.unwrapped_layout.width, px(27.));
+    }
+
+    #[test]
+    fn a_spaced_row_ends_after_its_last_glyph() {
+        let text_system =
+            WindowTextSystem::new(Arc::new(TextSystem::new(Arc::new(NoopTextSystem::new()))));
+        // Glyphs of 6 px. A spacing of 0.1 em is 1 px.
+        let wraps = |letter_spacing, wrap_width| {
+            let lines = text_system
+                .shape_text_with_break_points(
+                    SharedString::from("abcd"),
+                    px(10.),
+                    &[mono_run(4)],
+                    em(letter_spacing),
+                    Some(px(wrap_width)),
+                    None,
+                    None,
+                )
+                .unwrap();
+            lines[0]
+                .layout
+                .wrap_boundaries()
+                .iter()
+                .map(|boundary| boundary.glyph_ix)
+                .collect::<Vec<_>>()
+        };
+        // `abc` with its two gaps takes 20 px. The gap before `d` is not part of the row.
+        assert_eq!(wraps(0.1, 20.), [3]);
+        // `abc` with its two gaps of -1 px takes 16 px.
+        assert_eq!(wraps(-0.1, 15.5), [2]);
+    }
+
+    #[test]
+    fn each_letter_spacing_of_a_text_has_its_own_layout() {
+        let text_system =
+            WindowTextSystem::new(Arc::new(TextSystem::new(Arc::new(NoopTextSystem::new()))));
+        let shape = |letter_spacing| {
+            text_system.shape_spaced_line(
+                SharedString::from("abc"),
+                px(10.),
+                &[mono_run(3)],
+                em(letter_spacing),
+                None,
+            )
+        };
+        let plain = shape(0.);
+        assert_eq!(shape(0.2).width, px(22.));
+        assert_eq!(shape(0.).width, plain.width);
+        assert_eq!(shape(-0.1).width, px(16.));
+        // A line with no spacing shares the layout of an unspaced line.
+        text_system.shape_line(SharedString::from("abc"), px(10.), &[mono_run(3)], None);
+        assert_eq!(
+            text_system
+                .line_layout_cache
+                .state
+                .borrow()
+                .current_frame
+                .lines
+                .len(),
+            3
+        );
     }
 
     fn points(rank: u8, indices: &[usize]) -> impl Iterator<Item = BreakPoint> + '_ {
@@ -1058,7 +1181,14 @@ mod tests {
         layout.len = "你好".len();
         assert_eq!(
             layout
-                .compute_wrap_boundaries("你好", px(15.), None, None, &mut WrapScratch::default())
+                .compute_wrap_boundaries(
+                    "你好",
+                    &LetterGaps::NONE,
+                    px(15.),
+                    None,
+                    None,
+                    &mut WrapScratch::default()
+                )
                 .as_slice(),
             &[WrapBoundary {
                 run_ix: 0,
@@ -1071,7 +1201,14 @@ mod tests {
         layout.len = 1;
         assert!(
             layout
-                .compute_wrap_boundaries("a", px(10.), None, None, &mut WrapScratch::default())
+                .compute_wrap_boundaries(
+                    "a",
+                    &LetterGaps::NONE,
+                    px(10.),
+                    None,
+                    None,
+                    &mut WrapScratch::default()
+                )
                 .is_empty()
         );
     }
@@ -1094,6 +1231,7 @@ mod tests {
             assert_eq!(
                 layout.compute_wrap_boundaries(
                     text,
+                    &LetterGaps::NONE,
                     px(40.),
                     None,
                     None,
@@ -1124,7 +1262,14 @@ mod tests {
         layout.len = text.len();
         assert_eq!(
             layout
-                .compute_wrap_boundaries(text, px(60.), None, None, &mut WrapScratch::default())
+                .compute_wrap_boundaries(
+                    text,
+                    &LetterGaps::NONE,
+                    px(60.),
+                    None,
+                    None,
+                    &mut WrapScratch::default()
+                )
                 .as_slice(),
             &[WrapBoundary {
                 run_ix: 0,
@@ -1244,7 +1389,14 @@ mod tests {
         let mut starts = vec![0];
         starts.extend(
             layout
-                .compute_wrap_boundaries(text, wrap_width, None, None, &mut WrapScratch::default())
+                .compute_wrap_boundaries(
+                    text,
+                    &LetterGaps::NONE,
+                    wrap_width,
+                    None,
+                    None,
+                    &mut WrapScratch::default(),
+                )
                 .iter()
                 .map(|boundary| glyphs[boundary.glyph_ix].index),
         );
@@ -1281,7 +1433,14 @@ mod tests {
                 let wrap_width = widest_glyph + px(extra);
                 let wrap = |max_lines| {
                     let mut scratch = WrapScratch::default();
-                    layout.compute_wrap_boundaries(text, wrap_width, max_lines, None, &mut scratch)
+                    layout.compute_wrap_boundaries(
+                        text,
+                        &LetterGaps::NONE,
+                        wrap_width,
+                        max_lines,
+                        None,
+                        &mut scratch,
+                    )
                 };
                 let all = wrap(None);
                 for max_lines in 1..=3 {

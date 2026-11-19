@@ -1,6 +1,6 @@
 use crate::{
     self as gpui, AbsoluteLength, AlignContent, AlignItems, AlignSelf, BorderStyle, CursorStyle,
-    DefiniteLength, Display, Fill, FlexDirection, FlexWrap, Font, FontFeatures, FontStyle,
+    DefiniteLength, Display, Em, Fill, FlexDirection, FlexWrap, Font, FontFeatures, FontStyle,
     FontWeight, GridPlacement, GridTemplate, GridTemplateMinSize, Hsla, JustifyContent, Length,
     Outline, SharedString, StrikethroughStyle, StyleRefinement, TextAlign, TextOverflow,
     TextStyleRefinement, UnderlineStyle, WhiteSpace, px, relative, rems,
@@ -739,6 +739,18 @@ pub trait Styled: Sized {
     /// Sets the line height of this element and its children.
     fn line_height(mut self, line_height: impl Into<DefiniteLength>) -> Self {
         self.text_style().line_height = Some(line_height.into());
+        self
+    }
+
+    /// Sets the extra space between adjacent characters of this element and its children.
+    ///
+    /// The text elements read it. An element that shapes its own text passes the
+    /// spacing to the text system.
+    ///
+    /// Each descendant resolves the [`Em`] at its own font size. CSS resolves
+    /// `em` once, at the font size of the element that sets it.
+    fn letter_spacing(mut self, spacing: Em) -> Self {
+        self.text_style().letter_spacing = Some(spacing);
         self
     }
 

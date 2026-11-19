@@ -1,5 +1,8 @@
 mod font_fallbacks;
 mod font_features;
+mod letter_spacing;
+#[cfg(any(test, feature = "test-support"))]
+pub mod letter_spacing_conformance;
 mod line;
 mod line_layout;
 mod line_wrapper;
@@ -8,6 +11,7 @@ pub mod variable_font_conformance;
 
 pub use font_fallbacks::*;
 pub use font_features::*;
+use letter_spacing::{LetterGaps, apply_letter_spacing};
 pub use line::*;
 pub use line_layout::*;
 pub use line_wrapper::*;
@@ -15,7 +19,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Bounds, DevicePixels, Hsla, Pixels, PlatformTextSystem, Point, Result, SharedString, Size,
+    Bounds, DevicePixels, Em, Hsla, Pixels, PlatformTextSystem, Point, Result, SharedString, Size,
     StrikethroughStyle, TextRenderingMode, UnderlineStyle, px,
 };
 use anyhow::Context as _;
@@ -232,7 +236,7 @@ impl Drop for MissingGlyphReceiver {
 /// The GPUI text rendering sub system.
 pub struct TextSystem {
     platform_text_system: Arc<dyn PlatformTextSystem>,
-    font_ids_by_font: RwLock<FxHashMap<Font, CachedFont>>,
+    font_ids: RwLock<FontIds>,
     font_metrics: RwLock<FxHashMap<FontId, FontMetrics>>,
     raster_bounds: RwLock<FxHashMap<RenderGlyphParams, Bounds<DevicePixels>>>,
     wrapper_pool: Mutex<FxHashMap<FontIdWithSize, Vec<CharWidthCache>>>,
@@ -240,6 +244,26 @@ pub struct TextSystem {
     font_generation: Arc<AtomicUsize>,
     missing_glyph_reporter: Arc<MissingGlyphReporter>,
     missing_glyph_receiver: Mutex<Option<MissingGlyphReceiver>>,
+}
+
+/// The font ids of the requested fonts. One lock covers both maps, so that a
+/// clear empties both of them at once.
+#[derive(Default)]
+struct FontIds {
+    by_font: FxHashMap<Font, CachedFont>,
+    /// The ids of the fonts of spaced text, by the requested font.
+    spaced_by_font: FxHashMap<Font, FontId>,
+}
+
+impl FontIds {
+    fn clear(&mut self) {
+        let Self {
+            by_font,
+            spaced_by_font,
+        } = self;
+        by_font.clear();
+        spaced_by_font.clear();
+    }
 }
 
 #[derive(Clone)]
@@ -258,7 +282,7 @@ impl TextSystem {
             platform_text_system,
             font_metrics: RwLock::default(),
             raster_bounds: RwLock::default(),
-            font_ids_by_font: RwLock::default(),
+            font_ids: RwLock::default(),
             wrapper_pool: Mutex::default(),
             fallback_font_stack: smallvec![
                 // TODO: Remove this when Linux have implemented setting fallbacks.
@@ -302,7 +326,7 @@ impl TextSystem {
     /// Layouts already in progress may complete against the previous font set.
     pub fn add_fonts(&self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
         self.platform_text_system.add_fonts(fonts)?;
-        self.font_ids_by_font.write().clear();
+        self.font_ids.write().clear();
         self.missing_glyph_reporter.reset();
         self.font_generation.fetch_add(1, Ordering::Release);
         Ok(())
@@ -335,8 +359,9 @@ impl TextSystem {
 
     /// Get the Font for the Font Id.
     pub fn get_font_for_id(&self, id: FontId) -> Option<Font> {
-        let lock = self.font_ids_by_font.read();
-        lock.iter()
+        let lock = self.font_ids.read();
+        lock.by_font
+            .iter()
             .filter_map(|(font, result)| match result {
                 CachedFont::Direct(font_id) if *font_id == id => Some(font.clone()),
                 _ => None,
@@ -352,11 +377,34 @@ impl TextSystem {
     /// Panics if the font and none of the fallbacks can be resolved.
     pub fn resolve_font(&self, font: &Font) -> FontId {
         if let Some(CachedFont::Direct(font_id) | CachedFont::Fallback(font_id)) =
-            self.font_ids_by_font.read().get(font)
+            self.font_ids.read().by_font.get(font)
         {
             return *font_id;
         }
         self.resolve_font_uncached(font)
+    }
+
+    /// Resolves the font of a run with the given letter spacing. Spaced text
+    /// takes the font with no ligatures, as one glyph of a ligature cannot take
+    /// a gap inside it. A font that the font falls back to keeps its own features.
+    fn resolve_font_for_spacing(&self, font: &Font, letter_spacing: Em) -> FontId {
+        if letter_spacing == Em::ZERO {
+            return self.resolve_font(font);
+        }
+        if let Some(font_id) = self.font_ids.read().spaced_by_font.get(font) {
+            return *font_id;
+        }
+        let mut font_ids = self.font_ids.upgradable_read();
+        if let Some(font_id) = font_ids.spaced_by_font.get(font) {
+            return *font_id;
+        }
+        let spaced_font = Font {
+            features: font.features.without_ligatures(),
+            ..font.clone()
+        };
+        let font_id = self.resolve_font_locked(&mut font_ids, &spaced_font);
+        font_ids.with_upgraded(|font_ids| font_ids.spaced_by_font.insert(font.clone(), font_id));
+        font_id
     }
 
     /// Prewarm any system font caches needed to shape text.
@@ -569,6 +617,17 @@ impl TextSystem {
     }
 
     fn resolve_font_uncached(&self, font: &Font) -> FontId {
+        self.resolve_font_locked(&mut self.font_ids.upgradable_read(), font)
+    }
+
+    /// Resolves the font in the lock scope of the caller. One lock scope covers
+    /// the lookups and the inserts. When fonts are added at the same time, the
+    /// cache clear removes all of the inserts or none of them.
+    fn resolve_font_locked(
+        &self,
+        font_ids: &mut RwLockUpgradableReadGuard<'_, FontIds>,
+        font: &Font,
+    ) -> FontId {
         // The platform text systems match a whole weight, so that near weights
         // draw the same face on each platform. A NaN weight is not rounded.
         let weight = font.weight.0.round();
@@ -578,19 +637,15 @@ impl TextSystem {
         });
         let platform_font = rounded.as_ref().unwrap_or(font);
         let mut font_error = None;
-        // One lock scope covers the lookups and the inserts. When fonts are
-        // added at the same time, the cache clear removes all of the inserts
-        // or none of them.
         let font_id = {
-            let mut font_ids = self.font_ids_by_font.upgradable_read();
             if let Some(CachedFont::Direct(font_id) | CachedFont::Fallback(font_id)) =
-                font_ids.get(font)
+                font_ids.by_font.get(font)
             {
                 return *font_id;
             }
 
             let mut lookup_font = |candidate: &Font| {
-                let cached = if let Some(cached) = font_ids.get(candidate) {
+                let cached = if let Some(cached) = font_ids.by_font.get(candidate) {
                     cached.clone()
                 } else {
                     let cached = match self.platform_text_system.font_id(candidate) {
@@ -598,7 +653,7 @@ impl TextSystem {
                         Err(error) => CachedFont::Missing(Arc::new(error)),
                     };
                     font_ids.with_upgraded(|font_ids| {
-                        font_ids.insert(candidate.clone(), cached.clone());
+                        font_ids.by_font.insert(candidate.clone(), cached.clone());
                     });
                     cached
                 };
@@ -622,8 +677,10 @@ impl TextSystem {
             if let Some(font_id) = font_id {
                 font_ids.with_upgraded(|font_ids| {
                     for alias in [Some(font), rounded.as_ref()].into_iter().flatten() {
-                        if !matches!(font_ids.get(alias), Some(CachedFont::Direct(_))) {
-                            font_ids.insert(alias.clone(), CachedFont::Fallback(font_id));
+                        if !matches!(font_ids.by_font.get(alias), Some(CachedFont::Direct(_))) {
+                            font_ids
+                                .by_font
+                                .insert(alias.clone(), CachedFont::Fallback(font_id));
                         }
                     }
                 });
@@ -693,6 +750,19 @@ impl WindowTextSystem {
         runs: &[TextRun],
         force_width: Option<Pixels>,
     ) -> ShapedLine {
+        self.shape_spaced_line(text, font_size, runs, Em::ZERO, force_width)
+    }
+
+    /// Shapes the line as [`Self::shape_line`] does, with `letter_spacing` of extra
+    /// space between adjacent characters.
+    pub fn shape_spaced_line(
+        &self,
+        text: SharedString,
+        font_size: Pixels,
+        runs: &[TextRun],
+        letter_spacing: Em,
+        force_width: Option<Pixels>,
+    ) -> ShapedLine {
         debug_assert!(
             text.find('\n').is_none(),
             "text argument should not contain newlines"
@@ -718,7 +788,7 @@ impl WindowTextSystem {
             });
         }
 
-        let layout = self.layout_line(&text, font_size, runs, force_width);
+        let layout = self.layout_spaced_line(&text, font_size, runs, letter_spacing, force_width);
 
         ShapedLine {
             layout,
@@ -738,16 +808,26 @@ impl WindowTextSystem {
         wrap_width: Option<Pixels>,
         line_clamp: Option<usize>,
     ) -> Result<SmallVec<[WrappedLine; 1]>> {
-        self.shape_text_with_break_points(text, font_size, runs, wrap_width, line_clamp, None)
+        self.shape_text_with_break_points(
+            text,
+            font_size,
+            runs,
+            Em::ZERO,
+            wrap_width,
+            line_clamp,
+            None,
+        )
     }
 
-    /// Shapes the text as [`Self::shape_text`] does. When `break_points` is given, the text
-    /// wraps only at them, in place of the Unicode line break rules.
+    /// Shapes the text as [`Self::shape_text`] does, with `letter_spacing` of extra space
+    /// between adjacent characters. When `break_points` is given, the text wraps only at
+    /// them, in place of the Unicode line break rules.
     pub(crate) fn shape_text_with_break_points(
         &self,
         text: SharedString,
         font_size: Pixels,
         runs: &[TextRun],
+        letter_spacing: Em,
         wrap_width: Option<Pixels>,
         line_clamp: Option<usize>,
         break_points: Option<&[BreakPoint]>,
@@ -804,7 +884,7 @@ impl WindowTextSystem {
                     true
                 };
 
-                let font_id = self.resolve_font(&run.font);
+                let font_id = self.resolve_font_for_spacing(&run.font, letter_spacing);
                 if let Some(font_run) = font_runs.last_mut()
                     && font_id == font_run.font_id
                     && !decoration_changed
@@ -829,6 +909,7 @@ impl WindowTextSystem {
                 &line_text,
                 font_size,
                 &font_runs,
+                letter_spacing,
                 wrap_width,
                 max_wrap_lines.map(|max| max.saturating_sub(wrapped_lines)),
                 break_points.map(|_| line_break_points.as_slice()),
@@ -891,15 +972,34 @@ impl WindowTextSystem {
         Text: AsRef<str>,
         SharedString: From<Text>,
     {
-        let font_runs = self.font_runs(runs);
-        let layout = self
-            .line_layout_cache
-            .layout_line(text, font_size, &font_runs, force_width);
+        self.layout_spaced_line(text, font_size, runs, Em::ZERO, force_width)
+    }
+
+    fn layout_spaced_line<Text>(
+        &self,
+        text: Text,
+        font_size: Pixels,
+        runs: &[TextRun],
+        letter_spacing: Em,
+        force_width: Option<Pixels>,
+    ) -> Arc<LineLayout>
+    where
+        Text: AsRef<str>,
+        SharedString: From<Text>,
+    {
+        let font_runs = self.font_runs(runs, letter_spacing);
+        let layout = self.line_layout_cache.layout_line(
+            text,
+            font_size,
+            &font_runs,
+            letter_spacing,
+            force_width,
+        );
         self.font_runs_buffer.set(font_runs);
         layout
     }
 
-    fn font_runs(&self, runs: &[TextRun]) -> Vec<FontRun> {
+    fn font_runs(&self, runs: &[TextRun], letter_spacing: Em) -> Vec<FontRun> {
         let mut last_run = None::<&TextRun>;
         let mut font_runs = self.font_runs_buffer.take();
         font_runs.clear();
@@ -918,7 +1018,7 @@ impl WindowTextSystem {
                 true
             };
 
-            let font_id = self.resolve_font(&run.font);
+            let font_id = self.resolve_font_for_spacing(&run.font, letter_spacing);
             if let Some(font_run) = font_runs.last_mut()
                 && font_id == font_run.font_id
                 && !decoration_changed
@@ -947,6 +1047,7 @@ impl WindowTextSystem {
                     len: buffer.len(),
                     font_id,
                 }],
+                Em::ZERO,
                 None,
             )
             .width
@@ -1342,7 +1443,7 @@ mod font_resolution_tests {
         let requested = font("Missing Font").bold().italic();
         let missing = CachedFont::Missing(Arc::new(anyhow::anyhow!("missing font")));
         {
-            let mut font_ids = text_system.font_ids_by_font.write();
+            let font_ids = &mut text_system.font_ids.get_mut().by_font;
             font_ids.insert(requested.clone(), missing.clone());
             for fallback in &text_system.fallback_font_stack {
                 font_ids.insert(fallback.clone(), missing.clone());
@@ -1359,7 +1460,7 @@ mod font_resolution_tests {
         };
         assert_eq!(text_system.resolve_font(&fractional), FontId(42));
         assert!(matches!(
-            text_system.font_ids_by_font.read().get(&fractional),
+            text_system.font_ids.read().by_font.get(&fractional),
             Some(CachedFont::Fallback(FontId(42)))
         ));
         assert_eq!(text_system.get_font_for_id(FontId(42)), Some(font("Arial")));
@@ -1369,8 +1470,9 @@ mod font_resolution_tests {
             ..font("Zero")
         };
         text_system
-            .font_ids_by_font
+            .font_ids
             .write()
+            .by_font
             .insert(zero(0.0), CachedFont::Direct(FontId(7)));
         assert_eq!(text_system.resolve_font(&zero(-0.0)), FontId(7));
 

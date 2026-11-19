@@ -1,3 +1,4 @@
+use super::LetterGaps;
 use crate::{
     App, Bounds, DevicePixels, Half, Hsla, LineLayout, Pixels, Point, RenderGlyphParams, Result,
     SharedString, StrikethroughStyle, TextAlign, UnderlineStyle, Window, WrapBoundary,
@@ -151,6 +152,7 @@ impl ShapedLine {
             align_width,
             &self.decoration_runs,
             &[],
+            &LetterGaps::NONE,
             window,
             cx,
             &mut paint_underline,
@@ -179,6 +181,7 @@ impl ShapedLine {
             align_width,
             &self.decoration_runs,
             &[],
+            &LetterGaps::NONE,
             window,
             cx,
         )?;
@@ -409,6 +412,7 @@ impl LineLayout {
             align_width,
             decoration_runs,
             &[],
+            &LetterGaps::NONE,
             window,
             cx,
             &mut |_, origin, width, style, window| window.paint_underline(origin, width, style),
@@ -442,6 +446,7 @@ impl LineLayout {
             align_width,
             decoration_runs,
             &[],
+            &LetterGaps::NONE,
             window,
             cx,
         )
@@ -490,6 +495,7 @@ impl WrappedLine {
             align_width,
             &self.decoration_runs,
             &self.wrap_boundaries,
+            &self.letter_gaps,
             window,
             cx,
             &mut |_, origin, width, style, window| window.paint_underline(origin, width, style),
@@ -525,6 +531,7 @@ impl WrappedLine {
             align_width,
             &self.decoration_runs,
             &self.wrap_boundaries,
+            &self.letter_gaps,
             window,
             cx,
         )?;
@@ -542,6 +549,7 @@ fn paint_line(
     align_width: Option<Pixels>,
     decoration_runs: &[DecorationRun],
     wrap_boundaries: &[WrapBoundary],
+    letter_gaps: &LetterGaps,
     window: &mut Window,
     cx: &mut App,
     paint_underline: &mut dyn FnMut(
@@ -560,6 +568,7 @@ fn paint_line(
         align,
         align_width,
         wrap_boundaries,
+        letter_gaps,
     );
     window.paint_layer(line_bounds, |window| {
         let padding_top = (line_height - layout.ascent - layout.descent) / 2.;
@@ -579,6 +588,7 @@ fn paint_line(
                 px(0.0),
                 &align,
                 layout,
+                letter_gaps,
                 text,
                 wraps.peek(),
             ),
@@ -643,6 +653,7 @@ fn paint_line(
                         glyph.position.x,
                         &align,
                         layout,
+                        letter_gaps,
                         text,
                         wraps.peek(),
                     );
@@ -824,6 +835,7 @@ fn paint_line_background(
     align_width: Option<Pixels>,
     decoration_runs: &[DecorationRun],
     wrap_boundaries: &[WrapBoundary],
+    letter_gaps: &LetterGaps,
     window: &mut Window,
     cx: &mut App,
 ) -> Result<()> {
@@ -835,6 +847,7 @@ fn paint_line_background(
         align,
         align_width,
         wrap_boundaries,
+        letter_gaps,
     );
     window.paint_layer(line_bounds, |window| {
         let mut decoration_runs = decoration_runs.iter();
@@ -849,6 +862,7 @@ fn paint_line_background(
                 px(0.0),
                 &align,
                 layout,
+                letter_gaps,
                 text,
                 wraps.peek(),
             ),
@@ -890,6 +904,7 @@ fn paint_line_background(
                         glyph.position.x,
                         &align,
                         layout,
+                        letter_gaps,
                         text,
                         wraps.peek(),
                     );
@@ -977,6 +992,7 @@ fn line_paint_bounds(
     align: TextAlign,
     align_width: Option<Pixels>,
     wrap_boundaries: &[WrapBoundary],
+    letter_gaps: &LetterGaps,
 ) -> Bounds<Pixels> {
     let mut bounds = Bounds::new(
         origin,
@@ -998,7 +1014,8 @@ fn line_paint_bounds(
                 .position
                 .x
         });
-        let width = row_content_end(layout, text, row_start, wrap_boundary) - row_start;
+        let width =
+            row_content_end(layout, letter_gaps, text, row_start, wrap_boundary) - row_start;
         let offset = match align {
             TextAlign::Left => Pixels::ZERO,
             TextAlign::Center => (align_width - width) / 2.,
@@ -1019,10 +1036,17 @@ fn aligned_origin_x(
     last_glyph_x: Pixels,
     align: &TextAlign,
     layout: &LineLayout,
+    letter_gaps: &LetterGaps,
     text: Option<&str>,
     wrap_boundary: Option<&&WrapBoundary>,
 ) -> Pixels {
-    let end_of_line = row_content_end(layout, text, last_glyph_x, wrap_boundary.copied());
+    let end_of_line = row_content_end(
+        layout,
+        letter_gaps,
+        text,
+        last_glyph_x,
+        wrap_boundary.copied(),
+    );
 
     let line_width = end_of_line - last_glyph_x;
 
@@ -1034,11 +1058,13 @@ fn aligned_origin_x(
 }
 
 /// The x where the content of a row ends. The row starts at `row_start` and
-/// ends at `wrap_boundary`, or at the end of the line. The spaces at the end
-/// of a wrapped row hang past the edge and take no part in the alignment, as
-/// in CSS. With no `text`, the spaces count as content.
+/// ends at `wrap_boundary`, or at the end of the line. The gap of the letter
+/// spacing after the row and the spaces at the end of a wrapped row hang past
+/// the edge and take no part in the alignment, as in CSS. With no `text`, the
+/// spaces count as content.
 fn row_content_end(
     layout: &LineLayout,
+    letter_gaps: &LetterGaps,
     text: Option<&str>,
     row_start: Pixels,
     wrap_boundary: Option<&WrapBoundary>,
@@ -1046,7 +1072,14 @@ fn row_content_end(
     let Some(&WrapBoundary { run_ix, glyph_ix }) = wrap_boundary else {
         return layout.width;
     };
-    let mut end = layout.runs[run_ix].glyphs[glyph_ix].position.x;
+    // The index of the boundary glyph among the glyphs of the line.
+    let boundary_ix = layout.runs[..run_ix]
+        .iter()
+        .map(|run| run.glyphs.len())
+        .sum::<usize>()
+        + glyph_ix;
+    let x = layout.runs[run_ix].glyphs[glyph_ix].position.x;
+    let mut end = letter_gaps.content_end_before(boundary_ix, x);
     let Some(text) = text else {
         return end;
     };
@@ -1054,11 +1087,12 @@ fn row_content_end(
         .iter()
         .flat_map(|run| &run.glyphs)
         .chain(&layout.runs[run_ix].glyphs[..glyph_ix]);
-    for glyph in row.rev().take_while(|glyph| glyph.position.x >= row_start) {
+    let row = row.rev().zip((0..boundary_ix).rev());
+    for (glyph, ix) in row.take_while(|(glyph, _)| glyph.position.x >= row_start) {
         if text.as_bytes().get(glyph.index) != Some(&b' ') {
             break;
         }
-        end = glyph.position.x;
+        end = letter_gaps.content_end_before(ix, glyph.position.x);
     }
     end
 }
@@ -1145,6 +1179,7 @@ mod tests {
                         align,
                         align_width.map(px),
                         &boundaries,
+                        &LetterGaps::NONE,
                     ),
                     Bounds::new(
                         point(px(left), origin.y),
@@ -1164,7 +1199,8 @@ mod tests {
                     line_height,
                     align,
                     Some(px(100.)),
-                    &[]
+                    &[],
+                    &LetterGaps::NONE,
                 ),
                 Bounds::new(origin, size(Pixels::ZERO, line_height)),
             );
@@ -1192,10 +1228,46 @@ mod tests {
                     align,
                     Some(px(20.)),
                     &boundaries,
+                    &LetterGaps::NONE,
                 ),
                 Bounds::new(origin, size(px(50.), px(32.))),
                 "align={align:?}",
             );
+        }
+    }
+
+    #[test]
+    fn a_spaced_row_aligns_by_the_end_of_its_last_glyph() {
+        // Glyphs of 10 px. A spacing of 0.125 em is 2 px at 16 px.
+        for (text, glyph_ix) in [("abcd", 2), ("ab cd", 3)] {
+            let glyphs = (0..text.len())
+                .map(|ix| (ix, ix as f32 * 10.))
+                .collect::<Vec<_>>();
+            let line = make_shaped_line(text, &glyphs, text.len() as f32 * 10., &[]);
+            let mut layout = LineLayout::clone(&line.layout);
+            let letter_gaps =
+                crate::text_system::apply_letter_spacing(&mut layout, text, crate::em(0.125));
+            let boundary = WrapBoundary {
+                run_ix: 0,
+                glyph_ix,
+            };
+            // `ab` ends at 22 px. The gap after it and a hanging space are not content.
+            for (align, x) in [(TextAlign::Center, 4.), (TextAlign::Right, 8.)] {
+                assert_eq!(
+                    aligned_origin_x(
+                        point(px(0.), px(0.)),
+                        px(30.),
+                        px(0.),
+                        &align,
+                        &layout,
+                        &letter_gaps,
+                        Some(&line.text),
+                        Some(&&boundary),
+                    ),
+                    px(x),
+                    "{text:?} {align:?}"
+                );
+            }
         }
     }
 
@@ -1464,6 +1536,7 @@ mod tests {
                             glyph_ix: 2,
                         }]),
                         wrap_width: Some(px(16.)),
+                        letter_gaps: LetterGaps::NONE,
                     }),
                     text: line.text,
                     decoration_runs: line.decoration_runs.into_vec(),
@@ -1484,6 +1557,7 @@ mod tests {
                     Some(px(16.)),
                     &wrapped.decoration_runs,
                     &wrapped.wrap_boundaries,
+                    &wrapped.letter_gaps,
                     window,
                     cx,
                     &mut |range, origin, width, style, window| {

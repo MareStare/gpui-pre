@@ -3373,6 +3373,30 @@ impl TryFrom<&'_ str> for Rems {
     }
 }
 
+/// A length in multiples of the font size of the text it applies to.
+///
+/// For example, `em(0.1)` on text of 20px is 2px.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Em(pub f32);
+
+impl Em {
+    /// A length of zero.
+    pub const ZERO: Self = Self(0.0);
+
+    /// Converts this length to pixels at the given font size.
+    pub fn to_pixels(self, font_size: Pixels) -> Pixels {
+        Pixels(self.0 * font_size.0)
+    }
+}
+
+impl Eq for Em {}
+
+impl std::hash::Hash for Em {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.to_bits().hash(state);
+    }
+}
+
 /// Represents an absolute length in pixels or rems.
 ///
 /// `AbsoluteLength` can be either a fixed number of pixels, which is an absolute measurement not
@@ -3807,6 +3831,11 @@ pub const fn phi() -> DefiniteLength {
 /// A `Rems` representing the specified number of rems.
 pub const fn rems(rems: f32) -> Rems {
     Rems(rems)
+}
+
+/// Constructs an [`Em`] length: a multiple of the font size.
+pub const fn em(em: f32) -> Em {
+    Em(em)
 }
 
 /// Constructs a `Pixels` value representing a length in pixels.

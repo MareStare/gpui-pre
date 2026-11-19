@@ -1169,6 +1169,26 @@ mod tests {
         Ok(text_system)
     }
 
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn letter_spacing_keeps_a_combining_mark_with_its_base() -> Result<()> {
+        gpui::letter_spacing_conformance::combining_mark_keeps_its_base(Arc::new(
+            CosmicTextSystem::new_without_system_fonts(
+                gpui::variable_font_conformance::STATIC_FAMILY,
+            ),
+        ))
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn letter_spacing_turns_off_ligatures() -> Result<()> {
+        gpui::letter_spacing_conformance::spacing_turns_off_ligatures(Arc::new(
+            CosmicTextSystem::new_without_system_fonts(
+                gpui::variable_font_conformance::STATIC_FAMILY,
+            ),
+        ))
+    }
+
     #[test]
     fn cached_font_resolution_does_not_wait_for_cold_lookups() -> Result<()> {
         for family in [".ZedSans", "Missing Font"] {

@@ -732,11 +732,13 @@ impl TextLayout {
                     return size;
                 }
 
+                let letter_spacing = text_style.letter_spacing;
                 let (shown, runs) = if let Some(truncate_width) = truncate_width {
                     // Taking a wrapper from the pool locks it twice and moves its
                     // character width cache around, so only do it when truncating.
                     let mut line_wrapper =
                         cx.text_system().line_wrapper(text_style.font(), font_size);
+                    line_wrapper.set_letter_spacing(letter_spacing);
                     if let Some(max_lines) = text_style.line_clamp
                         && let Some(wrap_width) = wrap_width
                     {
@@ -750,7 +752,15 @@ impl TextLayout {
                         )
                     } else if let Some(unclipped) = window
                         .text_system()
-                        .shape_text(text.clone(), font_size, &runs, None, None)
+                        .shape_text_with_break_points(
+                            text.clone(),
+                            font_size,
+                            &runs,
+                            letter_spacing,
+                            None,
+                            None,
+                            None,
+                        )
                         .log_err()
                         && unclipped
                             .iter()
@@ -786,6 +796,7 @@ impl TextLayout {
                         text,
                         font_size,
                         &runs,
+                        letter_spacing,
                         wrap_width,            // Wrap if we know the width.
                         text_style.line_clamp, // Limit the number of lines if line_clamp is set.
                         break_points,
@@ -1384,6 +1395,36 @@ mod tests {
         let _ = div().child("String".to_string());
         let _ = div().child(Cow::Borrowed("Cow"));
         let _ = div().child(SharedString::from("SharedString"));
+    }
+
+    #[gpui::test]
+    fn letter_spacing_resolves_at_the_font_size_of_the_text(cx: &mut crate::TestAppContext) {
+        use crate::{
+            Context, InteractiveElement as _, ParentElement as _, Render, Styled as _, div, em, px,
+            size,
+        };
+
+        struct Label;
+        impl Render for Label {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().flex().child(
+                    div()
+                        .debug_selector(|| "LABEL".into())
+                        .text_size(px(20.))
+                        .letter_spacing(em(0.1))
+                        .child("ab"),
+                )
+            }
+        }
+
+        let window = cx.open_window(size(px(400.), px(100.)), |_, _| Label);
+        cx.run_until_parked();
+        let bounds = window
+            .update(cx, |_, window, _| window.debug_bounds("LABEL"))
+            .unwrap()
+            .expect("the label has bounds");
+        // Two glyphs of 12 px and one gap of 2 px.
+        assert_eq!(bounds.size.width, px(26.));
     }
 
     #[test]

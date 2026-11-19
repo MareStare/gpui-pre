@@ -22,6 +22,18 @@ impl FontFeatures {
         Self(Arc::new(vec![("calt".into(), 0)]))
     }
 
+    /// Returns these features with the ligatures and the contextual alternates
+    /// off: `liga`, `clig` and `calt`. A tag that these features set keeps its value.
+    pub fn without_ligatures(&self) -> Self {
+        let mut features = self.0.as_ref().clone();
+        for tag in ["liga", "clig", "calt"] {
+            if !features.iter().any(|(feature, _)| feature == tag) {
+                features.push((tag.into(), 0));
+            }
+        }
+        Self(Arc::new(features))
+    }
+
     /// Get the tag name list of the font OpenType features
     /// only enabled or disabled features are returned
     pub fn tag_value_list(&self) -> &[(String, u32)] {
@@ -160,4 +172,23 @@ impl JsonSchema for FontFeatures {
 
 fn is_valid_feature_tag(tag: &str) -> bool {
     tag.len() == 4 && tag.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn without_ligatures_keeps_the_ligature_tags_that_the_features_set() {
+        let features = FontFeatures(Arc::new(vec![("liga".into(), 1), ("ss01".into(), 1)]));
+        assert_eq!(
+            features.without_ligatures().tag_value_list(),
+            [
+                ("liga".into(), 1),
+                ("ss01".into(), 1),
+                ("clig".into(), 0),
+                ("calt".into(), 0)
+            ]
+        );
+    }
 }
