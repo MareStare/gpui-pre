@@ -136,6 +136,10 @@ gpui-pre version goes.
   WinTab until Windows Ink gives the first touch of a pen. A thread
   other than the UI thread opens each WinTab context, so a driver that
   does not answer blocks no window.
+- Cancelled clicks: `Window::cancel_click` keeps the press of the mouse
+  button that is down from firing click listeners at its release, as a
+  drag of GPUI does. An app drag that does not use the drags of GPUI calls
+  it once the press becomes a drag.
 - Quit on macOS: `Platform::quit` stops the AppKit run loop, and `run`
   calls the quit callback after it and returns, as on Linux and Windows.
   A quit that the system asks for, such as at logout, still ends the

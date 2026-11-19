@@ -1324,6 +1324,7 @@ pub struct Window {
     pub(crate) focus_lost_listeners: SingleSubscriberSet<AnyObserver>,
     focus_lost_path: SmallVec<[FocusId; 8]>,
     default_prevented: bool,
+    click_cancelled: bool,
     mouse_position: Point<Pixels>,
     mouse_hit_test: HitTest,
     modifiers: Modifiers,
@@ -2449,6 +2450,7 @@ impl Window {
             focus_lost_listeners: SingleSubscriberSet::new(),
             focus_lost_path: SmallVec::new(),
             default_prevented: true,
+            click_cancelled: false,
             mouse_position,
             mouse_hit_test: HitTest::default(),
             modifiers,
@@ -3734,6 +3736,19 @@ impl Window {
     /// Obtain whether default has been prevented for the event currently being dispatched.
     pub fn default_prevented(&self) -> bool {
         self.default_prevented
+    }
+
+    /// Keeps the press of the mouse button that is down from firing click
+    /// listeners at its release, as a drag that starts from the press does.
+    /// The next press clicks again.
+    pub fn cancel_click(&mut self) {
+        self.click_cancelled = true;
+    }
+
+    /// Whether the press of the mouse button that is down fires no click
+    /// listeners at its release.
+    pub(crate) fn click_cancelled(&self) -> bool {
+        self.click_cancelled
     }
 
     /// Determine whether the given action is available along the dispatch path to the currently focused element.
@@ -6465,6 +6480,9 @@ impl Window {
 
     fn dispatch_mouse_event(&mut self, event: &dyn Any, cx: &mut App) {
         self.mouse_hit_test = self.rendered_frame.hit_test(self.mouse_position());
+        if event.is::<crate::MouseDownEvent>() {
+            self.click_cancelled = false;
+        }
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         if self.is_inspector_picking(cx) {

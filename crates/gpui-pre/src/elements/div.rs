@@ -3307,12 +3307,15 @@ impl Interactivity {
                         // propagation.
                         DispatchPhase::Capture => {
                             let mut pending_mouse_down = pending_mouse_down.borrow_mut();
-                            if pending_mouse_down.is_some() && hitbox.is_hovered(window) {
+                            if pending_mouse_down.is_some()
+                                && hitbox.is_hovered(window)
+                                && !window.click_cancelled()
+                            {
                                 captured_mouse_down = pending_mouse_down.take();
                                 window.refresh();
                             } else if pending_mouse_down.is_some() {
                                 // Clear the pending mouse down event (without firing click handlers)
-                                // if the hitbox is not being hovered.
+                                // if the hitbox is not being hovered, or the click was cancelled.
                                 // This avoids dragging elements that changed their position
                                 // immediately after being clicked.
                                 // See https://github.com/zed-industries/zed/issues/24600 for more details
@@ -5814,6 +5817,66 @@ mod tests {
             1,
             "mouse down over an active prompt should not fire mouse-down-out listeners"
         );
+    }
+
+    #[test]
+    fn a_cancelled_click_fires_no_click_listeners_until_the_next_press() {
+        let mut cx = TestAppContext::single();
+        let clicks = Rc::new(Cell::new(0));
+        let window: AnyWindowHandle = cx
+            .add_window({
+                let clicks = clicks.clone();
+                move |_, _| ClickCounter { clicks }
+            })
+            .into();
+        let at = point(px(10.), px(10.));
+        let mut click = |cancel: bool| {
+            cx.update_window(window, |_, window, cx| {
+                window.draw(cx).clear(cx);
+                let down = MouseDownEvent {
+                    position: at,
+                    button: MouseButton::Left,
+                    modifiers: Default::default(),
+                    click_count: 1,
+                    first_mouse: false,
+                };
+                window.dispatch_event(down.to_platform_input(), cx);
+                if cancel {
+                    window.cancel_click();
+                }
+                let up = MouseUpEvent {
+                    position: at,
+                    button: MouseButton::Left,
+                    modifiers: Default::default(),
+                    click_count: 1,
+                };
+                window.dispatch_event(up.to_platform_input(), cx);
+            })
+            .unwrap();
+        };
+        click(false);
+        assert_eq!(clicks.get(), 1);
+        click(true);
+        assert_eq!(clicks.get(), 1, "a cancelled click fires no listener");
+        click(false);
+        assert_eq!(clicks.get(), 2, "the next press clicks again");
+    }
+
+    struct ClickCounter {
+        clicks: Rc<Cell<usize>>,
+    }
+
+    impl Render for ClickCounter {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let clicks = self.clicks.clone();
+            div().size_full().child(
+                div()
+                    .id("target")
+                    .w(px(50.))
+                    .h(px(50.))
+                    .on_click(move |_, _, _| clicks.set(clicks.get() + 1)),
+            )
+        }
     }
 
     #[test]
