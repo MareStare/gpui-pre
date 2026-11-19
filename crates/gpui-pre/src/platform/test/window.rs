@@ -281,13 +281,23 @@ impl TestWindow {
     }
 
     pub(crate) fn simulate_active_status_change(&self, active: bool) {
-        let mut lock = self.0.lock();
-        let Some(mut callback) = lock.active_status_change_callback.take() else {
+        self.simulate_status_change(|state| &mut state.active_status_change_callback, active);
+    }
+
+    pub(crate) fn simulate_hover_status_change(&self, hovered: bool) {
+        self.simulate_status_change(|state| &mut state.hover_status_change_callback, hovered);
+    }
+
+    fn simulate_status_change(
+        &self,
+        callback_of: impl Fn(&mut TestWindowState) -> &mut Option<Box<dyn FnMut(bool)>>,
+        status: bool,
+    ) {
+        let Some(mut callback) = callback_of(&mut self.0.lock()).take() else {
             return;
         };
-        drop(lock);
-        callback(active);
-        self.0.lock().active_status_change_callback = Some(callback);
+        callback(status);
+        *callback_of(&mut self.0.lock()) = Some(callback);
     }
 
     pub fn simulate_appearance_change(&self, appearance: WindowAppearance) {

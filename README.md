@@ -140,6 +140,16 @@ gpui-pre version goes.
   button that is down from firing click listeners at its release, as a
   drag of GPUI does. An app drag that does not use the drags of GPUI calls
   it once the press becomes a drag.
+- Exclusive pointer capture: while a hitbox captures the pointer with
+  `Window::capture_pointer`, only that hitbox is hovered, as in the pointer
+  capture of browsers. So the listeners that test the hover take the mouse
+  events only for it, and only it shows hover styles and sets the cursor. No
+  tooltip shows. Scroll events, `is_hovered_at` and the mouse up out of an
+  element still test the hitboxes under the pointer. A view that draws again
+  gets new hitbox ids, so a capture lasts one frame: an element captures the
+  pointer in the prepaint of each frame of its drag. A call in an event
+  listener captures it in the frame on screen, after the dispatch of the
+  event. A mouse up ends the capture. `release_pointer` is gone.
 - Quit on macOS: `Platform::quit` stops the AppKit run loop, and `run`
   calls the quit callback after it and returns, as on Linux and Windows.
   A quit that the system asks for, such as at logout, still ends the

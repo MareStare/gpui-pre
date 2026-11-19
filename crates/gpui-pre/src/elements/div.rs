@@ -308,9 +308,10 @@ impl Interactivity {
     ) {
         self.mouse_up_listeners
             .push(Box::new(move |event, phase, hitbox, window, cx| {
+                // A release over the element, also during a pointer capture, is not out.
                 if phase == DispatchPhase::Capture
                     && event.button == button
-                    && !hitbox.is_hovered(window)
+                    && !hitbox.id.hit_test(window)
                 {
                     (listener)(event, window, cx);
                 }
@@ -3964,6 +3965,9 @@ pub(crate) fn register_tooltip_mouse_handlers(
 ) {
     let current_view = window.current_view();
     let show_delay = show_delay.unwrap_or(DEFAULT_TOOLTIP_SHOW_DELAY);
+    let check_is_hovered = unless_pointer_captured(check_is_hovered);
+    let check_is_hovered_during_prepaint =
+        unless_pointer_captured(check_is_hovered_during_prepaint);
 
     window.on_mouse_event({
         let active_tooltip = active_tooltip.clone();
@@ -4044,6 +4048,13 @@ pub(crate) fn register_tooltip_mouse_handlers(
             }
         }
     });
+}
+
+/// Shows no tooltip while a hitbox captures the pointer, as during a drag.
+fn unless_pointer_captured(
+    check_is_hovered: Rc<dyn Fn(&Window) -> bool>,
+) -> Rc<dyn Fn(&Window) -> bool> {
+    Rc::new(move |window| window.captured_hitbox().is_none() && check_is_hovered(window))
 }
 
 /// Handles displaying tooltips when an element is hovered.
@@ -4781,9 +4792,9 @@ impl ScrollHandle {
 mod tests {
     use super::*;
     use crate::{
-        AnyWindowHandle, AppContext as _, Context, Decorations, GestureTuning, InputEvent,
-        Keystroke, MouseMoveEvent, TestAppContext, Tiling, TouchEvent, TouchId, WindowHandle,
-        canvas, size, util::FluentBuilder as _,
+        AnyWindowHandle, AppContext as _, Context, CursorStyle, Decorations, GestureTuning,
+        InputEvent, Keystroke, MouseMoveEvent, PlatformInput, TestAppContext, Tiling, TouchEvent,
+        TouchId, WindowHandle, canvas, size, util::FluentBuilder as _,
     };
     use std::{cell::Cell, rc::Weak};
 
@@ -5544,17 +5555,23 @@ mod tests {
         window: AnyWindowHandle,
         position: Point<Pixels>,
     ) -> Option<Bounds<Pixels>> {
+        let event = MouseMoveEvent {
+            position,
+            modifiers: Default::default(),
+            pressed_button: None,
+        };
+        dispatch(test_app, window, event.to_platform_input())
+    }
+
+    /// Dispatches `event` and draws the window. Returns the bounds of the tooltip that shows.
+    fn dispatch(
+        test_app: &mut TestAppContext,
+        window: AnyWindowHandle,
+        event: PlatformInput,
+    ) -> Option<Bounds<Pixels>> {
         test_app
             .update_window(window, |_, window, cx| {
-                window.dispatch_event(
-                    MouseMoveEvent {
-                        position,
-                        modifiers: Default::default(),
-                        pressed_button: None,
-                    }
-                    .to_platform_input(),
-                    cx,
-                );
+                window.dispatch_event(event, cx);
                 window.draw(cx).clear(cx);
                 window.tooltip_bounds.as_ref().map(|tooltip| tooltip.bounds)
             })
@@ -5688,6 +5705,176 @@ mod tests {
             .advance_clock(DEFAULT_TOOLTIP_SHOW_DELAY);
         let b = redraw(&mut test_app, window).expect("the tooltip of b shows");
         assert_eq!(b.center().x, px(70.));
+    }
+
+    /// A canvas of 100 by 100 px at the origin, with a crosshair cursor, that captures the pointer
+    /// from a press until `dragging` ends, and a button of 40 by 20 px at x 150, with a pointing
+    /// hand cursor and a tooltip. Their parent counts the presses and the releases out of it.
+    struct PointerCaptureView {
+        dragging: Rc<Cell<bool>>,
+        button_hovered: Rc<Cell<bool>>,
+        presses: Rc<Cell<usize>>,
+        releases_out: Rc<Cell<usize>>,
+    }
+
+    impl Render for PointerCaptureView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let dragging = self.dragging.clone();
+            let button_hovered = self.button_hovered.clone();
+            let presses = self.presses.clone();
+            let releases_out = self.releases_out.clone();
+            let canvas = canvas(
+                {
+                    let dragging = dragging.clone();
+                    move |bounds, window, _| {
+                        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+                        if dragging.get() {
+                            window.capture_pointer(hitbox.id);
+                        }
+                        hitbox
+                    }
+                },
+                move |_, hitbox, window, _| {
+                    window.set_cursor_style(CursorStyle::Crosshair, &hitbox);
+                    let press_dragging = dragging.clone();
+                    window.on_mouse_event(move |_: &MouseDownEvent, phase, window, _| {
+                        if phase.bubble() && hitbox.is_hovered(window) {
+                            press_dragging.set(true);
+                            window.capture_pointer(hitbox.id);
+                        }
+                    });
+                    window.on_mouse_event(move |_: &MouseUpEvent, _, _, _| dragging.set(false));
+                },
+            )
+            .size(px(100.));
+            div()
+                .size_full()
+                .flex()
+                .gap(px(50.))
+                .on_mouse_down(MouseButton::Left, move |_, _, _| {
+                    presses.set(presses.get() + 1)
+                })
+                .on_mouse_up_out(MouseButton::Left, move |_, _, _| {
+                    releases_out.set(releases_out.get() + 1)
+                })
+                .child(canvas)
+                .child(
+                    div()
+                        .id("button")
+                        .w(px(40.))
+                        .h(px(20.))
+                        .cursor_pointer()
+                        .on_hover(move |hovered, _, _| button_hovered.set(*hovered))
+                        .tooltip(|_, cx| cx.new(|_| TestTooltipView).into()),
+                )
+        }
+    }
+
+    #[test]
+    fn a_pointer_capture_hovers_only_its_hitbox() {
+        let mut test_app = TestAppContext::single();
+        let dragging = Rc::new(Cell::new(false));
+        let button_hovered = Rc::new(Cell::new(false));
+        let presses = Rc::new(Cell::new(0));
+        let releases_out = Rc::new(Cell::new(0));
+        let window: AnyWindowHandle = test_app
+            .add_window({
+                let dragging = dragging.clone();
+                let button_hovered = button_hovered.clone();
+                let presses = presses.clone();
+                let releases_out = releases_out.clone();
+                |_, _| PointerCaptureView {
+                    dragging,
+                    button_hovered,
+                    presses,
+                    releases_out,
+                }
+            })
+            .into();
+        let test_window = test_app.test_window(window);
+        test_window.simulate_hover_status_change(true);
+        test_window.simulate_active_status_change(true);
+        redraw(&mut test_app, window);
+        let canvas = point(px(50.), px(50.));
+        let button = point(px(170.), px(10.));
+        let cursor = |test_app: &TestAppContext| test_app.test_platform().cursor_style();
+        let captured_hitbox = |test_app: &mut TestAppContext| {
+            test_app
+                .update_window(window, |_, window, _| window.captured_hitbox())
+                .unwrap()
+        };
+        let press = MouseDownEvent {
+            position: canvas,
+            button: MouseButton::Left,
+            ..Default::default()
+        };
+        let drag = MouseMoveEvent {
+            position: button,
+            pressed_button: Some(MouseButton::Left),
+            ..Default::default()
+        };
+
+        hover(&mut test_app, window, button);
+        assert!(button_hovered.get());
+        assert_eq!(cursor(&test_app), CursorStyle::PointingHand);
+
+        hover(&mut test_app, window, canvas);
+        dispatch(&mut test_app, window, press.clone().to_platform_input());
+        assert_eq!(presses.get(), 1, "the parent sees the press that captures");
+        redraw(&mut test_app, window);
+        dispatch(&mut test_app, window, drag.clone().to_platform_input());
+        assert!(!button_hovered.get(), "the canvas captures the pointer");
+        assert_eq!(cursor(&test_app), CursorStyle::Crosshair);
+        test_app
+            .dispatcher
+            .advance_clock(DEFAULT_TOOLTIP_SHOW_DELAY);
+        assert_eq!(redraw(&mut test_app, window), None);
+
+        let release = MouseUpEvent {
+            position: button,
+            button: MouseButton::Left,
+            ..Default::default()
+        };
+        dispatch(&mut test_app, window, release.to_platform_input());
+        assert_eq!(releases_out.get(), 0, "the release is inside the parent");
+        assert!(button_hovered.get());
+        assert_eq!(cursor(&test_app), CursorStyle::PointingHand);
+        hover(&mut test_app, window, button + point(px(1.), px(0.)));
+        test_app
+            .dispatcher
+            .advance_clock(DEFAULT_TOOLTIP_SHOW_DELAY);
+        assert!(
+            redraw(&mut test_app, window).is_some(),
+            "the button shows its tooltip"
+        );
+
+        // A capture that starts with no press hides the tooltip that shows in its first frame.
+        dragging.set(true);
+        assert_eq!(redraw(&mut test_app, window), None);
+        dragging.set(false);
+        redraw(&mut test_app, window);
+        assert_eq!(captured_hitbox(&mut test_app), None);
+
+        // A drag that ends with no mouse up, as a pen stroke that ends by pressure.
+        hover(&mut test_app, window, canvas);
+        dispatch(&mut test_app, window, press.to_platform_input());
+        assert!(captured_hitbox(&mut test_app).is_some());
+        dragging.set(false);
+        let dirty = test_app
+            .update_window(window, |_, window, cx| {
+                window.draw(cx).clear(cx);
+                window.invalidator.is_dirty()
+            })
+            .unwrap();
+        assert!(dirty, "the end of the capture draws the cached views again");
+        assert_eq!(
+            captured_hitbox(&mut test_app),
+            None,
+            "no element declares the capture in the next frame"
+        );
+        dispatch(&mut test_app, window, drag.to_platform_input());
+        assert!(button_hovered.get());
+        assert_eq!(cursor(&test_app), CursorStyle::PointingHand);
     }
 
     /// A window that shows a tooltip anywhere in it.
