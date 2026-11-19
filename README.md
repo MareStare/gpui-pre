@@ -270,6 +270,10 @@ gpui-pre version goes.
   A spaced line takes its fonts with `liga`, `clig` and `calt` off, unless
   their features set them. A wrap or a truncation adds the spacing between
   the grapheme clusters of each row, as the shaped line does.
+- Release after a test draw: in a test app, the flush that draws the dirty
+  windows then releases the entities and the focus handles that the draw
+  dropped, as the update of a platform frame does. A release observer of an
+  element state that stops drawing runs before the flush ends.
 
 ## License
 

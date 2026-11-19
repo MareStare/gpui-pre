@@ -2192,6 +2192,11 @@ impl App {
                         self.update_window(window, |_, window, cx| window.draw(cx).clear(cx))
                             .unwrap();
                     }
+                    // A draw can drop entities and focus handles. On a platform, the update
+                    // that draws a frame releases them in its own flush. Release them here
+                    // too, so that their release observers run before this flush ends.
+                    self.release_dropped_entities();
+                    self.release_dropped_focus_handles();
                 }
 
                 if self.pending_effects.is_empty() {
@@ -3777,6 +3782,46 @@ mod test {
         cx.to_async().refresh();
 
         assert_eq!(render_count.get(), render_count_before_refresh + 1);
+    }
+
+    struct KeyedStateHolder {
+        holds_state: bool,
+        released: Rc<Cell<bool>>,
+    }
+
+    impl Render for KeyedStateHolder {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            if self.holds_state {
+                let released = self.released.clone();
+                window.use_keyed_state("state", cx, move |_, cx| {
+                    cx.on_release(move |_, _| released.set(true)).detach();
+                });
+            }
+            Empty
+        }
+    }
+
+    #[gpui::test]
+    fn test_draw_releases_dropped_entities(cx: &mut TestAppContext) {
+        let released = Rc::new(Cell::new(false));
+        let window = cx.add_window({
+            let released = released.clone();
+            move |_, _| KeyedStateHolder {
+                holds_state: true,
+                released,
+            }
+        });
+        cx.run_until_parked();
+        assert!(!released.get());
+
+        window
+            .update(cx, |holder, _, cx| {
+                holder.holds_state = false;
+                cx.notify();
+            })
+            .unwrap();
+
+        assert!(released.get());
     }
 
     #[gpui::test]
