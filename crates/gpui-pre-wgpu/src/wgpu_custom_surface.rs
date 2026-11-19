@@ -1,12 +1,12 @@
 //! Custom surfaces: code outside the renderer draws into the frame at the
 //! place of a surface in the scene.
 
-use std::sync::Arc;
+use std::rc::Rc;
 
 use gpui::{Bounds, CustomSurface, DevicePixels, ScaledPixels, Size};
 
 /// Draws a custom surface into the frame of the wgpu renderer.
-pub trait WgpuSurface: Send + Sync + 'static {
+pub trait WgpuSurface: 'static {
     /// Records the commands that draw the surface. The target holds the
     /// frame up to the surface. No render pass is open.
     fn draw(&self, frame: WgpuSurfaceFrame<'_>);
@@ -35,10 +35,10 @@ pub struct WgpuSurfaceFrame<'a> {
 }
 
 /// The content of a custom surface that the wgpu renderer draws.
-pub fn wgpu_custom_surface(surface: Arc<dyn WgpuSurface>) -> CustomSurface {
-    Arc::new(surface)
+pub fn wgpu_custom_surface(surface: Rc<dyn WgpuSurface>) -> CustomSurface {
+    Rc::new(surface)
 }
 
-pub(crate) fn as_wgpu_surface(content: &CustomSurface) -> Option<&Arc<dyn WgpuSurface>> {
+pub(crate) fn as_wgpu_surface(content: &CustomSurface) -> Option<&Rc<dyn WgpuSurface>> {
     content.downcast_ref()
 }

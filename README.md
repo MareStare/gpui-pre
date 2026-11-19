@@ -46,6 +46,8 @@ gpui-pre version goes.
 - Custom surfaces: `Window::paint_custom_surface` paints a surface that
   code outside the renderer draws with wgpu. `gpui-pre-wgpu` exports
   `WgpuSurface`, `WgpuSurfaceFrame` and `wgpu_custom_surface`.
+  The renderer draws a surface on the UI thread, so its content needs no
+  `Send` or `Sync`.
 - wgpu by default on Windows and macOS: `GPUI_RENDERER=dx11` or
   `GPUI_RENDERER=metal` picks the native renderer. A window whose wgpu
   renderer fails to start uses the native renderer. On macOS the wgpu

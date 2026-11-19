@@ -784,7 +784,7 @@ pub enum SurfaceContent {
 
 /// The content of a custom surface. Each renderer names the type that it
 /// accepts. A renderer skips content of a type that it does not accept.
-pub type CustomSurface = std::sync::Arc<dyn std::any::Any + Send + Sync>;
+pub type CustomSurface = std::rc::Rc<dyn std::any::Any>;
 
 impl From<PaintSurface> for Primitive {
     fn from(surface: PaintSurface) -> Self {
