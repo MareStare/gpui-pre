@@ -1036,6 +1036,16 @@ impl VisualTestContext {
         self.hit_test_window_control(self.window)
     }
 
+    /// Makes this window report `decorations`, as a platform does when the
+    /// window draws its own frame or when the window manager tiles it. The
+    /// window draws again.
+    pub fn simulate_decorations(&mut self, decorations: crate::Decorations) {
+        self.cx
+            .test_window(self.window)
+            .simulate_decorations(decorations);
+        self.update(|window, _| window.refresh());
+    }
+
     /// Simulates a change in whether the platform is presenting this window.
     pub fn simulate_visibility_change(&self, visibility: WindowVisibility) {
         self.simulate_window_visibility_change(self.window, visibility);
@@ -1306,8 +1316,9 @@ impl AnyWindowHandle {
 #[cfg(test)]
 mod tests {
     use crate::{
-        PathPromptOptions, SystemNotification, SystemNotificationAction,
-        SystemNotificationResponse, TestAppContext,
+        Bounds, Decorations, Empty, PathPromptOptions, SystemNotification,
+        SystemNotificationAction, SystemNotificationResponse, TestAppContext, Tiling, point, px,
+        size,
     };
     use std::cell::RefCell;
     use std::path::PathBuf;
@@ -1356,6 +1367,25 @@ mod tests {
         drop(subscription);
         callback(AppLifecyclePhase::Foreground);
         assert_eq!(phases.borrow().len(), 5);
+    }
+
+    #[gpui::test]
+    fn a_window_with_simulated_client_decorations_has_a_frame_inside_its_shadow(
+        cx: &mut TestAppContext,
+    ) {
+        let (_, cx) = cx.add_window_view(|_, _| Empty);
+        let frame = |cx: &mut crate::VisualTestContext| {
+            cx.update(|window, _| (window.viewport_size(), window.frame_bounds()))
+        };
+        cx.update(|window, _| window.set_client_inset(px(20.)));
+        let (surface, server) = frame(cx);
+        assert_eq!(server, Bounds::new(point(px(0.), px(0.)), surface));
+        cx.simulate_decorations(Decorations::Client {
+            tiling: Tiling::default(),
+        });
+        let (surface, client) = frame(cx);
+        let inner = size(surface.width - px(40.), surface.height - px(40.));
+        assert_eq!(client, Bounds::new(point(px(20.), px(20.)), inner));
     }
 
     #[gpui::test]

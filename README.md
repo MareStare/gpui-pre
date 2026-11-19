@@ -96,6 +96,9 @@ gpui-pre version goes.
   element that takes presses. `Window::render_to_image` works in every build: the wgpu
   renderer draws the scene to an offscreen texture and reads it back, also
   for X11 and Wayland windows.
+- Decorations on the test platform: `VisualTestContext::simulate_decorations`
+  makes a test window report client decorations, so a test can draw the
+  window with a shadow inset by `Window::set_client_inset`.
 - Resize on the test platform: `Window::resize` resizes a test window in a
   later task, through its resize callback, as a platform delivers a resize
   as a window event. The layout of the window then takes the size.
