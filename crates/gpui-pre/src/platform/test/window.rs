@@ -284,6 +284,7 @@ impl TestWindow {
         self.simulate_status_change(|state| &mut state.active_status_change_callback, active);
     }
 
+    #[cfg(test)]
     pub(crate) fn simulate_hover_status_change(&self, hovered: bool) {
         self.simulate_status_change(|state| &mut state.hover_status_change_callback, hovered);
     }

@@ -14,14 +14,14 @@ use crate::{
     Edges, Effect, Entity, EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId,
     GlyphId, GpuFailure, GpuSpecs, Hsla, InputHandler, InputPreference, IsZero, KeyBinding,
     KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex,
-    Modifiers, ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent,
-    MouseUpEvent, Path, PenEvent, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
-    PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, Priority, PromptButton,
-    PromptLevel, Quad, Render, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams,
-    Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y,
-    ScaledPixels, Scene, Shadow, SharedString, Size, StrikethroughStyle, Style, SubpixelSprite,
-    Subscription, SystemWindowTab, SystemWindowTabController, TabStopMap, Task,
-    TextInputConfiguration, TextInputStateChange, TextRenderingMode, TextStyle,
+    Modifiers, ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseDownEvent, MouseEvent,
+    MouseMoveEvent, MouseUpEvent, Path, PenEvent, Pixels, PlatformAtlas, PlatformDisplay,
+    PlatformInput, PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, Priority,
+    PromptButton, PromptLevel, Quad, Render, RenderGlyphParams, RenderImage, RenderImageParams,
+    RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X,
+    SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size, StrikethroughStyle,
+    Style, SubpixelSprite, Subscription, SystemWindowTab, SystemWindowTabController, TabStopMap,
+    Task, TextInputConfiguration, TextInputStateChange, TextRenderingMode, TextStyle,
     TextStyleRefinement, ThermalState, TransformationMatrix, Underline, UnderlineStyle,
     WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations,
     WindowInsets, WindowOptions, WindowParams, WindowTextSystem, WindowVisibility, point,
@@ -68,6 +68,7 @@ use std::{
 use uuid::Uuid;
 
 pub(crate) mod a11y;
+mod mouse_hover;
 mod prompts;
 mod tooltip_place;
 
@@ -76,6 +77,7 @@ pub use a11y::A11ySubtreeBuilder;
 use self::a11y::A11y;
 #[cfg(not(target_family = "wasm"))]
 use self::a11y::ROOT_NODE_ID;
+use self::mouse_hover::MouseHover;
 use crate::util::{
     atomic_incr_if_not_zero, ceil_to_device_pixel, floor_to_device_pixel, round_half_toward_zero,
     round_half_toward_zero_f64, round_stroke_to_device_pixel, round_to_device_pixel,
@@ -763,6 +765,13 @@ pub(crate) struct HitTest {
     pub(crate) hover_hitbox_count: usize,
 }
 
+impl HitTest {
+    /// The hitboxes that the hit test hovers, from the top.
+    pub(crate) fn hovered(&self) -> &[HitboxId] {
+        &self.ids[..self.hover_hitbox_count]
+    }
+}
+
 /// A type of window control area that corresponds to the platform window.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WindowControlArea {
@@ -799,8 +808,8 @@ impl HitboxId {
     ///
     /// See [`Hitbox::is_hovered`] for details.
     pub fn is_hovered(self, window: &Window) -> bool {
-        self.captured_hover(window)
-            .unwrap_or_else(|| !window.last_input_was_keyboard() && self.hit_test(window))
+        (window.mouse_hover.follows_capture() || !window.last_input_was_keyboard())
+            && self.is_hovered_ignoring_last_input(window)
     }
 
     /// Checks if the hitbox with this ID is currently hovered, regardless of the last
@@ -808,26 +817,13 @@ impl HitboxId {
     ///
     /// See [`HitboxId::is_hovered`] for more details.
     pub(crate) fn is_hovered_ignoring_last_input(self, window: &Window) -> bool {
-        self.captured_hover(window)
-            .unwrap_or_else(|| self.hit_test(window))
+        window.mouse_hover.hovered().contains(&self)
     }
 
-    /// Whether this hitbox is hovered while a hitbox captures the pointer: only the captured
-    /// hitbox is. `None` when no hitbox captures the pointer.
-    fn captured_hover(self, window: &Window) -> Option<bool> {
-        window.captured_hitbox.map(|captured| captured == self)
-    }
-
-    /// Checks if the hit test of the mouse position finds this hitbox, whatever captures the
-    /// pointer and whatever the input modality.
+    /// Checks if the hit test of the mouse position hovers this hitbox, whatever mouse button
+    /// is held and whatever the input modality.
     pub(crate) fn hit_test(self, window: &Window) -> bool {
-        let hit_test = &window.mouse_hit_test;
-        for id in hit_test.ids.iter().take(hit_test.hover_hitbox_count) {
-            if self == *id {
-                return true;
-            }
-        }
-        false
+        window.mouse_hover.hit_test().hovered().contains(&self)
     }
 
     /// Checks if the hitbox with this ID contains the mouse and should handle scroll events.
@@ -835,7 +831,7 @@ impl HitboxId {
     /// `is_hovered` should be used. See the documentation of `Hitbox::is_hovered` for details about
     /// this distinction.
     pub fn should_handle_scroll(self, window: &Window) -> bool {
-        window.mouse_hit_test.ids.contains(&self)
+        window.mouse_hover.hit_test().ids.contains(&self)
     }
 
     fn next(self) -> HitboxId {
@@ -869,8 +865,17 @@ impl Hitbox {
     /// `HitboxBehavior::BlockMouseExceptScroll` (`InteractiveElement::block_mouse_except_scroll`),
     /// or if the current input modality is keyboard (see [`Window::last_input_was_keyboard`]).
     ///
-    /// While a hitbox captures the pointer (see [`Window::capture_pointer`]), only that hitbox is
-    /// hovered, wherever the mouse is and whatever the input modality.
+    /// While a mouse button is held or a hitbox captures the pointer, the hover follows them:
+    ///
+    /// - While a hitbox captures the pointer (see [`Window::capture_pointer`]), the hovered
+    ///   hitboxes are the captured one and the ones that the hit test finds beneath it at the
+    ///   mouse position moved into its bounds, whatever the input modality. All other hitboxes
+    ///   are not hovered, also the ones above it.
+    /// - Else, while a mouse button is held, a hitbox is hovered only when the hit test hovers
+    ///   it both at the mouse position and at the press position, as the implicit grab of
+    ///   <https://doc.qt.io/qt-6/qwidget.html#grabMouse>. So an element that moves under the
+    ///   mouse during its drag captures the pointer to stay hovered. A GPUI drag and drop ends
+    ///   this rule, so the drop targets under the mouse are hovered.
     ///
     /// Handling of `ScrollEvent` should typically use `should_handle_scroll` instead.
     /// Concretely, this is due to use-cases like overlays that cause the elements under to be
@@ -885,12 +890,16 @@ impl Hitbox {
     /// Checks whether this hitbox would be hovered at `position`, regardless of the current input
     /// modality or mouse position.
     pub fn is_hovered_at(&self, position: Point<Pixels>, window: &Window) -> bool {
-        let hit_test = window.rendered_frame.hit_test(position);
-        hit_test
-            .ids
-            .iter()
-            .take(hit_test.hover_hitbox_count)
-            .any(|id| self.id == *id)
+        window
+            .rendered_frame
+            .hit_test(position)
+            .hovered()
+            .contains(&self.id)
+    }
+
+    /// The area where the hit test finds this hitbox.
+    fn hit_bounds(&self) -> Bounds<Pixels> {
+        self.bounds.intersect(&self.content_mask.bounds)
     }
 
     /// Checks if the hitbox contains the mouse and should handle scroll events. Typically this
@@ -1235,11 +1244,18 @@ impl Frame {
     }
 
     pub(crate) fn hit_test(&self, position: Point<Pixels>) -> HitTest {
+        Self::hit_test_where(&self.hitboxes, |hitbox| {
+            hitbox.hit_bounds().contains(&position)
+        })
+    }
+
+    /// Finds the hitboxes that `is_hit` selects, from the top of `hitboxes`. Stops where a
+    /// hitbox blocks the mouse.
+    fn hit_test_where(hitboxes: &[Hitbox], is_hit: impl Fn(&Hitbox) -> bool) -> HitTest {
         let mut set_hover_hitbox_count = false;
         let mut hit_test = HitTest::default();
-        for hitbox in self.hitboxes.iter().rev() {
-            let bounds = hitbox.bounds.intersect(&hitbox.content_mask.bounds);
-            if bounds.contains(&position) {
+        for hitbox in hitboxes.iter().rev() {
+            if is_hit(hitbox) {
                 hit_test.ids.push(hitbox.id);
                 if !set_hover_hitbox_count
                     && hitbox.behavior == HitboxBehavior::BlockMouseExceptScroll
@@ -1337,7 +1353,7 @@ pub struct Window {
     default_prevented: bool,
     click_cancelled: bool,
     mouse_position: Point<Pixels>,
-    mouse_hit_test: HitTest,
+    mouse_hover: MouseHover,
     modifiers: Modifiers,
     capslock: Capslock,
     scale_factor: f32,
@@ -1373,8 +1389,6 @@ pub struct Window {
     pub(crate) pending_input_observers: SingleSubscriberSet<AnyObserver>,
     prompt: Option<RenderablePromptHandle>,
     pub(crate) client_inset: Option<Pixels>,
-    /// The hitbox that captures the pointer in the frame that the hover checks read.
-    captured_hitbox: Option<HitboxId>,
     /// The pointer capture that the listeners of the mouse event in dispatch ask for. `None`
     /// while no mouse event is in dispatch.
     mouse_event_capture: Option<Option<HitboxId>>,
@@ -2332,7 +2346,7 @@ impl Window {
                 handle
                     .update(&mut cx, |_, window, _cx| {
                         for (area, hitbox) in &window.rendered_frame.window_control_hitboxes {
-                            if window.mouse_hit_test.ids.contains(&hitbox.id) {
+                            if window.mouse_hover.hit_test().ids.contains(&hitbox.id) {
                                 return Some(*area);
                             }
                         }
@@ -2465,7 +2479,7 @@ impl Window {
             default_prevented: true,
             click_cancelled: false,
             mouse_position,
-            mouse_hit_test: HitTest::default(),
+            mouse_hover: MouseHover::default(),
             modifiers,
             capslock,
             scale_factor,
@@ -2501,7 +2515,6 @@ impl Window {
             prompt: None,
             client_inset: None,
             image_cache_stack: Vec::new(),
-            captured_hitbox: None,
             mouse_event_capture: None,
             #[cfg(any(feature = "inspector", debug_assertions))]
             inspector: None,
@@ -3795,18 +3808,19 @@ impl Window {
     }
 
     /// Captures the pointer for the hitbox, as in
-    /// <https://w3c.github.io/pointerevents/#pointer-capture>. While the capture lasts, only
-    /// this hitbox is hovered (see [`Hitbox::is_hovered`]), also outside its bounds. So the
-    /// listeners that test the hover take the mouse events only for this hitbox, and only this
-    /// hitbox shows hover styles and sets the cursor. No tooltip shows. Scroll events still go
-    /// to the hitboxes under the pointer (see [`Hitbox::should_handle_scroll`]).
+    /// <https://w3c.github.io/pointerevents/#pointer-capture>. While the capture lasts, this
+    /// hitbox and the hitboxes beneath it, such as its ancestors, are hovered as if the mouse
+    /// were at the nearest point of the hitbox (see [`Hitbox::is_hovered`]). No other hitbox is
+    /// hovered. So only these hitboxes take the mouse events through the listeners that test
+    /// the hover, show hover styles and set the cursor. No tooltip shows. Scroll events still
+    /// go to the hitboxes under the pointer (see [`Hitbox::should_handle_scroll`]).
     ///
     /// A capture lasts one frame. Call this in the prepaint of each frame of the drag, after
     /// the hitbox is inserted. A call outside a draw, such as in an event listener, captures
     /// the pointer in the frame on screen, so a press can capture it before the next frame.
     /// A call in a mouse listener captures the pointer after the dispatch of the event, so the
-    /// other listeners of the event still see the hover of the hit test. A mouse up ends the
-    /// capture of the frame on screen.
+    /// other listeners of the event still see the hover of the hit test. The release of the last
+    /// held mouse button ends the capture of the frame on screen.
     pub fn capture_pointer(&mut self, hitbox_id: HitboxId) {
         match self.invalidator.draw_phase() {
             DrawPhase::Prepaint => self.next_frame.pointer_captures.push(hitbox_id),
@@ -3814,26 +3828,34 @@ impl Window {
             DrawPhase::Paint => gpui_util::debug_panic!("a pointer capture can't start in paint"),
             DrawPhase::None | DrawPhase::Focus => match &mut self.mouse_event_capture {
                 Some(capture) => *capture = Some(hitbox_id),
-                None => self.set_captured_hitbox(Some(hitbox_id)),
+                None => {
+                    self.mouse_hover.capture(Some(hitbox_id));
+                    self.update_mouse_hover();
+                }
             },
         }
     }
 
     /// Captures the pointer as the frame in draw declares so far.
     fn capture_pointer_as_declared(&mut self) {
-        self.captured_hitbox = self.next_frame.pointer_captures.last().copied();
+        self.mouse_hover
+            .capture(self.next_frame.pointer_captures.last().copied());
     }
 
-    fn set_captured_hitbox(&mut self, hitbox_id: Option<HitboxId>) {
-        if self.captured_hitbox != hitbox_id {
-            self.captured_hitbox = hitbox_id;
+    /// Finds the hovered hitboxes in the frame on screen. Redraws when their look changes,
+    /// because cached views paint the hover of the frame that drew them.
+    fn update_mouse_hover(&mut self) {
+        if self
+            .mouse_hover
+            .update(&self.rendered_frame, self.mouse_position)
+        {
             self.refresh();
         }
     }
 
     /// Returns the hitbox that has captured the pointer, if any.
     pub fn captured_hitbox(&self) -> Option<HitboxId> {
-        self.captured_hitbox
+        self.mouse_hover.captured()
     }
 
     /// Captures the current long press for the given entity.
@@ -3889,7 +3911,7 @@ impl Window {
         if self.platform_window.prepare_frame() {
             self.refresh();
         }
-        let captured_before = self.captured_hitbox.is_some();
+        let captured_before = self.mouse_hover.captured().is_some();
         self.invalidate_entities();
         cx.entities.clear_accessed();
         debug_assert!(self.rendered_entity_stack.is_empty());
@@ -3970,6 +3992,7 @@ impl Window {
         let current_focus_path = self.rendered_frame.focus_path();
         let current_window_active = self.rendered_frame.window_active;
         let mut focus_before_listeners = self.focus;
+        let captured_before_listeners = self.mouse_hover.captured();
 
         if previous_focus_path != current_focus_path
             || previous_window_active != current_window_active
@@ -4018,8 +4041,10 @@ impl Window {
             self.refresh();
         }
         // Cached views paint the hover of the frame that drew them. A view that draws again
-        // gets new hitbox ids, so only a start or an end of the capture counts.
-        if self.captured_hitbox.is_some() != captured_before {
+        // gets new hitbox ids, so only a start or an end of the capture counts, or a capture
+        // that a focus listener changes in the frame that it drew.
+        let captured = self.mouse_hover.captured();
+        if captured.is_some() != captured_before || captured != captured_before_listeners {
             self.refresh();
         }
         self.needs_present.set(true);
@@ -4198,8 +4223,9 @@ impl Window {
             tooltip_element = self.prepaint_tooltip(cx);
         }
 
-        self.mouse_hit_test = self.next_frame.hit_test(self.mouse_position);
         self.capture_pointer_as_declared();
+        self.mouse_hover
+            .update(&self.next_frame, self.mouse_position);
 
         // Now actually paint the elements.
         #[cfg(feature = "profiler")]
@@ -6532,10 +6558,13 @@ impl Window {
     }
 
     fn dispatch_mouse_event(&mut self, event: &dyn Any, cx: &mut App) {
-        self.mouse_hit_test = self.rendered_frame.hit_test(self.mouse_position());
-        if event.is::<crate::MouseDownEvent>() {
+        if event.is::<MouseDownEvent>() {
             self.click_cancelled = false;
         }
+        self.mouse_hover
+            .begin_mouse_event(event, self.mouse_position);
+        self.mouse_hover
+            .update(&self.rendered_frame, self.mouse_position);
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         if self.is_inspector_picking(cx) {
@@ -6584,13 +6613,12 @@ impl Window {
             }
         }
 
-        if let Some(Some(hitbox_id)) =
-            mem::replace(&mut self.mouse_event_capture, outer_event_capture)
+        let capture = mem::replace(&mut self.mouse_event_capture, outer_event_capture).flatten();
+        if self
+            .mouse_hover
+            .end_mouse_event(event, capture, cx.has_active_drag())
         {
-            self.set_captured_hitbox(Some(hitbox_id));
-        }
-        if event.is::<MouseUpEvent>() {
-            self.set_captured_hitbox(None);
+            self.update_mouse_hover();
         }
 
         // Runs after the listeners so that a drag they start takes effect in this event. Resolving
@@ -7862,7 +7890,7 @@ impl Window {
                     inspector.hover(inspector_id, self);
                 }
             });
-        } else if event.downcast_ref::<crate::MouseDownEvent>().is_some() {
+        } else if event.downcast_ref::<MouseDownEvent>().is_some() {
             inspector.update(cx, |inspector, _cx| {
                 if let Some((_, inspector_id)) =
                     self.hovered_inspector_hitbox(inspector, &self.rendered_frame)
@@ -7882,7 +7910,7 @@ impl Window {
                 inspector.update(cx, |inspector, _cx| {
                     if let Some(depth) = inspector.pick_depth.as_mut() {
                         *depth += f32::from(delta_y) / SCROLL_PIXELS_PER_LAYER;
-                        let max_depth = self.mouse_hit_test.ids.len() as f32 - 0.5;
+                        let max_depth = self.mouse_hover.hit_test().ids.len() as f32 - 0.5;
                         if *depth < 0.0 {
                             *depth = 0.0;
                         } else if *depth > max_depth {
@@ -7907,9 +7935,9 @@ impl Window {
     ) -> Option<(HitboxId, crate::InspectorElementId)> {
         if let Some(pick_depth) = inspector.pick_depth {
             let depth = (pick_depth as i64).try_into().unwrap_or(0);
-            let max_skipped = self.mouse_hit_test.ids.len().saturating_sub(1);
+            let max_skipped = self.mouse_hover.hit_test().ids.len().saturating_sub(1);
             let skip_count = (depth as usize).min(max_skipped);
-            for hitbox_id in self.mouse_hit_test.ids.iter().skip(skip_count) {
+            for hitbox_id in self.mouse_hover.hit_test().ids.iter().skip(skip_count) {
                 if let Some(inspector_id) = frame.inspector_hitboxes.get(hitbox_id) {
                     return Some((*hitbox_id, inspector_id.clone()));
                 }

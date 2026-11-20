@@ -140,16 +140,24 @@ gpui-pre version goes.
   button that is down from firing click listeners at its release, as a
   drag of GPUI does. An app drag that does not use the drags of GPUI calls
   it once the press becomes a drag.
-- Exclusive pointer capture: while a hitbox captures the pointer with
-  `Window::capture_pointer`, only that hitbox is hovered, as in the pointer
-  capture of browsers. So the listeners that test the hover take the mouse
-  events only for it, and only it shows hover styles and sets the cursor. No
-  tooltip shows. Scroll events, `is_hovered_at` and the mouse up out of an
-  element still test the hitboxes under the pointer. A view that draws again
-  gets new hitbox ids, so a capture lasts one frame: an element captures the
-  pointer in the prepaint of each frame of its drag. A call in an event
-  listener captures it in the frame on screen, after the dispatch of the
-  event. A mouse up ends the capture. `release_pointer` is gone.
+- Hover of a held mouse button: while a hitbox captures the pointer with
+  `Window::capture_pointer`, as in the pointer capture of browsers, the
+  hovered hitboxes are the captured one and the ones beneath it, from a hit
+  test at the pointer moved into its bounds. So an ancestor keeps its hover
+  style and cursor for the whole drag, and no other hitbox is hovered. No
+  tooltip shows. During a capture the hover ignores the input modality. With
+  no capture, a held button hovers only the hitboxes under both the pointer
+  and the press, as the implicit grab of Qt. So the mouse up of a drag goes
+  to no element under the pointer but not under the press, and an element
+  that moves under the pointer during its drag captures the pointer to stay
+  hovered. A drag and drop ends this rule, so its drop targets are hovered.
+  Scroll events, `is_hovered_at` and the mouse up out of an element still
+  test the hitboxes under the pointer. A view that draws again gets new
+  hitbox ids, so a capture lasts one frame: an element captures the pointer
+  in the prepaint of each frame of its drag. A call in an event listener
+  captures it in the frame on screen, after the dispatch of the event. The
+  release of the last held button ends both rules. `release_pointer` is
+  gone.
 - Quit on macOS: `Platform::quit` stops the AppKit run loop, and `run`
   calls the quit callback after it and returns, as on Linux and Windows.
   A quit that the system asks for, such as at logout, still ends the

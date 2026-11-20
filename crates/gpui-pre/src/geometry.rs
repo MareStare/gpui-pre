@@ -1659,6 +1659,15 @@ impl Size<Pixels> {
 }
 
 impl Bounds<Pixels> {
+    /// The point of the bounds nearest to `point`. The far edges are not inside (see
+    /// [`Bounds::contains`]), so the point stays short of them.
+    pub fn nearest_point_inside(&self, point: Point<Pixels>) -> Point<Pixels> {
+        let max = self.bottom_right();
+        let max = Point::new(Pixels(max.x.0.next_down()), Pixels(max.y.0.next_down()));
+        // Empty bounds give their origin.
+        point.clamp(&self.origin, &max.max(&self.origin))
+    }
+
     /// Scales the bounds by a given factor, typically used to adjust for display scaling.
     ///
     /// This method multiplies the origin and size of the bounds by the provided scaling factor,
@@ -4085,6 +4094,21 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_nearest_point_inside_bounds_is_inside() {
+        let bounds = Bounds::new(point(px(10.), px(10.)), size(px(20.), px(20.)));
+        let corner = bounds.nearest_point_inside(point(px(50.), px(0.)));
+        assert!(bounds.contains(&corner));
+        assert_eq!(corner.y, px(10.));
+        let inside = point(px(15.), px(25.));
+        assert_eq!(bounds.nearest_point_inside(inside), inside);
+        let empty = Bounds::new(point(px(10.), px(10.)), Size::default());
+        assert_eq!(
+            empty.nearest_point_inside(point(px(0.), px(50.))),
+            empty.origin
+        );
+    }
 
     #[test]
     fn spread_grows_each_corner_as_a_css_shadow() {

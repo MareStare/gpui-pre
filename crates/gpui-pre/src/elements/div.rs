@@ -4792,9 +4792,9 @@ impl ScrollHandle {
 mod tests {
     use super::*;
     use crate::{
-        AnyWindowHandle, AppContext as _, Context, CursorStyle, Decorations, GestureTuning,
-        InputEvent, Keystroke, MouseMoveEvent, PlatformInput, TestAppContext, Tiling, TouchEvent,
-        TouchId, WindowHandle, canvas, size, util::FluentBuilder as _,
+        AnyWindowHandle, AppContext as _, Context, CursorStyle, Decorations, EmptyView,
+        GestureTuning, InputEvent, Keystroke, MouseMoveEvent, PlatformInput, TestAppContext,
+        Tiling, TouchEvent, TouchId, WindowHandle, canvas, size, util::FluentBuilder as _,
     };
     use std::{cell::Cell, rc::Weak};
 
@@ -5707,23 +5707,38 @@ mod tests {
         assert_eq!(b.center().x, px(70.));
     }
 
-    /// A canvas of 100 by 100 px at the origin, with a crosshair cursor, that captures the pointer
-    /// from a press until `dragging` ends, and a button of 40 by 20 px at x 150, with a pointing
-    /// hand cursor and a tooltip. Their parent counts the presses and the releases out of it.
-    struct PointerCaptureView {
+    #[derive(Clone, Default)]
+    struct PointerProbes {
         dragging: Rc<Cell<bool>>,
+        slider_hovered: Rc<Cell<bool>>,
         button_hovered: Rc<Cell<bool>>,
         presses: Rc<Cell<usize>>,
         releases_out: Rc<Cell<usize>>,
+        drops: Rc<Cell<usize>>,
+    }
+
+    struct Dragged;
+
+    /// A slider of 100 by 100 px at the origin, with a resize cursor, and a thumb of 20 by 20 px
+    /// at its origin that captures the pointer from a press until `dragging` ends. A button of 40
+    /// by 20 px at x 150, with a pointing hand cursor and a tooltip, that takes drops. A handle of
+    /// 40 by 20 px at x 240 that starts a drag and drop. Their parent counts the presses and the
+    /// releases out of it.
+    struct PointerCaptureView {
+        probes: PointerProbes,
     }
 
     impl Render for PointerCaptureView {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            let dragging = self.dragging.clone();
-            let button_hovered = self.button_hovered.clone();
-            let presses = self.presses.clone();
-            let releases_out = self.releases_out.clone();
-            let canvas = canvas(
+            let PointerProbes {
+                dragging,
+                slider_hovered,
+                button_hovered,
+                presses,
+                releases_out,
+                drops,
+            } = self.probes.clone();
+            let thumb = canvas(
                 {
                     let dragging = dragging.clone();
                     move |bounds, window, _| {
@@ -5735,7 +5750,6 @@ mod tests {
                     }
                 },
                 move |_, hitbox, window, _| {
-                    window.set_cursor_style(CursorStyle::Crosshair, &hitbox);
                     let press_dragging = dragging.clone();
                     window.on_mouse_event(move |_: &MouseDownEvent, phase, window, _| {
                         if phase.bubble() && hitbox.is_hovered(window) {
@@ -5746,7 +5760,7 @@ mod tests {
                     window.on_mouse_event(move |_: &MouseUpEvent, _, _, _| dragging.set(false));
                 },
             )
-            .size(px(100.));
+            .size(px(20.));
             div()
                 .size_full()
                 .flex()
@@ -5757,7 +5771,14 @@ mod tests {
                 .on_mouse_up_out(MouseButton::Left, move |_, _, _| {
                     releases_out.set(releases_out.get() + 1)
                 })
-                .child(canvas)
+                .child(
+                    div()
+                        .id("slider")
+                        .size(px(100.))
+                        .cursor_ew_resize()
+                        .on_hover(move |hovered, _, _| slider_hovered.set(*hovered))
+                        .child(thumb),
+                )
                 .child(
                     div()
                         .id("button")
@@ -5765,81 +5786,129 @@ mod tests {
                         .h(px(20.))
                         .cursor_pointer()
                         .on_hover(move |hovered, _, _| button_hovered.set(*hovered))
+                        .on_drop(move |_: &Dragged, _, _| drops.set(drops.get() + 1))
                         .tooltip(|_, cx| cx.new(|_| TestTooltipView).into()),
+                )
+                .child(
+                    div()
+                        .id("handle")
+                        .w(px(40.))
+                        .h(px(20.))
+                        .on_drag(Dragged, |_, _, _, cx| cx.new(|_| EmptyView)),
                 )
         }
     }
 
-    #[test]
-    fn a_pointer_capture_hovers_only_its_hitbox() {
-        let mut test_app = TestAppContext::single();
-        let dragging = Rc::new(Cell::new(false));
-        let button_hovered = Rc::new(Cell::new(false));
-        let presses = Rc::new(Cell::new(0));
-        let releases_out = Rc::new(Cell::new(0));
+    fn pointer_capture_window(
+        test_app: &mut TestAppContext,
+        probes: &PointerProbes,
+    ) -> AnyWindowHandle {
         let window: AnyWindowHandle = test_app
             .add_window({
-                let dragging = dragging.clone();
-                let button_hovered = button_hovered.clone();
-                let presses = presses.clone();
-                let releases_out = releases_out.clone();
-                |_, _| PointerCaptureView {
-                    dragging,
-                    button_hovered,
-                    presses,
-                    releases_out,
-                }
+                let probes = probes.clone();
+                |_, _| PointerCaptureView { probes }
             })
             .into();
         let test_window = test_app.test_window(window);
         test_window.simulate_hover_status_change(true);
         test_window.simulate_active_status_change(true);
-        redraw(&mut test_app, window);
-        let canvas = point(px(50.), px(50.));
-        let button = point(px(170.), px(10.));
-        let cursor = |test_app: &TestAppContext| test_app.test_platform().cursor_style();
+        redraw(test_app, window);
+        window
+    }
+
+    fn press(position: Point<Pixels>) -> PlatformInput {
+        press_button(MouseButton::Left, position)
+    }
+
+    fn press_button(button: MouseButton, position: Point<Pixels>) -> PlatformInput {
+        MouseDownEvent {
+            position,
+            button,
+            ..Default::default()
+        }
+        .to_platform_input()
+    }
+
+    fn drag(position: Point<Pixels>) -> PlatformInput {
+        MouseMoveEvent {
+            position,
+            pressed_button: Some(MouseButton::Left),
+            ..Default::default()
+        }
+        .to_platform_input()
+    }
+
+    fn release(position: Point<Pixels>) -> PlatformInput {
+        release_button(MouseButton::Left, position)
+    }
+
+    fn release_button(button: MouseButton, position: Point<Pixels>) -> PlatformInput {
+        MouseUpEvent {
+            position,
+            button,
+            ..Default::default()
+        }
+        .to_platform_input()
+    }
+
+    fn cursor(test_app: &TestAppContext) -> CursorStyle {
+        test_app.test_platform().cursor_style()
+    }
+
+    const THUMB: Point<Pixels> = point(px(10.), px(10.));
+    const SLIDER: Point<Pixels> = point(px(60.), px(60.));
+    const BUTTON: Point<Pixels> = point(px(170.), px(10.));
+    const HANDLE: Point<Pixels> = point(px(260.), px(10.));
+
+    #[test]
+    fn a_pointer_capture_hovers_its_hitbox_and_the_ones_beneath() {
+        let mut test_app = TestAppContext::single();
+        let probes = PointerProbes::default();
+        let window = pointer_capture_window(&mut test_app, &probes);
         let captured_hitbox = |test_app: &mut TestAppContext| {
             test_app
                 .update_window(window, |_, window, _| window.captured_hitbox())
                 .unwrap()
         };
-        let press = MouseDownEvent {
-            position: canvas,
-            button: MouseButton::Left,
-            ..Default::default()
-        };
-        let drag = MouseMoveEvent {
-            position: button,
-            pressed_button: Some(MouseButton::Left),
-            ..Default::default()
-        };
 
-        hover(&mut test_app, window, button);
-        assert!(button_hovered.get());
+        hover(&mut test_app, window, BUTTON);
+        assert!(probes.button_hovered.get());
         assert_eq!(cursor(&test_app), CursorStyle::PointingHand);
 
-        hover(&mut test_app, window, canvas);
-        dispatch(&mut test_app, window, press.clone().to_platform_input());
-        assert_eq!(presses.get(), 1, "the parent sees the press that captures");
+        hover(&mut test_app, window, THUMB);
+        dispatch(&mut test_app, window, press(THUMB));
+        assert_eq!(
+            probes.presses.get(),
+            1,
+            "the parent sees the press that captures"
+        );
         redraw(&mut test_app, window);
-        dispatch(&mut test_app, window, drag.clone().to_platform_input());
-        assert!(!button_hovered.get(), "the canvas captures the pointer");
-        assert_eq!(cursor(&test_app), CursorStyle::Crosshair);
+        dispatch(&mut test_app, window, drag(BUTTON));
+        assert!(
+            !probes.button_hovered.get(),
+            "the thumb captures the pointer"
+        );
+        assert!(
+            probes.slider_hovered.get(),
+            "the slider lies beneath the thumb"
+        );
+        assert_eq!(cursor(&test_app), CursorStyle::ResizeLeftRight);
         test_app
             .dispatcher
             .advance_clock(DEFAULT_TOOLTIP_SHOW_DELAY);
         assert_eq!(redraw(&mut test_app, window), None);
 
-        let release = MouseUpEvent {
-            position: button,
-            button: MouseButton::Left,
-            ..Default::default()
-        };
-        dispatch(&mut test_app, window, release.to_platform_input());
-        assert_eq!(releases_out.get(), 0, "the release is inside the parent");
-        assert!(button_hovered.get());
+        dispatch(&mut test_app, window, release(BUTTON));
+        assert_eq!(
+            probes.releases_out.get(),
+            0,
+            "the release is inside the parent"
+        );
+        redraw(&mut test_app, window);
+        assert!(probes.button_hovered.get());
+        assert!(!probes.slider_hovered.get());
         assert_eq!(cursor(&test_app), CursorStyle::PointingHand);
-        hover(&mut test_app, window, button + point(px(1.), px(0.)));
+        hover(&mut test_app, window, BUTTON + point(px(1.), px(0.)));
         test_app
             .dispatcher
             .advance_clock(DEFAULT_TOOLTIP_SHOW_DELAY);
@@ -5849,17 +5918,17 @@ mod tests {
         );
 
         // A capture that starts with no press hides the tooltip that shows in its first frame.
-        dragging.set(true);
+        probes.dragging.set(true);
         assert_eq!(redraw(&mut test_app, window), None);
-        dragging.set(false);
+        probes.dragging.set(false);
         redraw(&mut test_app, window);
         assert_eq!(captured_hitbox(&mut test_app), None);
 
         // A drag that ends with no mouse up, as a pen stroke that ends by pressure.
-        hover(&mut test_app, window, canvas);
-        dispatch(&mut test_app, window, press.to_platform_input());
+        hover(&mut test_app, window, THUMB);
+        dispatch(&mut test_app, window, press(THUMB));
         assert!(captured_hitbox(&mut test_app).is_some());
-        dragging.set(false);
+        probes.dragging.set(false);
         let dirty = test_app
             .update_window(window, |_, window, cx| {
                 window.draw(cx).clear(cx);
@@ -5872,9 +5941,77 @@ mod tests {
             None,
             "no element declares the capture in the next frame"
         );
-        dispatch(&mut test_app, window, drag.to_platform_input());
-        assert!(button_hovered.get());
+        dispatch(&mut test_app, window, drag(BUTTON));
+        assert!(!probes.button_hovered.get(), "the press still holds");
+        hover(&mut test_app, window, BUTTON);
+        assert!(
+            probes.button_hovered.get(),
+            "a move with no held button ends the press"
+        );
+    }
+
+    #[test]
+    fn a_held_mouse_button_hovers_the_hitboxes_under_the_press_and_the_pointer() {
+        let mut test_app = TestAppContext::single();
+        let probes = PointerProbes::default();
+        let window = pointer_capture_window(&mut test_app, &probes);
+
+        hover(&mut test_app, window, SLIDER);
+        dispatch(&mut test_app, window, press(SLIDER));
+        assert!(probes.slider_hovered.get());
+        dispatch(&mut test_app, window, drag(BUTTON));
+        assert!(
+            !probes.button_hovered.get(),
+            "the press is not on the button"
+        );
+        assert!(
+            !probes.slider_hovered.get(),
+            "the pointer is not on the slider"
+        );
+        assert_eq!(cursor(&test_app), CursorStyle::Arrow);
+
+        dispatch(&mut test_app, window, drag(SLIDER + point(px(10.), px(0.))));
+        assert!(probes.slider_hovered.get());
+        assert_eq!(cursor(&test_app), CursorStyle::ResizeLeftRight);
+
+        dispatch(&mut test_app, window, drag(BUTTON));
+        dispatch(
+            &mut test_app,
+            window,
+            press_button(MouseButton::Right, BUTTON),
+        );
+        dispatch(
+            &mut test_app,
+            window,
+            release_button(MouseButton::Right, BUTTON),
+        );
+        redraw(&mut test_app, window);
+        assert!(
+            !probes.button_hovered.get(),
+            "the first held button keeps its press"
+        );
+        dispatch(&mut test_app, window, release(BUTTON));
+        redraw(&mut test_app, window);
+        assert!(probes.button_hovered.get(), "the release ends the press");
         assert_eq!(cursor(&test_app), CursorStyle::PointingHand);
+    }
+
+    #[test]
+    fn a_drag_and_drop_hovers_the_drop_targets() {
+        let mut test_app = TestAppContext::single();
+        let probes = PointerProbes::default();
+        let window = pointer_capture_window(&mut test_app, &probes);
+
+        hover(&mut test_app, window, HANDLE);
+        dispatch(&mut test_app, window, press(HANDLE));
+        dispatch(&mut test_app, window, drag(BUTTON));
+        assert!(
+            test_app.update(|cx| cx.has_active_drag()),
+            "the drag and drop starts"
+        );
+        dispatch(&mut test_app, window, drag(BUTTON + point(px(1.), px(0.))));
+        dispatch(&mut test_app, window, release(BUTTON));
+        assert_eq!(probes.drops.get(), 1);
     }
 
     /// A window that shows a tooltip anywhere in it.
