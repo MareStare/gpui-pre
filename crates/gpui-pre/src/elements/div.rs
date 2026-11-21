@@ -3965,9 +3965,8 @@ pub(crate) fn register_tooltip_mouse_handlers(
 ) {
     let current_view = window.current_view();
     let show_delay = show_delay.unwrap_or(DEFAULT_TOOLTIP_SHOW_DELAY);
-    let check_is_hovered = unless_pointer_captured(check_is_hovered);
-    let check_is_hovered_during_prepaint =
-        unless_pointer_captured(check_is_hovered_during_prepaint);
+    let check_is_hovered = when_tooltips_may_show(check_is_hovered);
+    let check_is_hovered_during_prepaint = when_tooltips_may_show(check_is_hovered_during_prepaint);
 
     window.on_mouse_event({
         let active_tooltip = active_tooltip.clone();
@@ -4050,11 +4049,13 @@ pub(crate) fn register_tooltip_mouse_handlers(
     });
 }
 
-/// Shows no tooltip while a hitbox captures the pointer, as during a drag.
-fn unless_pointer_captured(
+/// Shows no tooltip while a hitbox captures the pointer, as during a drag, or while the pointer
+/// is out of the areas that the frame confines the tooltips to (see
+/// [`Window::confine_tooltips`]).
+fn when_tooltips_may_show(
     check_is_hovered: Rc<dyn Fn(&Window) -> bool>,
 ) -> Rc<dyn Fn(&Window) -> bool> {
-    Rc::new(move |window| window.captured_hitbox().is_none() && check_is_hovered(window))
+    Rc::new(move |window| window.tooltips_may_show() && check_is_hovered(window))
 }
 
 /// Handles displaying tooltips when an element is hovered.
@@ -5520,14 +5521,51 @@ mod tests {
         assert!(active_tooltip.borrow().is_none());
     }
 
-    /// A bar of three buttons of 40 by 20 px with a tooltip each, 10 px apart, at y `top`.
+    /// A bar of three buttons of 40 by 20 px with a tooltip each, 10 px apart, at y `top`. It
+    /// draws `child` as a cached view after the buttons.
     struct TooltipBar {
         top: Pixels,
+        child: Option<AnyView>,
     }
 
     impl Default for TooltipBar {
         fn default() -> Self {
-            Self { top: px(100.) }
+            Self {
+                top: px(100.),
+                child: None,
+            }
+        }
+    }
+
+    /// Confines the tooltips to its bounds.
+    struct Confine(Bounds<Pixels>);
+
+    impl Render for Confine {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let bounds = self.0;
+            canvas(
+                move |_, window, _| window.confine_tooltips(bounds),
+                |_, (), _, _| {},
+            )
+        }
+    }
+
+    /// Confines the tooltips to its bounds in a transaction that fails.
+    struct FailedConfine(Bounds<Pixels>);
+
+    impl Render for FailedConfine {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let bounds = self.0;
+            canvas(
+                move |_, window, _| {
+                    let result = window.transact(|window| {
+                        window.confine_tooltips(bounds);
+                        Err::<(), ()>(())
+                    });
+                    assert!(result.is_err());
+                },
+                |_, (), _, _| {},
+            )
         }
     }
 
@@ -5545,6 +5583,11 @@ mod tests {
                         .h(px(20.))
                         .tooltip(|_, cx| cx.new(|_| TestTooltipView).into())
                 }))
+                .children(
+                    self.child
+                        .clone()
+                        .map(|child| child.cached(StyleRefinement::default())),
+                )
         }
     }
 
@@ -5658,6 +5701,83 @@ mod tests {
             .advance_clock(DEFAULT_TOOLTIP_SHOW_DELAY);
         let c = redraw(&mut test_app, window).expect("the tooltip of c shows");
         assert_eq!(c.center().x, px(120.));
+    }
+
+    #[test]
+    fn a_tooltip_shows_only_in_the_areas_that_the_frame_confines_tooltips_to() {
+        let mut test_app = TestAppContext::single();
+        let bar = test_app.add_window(|_, _| TooltipBar::default());
+        let window: AnyWindowHandle = bar.into();
+        redraw(&mut test_app, window);
+        hover(&mut test_app, window, point(px(5.), px(105.)));
+        test_app
+            .dispatcher
+            .advance_clock(DEFAULT_TOOLTIP_SHOW_DELAY);
+        redraw(&mut test_app, window).expect("the tooltip of a shows");
+
+        set_child(&mut test_app, bar, |_| Confine(c_area()));
+        assert_eq!(redraw(&mut test_app, window), None, "a is out of the area");
+        assert_eq!(hover(&mut test_app, window, point(px(55.), px(105.))), None);
+        test_app
+            .dispatcher
+            .advance_clock(DEFAULT_TOOLTIP_SHOW_DELAY);
+        assert_eq!(redraw(&mut test_app, window), None, "b is out of the area");
+        hover(&mut test_app, window, point(px(105.), px(105.)));
+        test_app
+            .dispatcher
+            .advance_clock(DEFAULT_TOOLTIP_SHOW_DELAY);
+        let c = redraw(&mut test_app, window).expect("the tooltip of c shows");
+        assert_eq!(c.center().x, px(120.));
+    }
+
+    /// The area of the button c and the space around it.
+    fn c_area() -> Bounds<Pixels> {
+        Bounds::new(point(px(100.), px(0.)), size(px(100.), px(200.)))
+    }
+
+    fn set_child<V: Render>(
+        test_app: &mut TestAppContext,
+        bar: WindowHandle<TooltipBar>,
+        child: impl FnOnce(&mut Context<V>) -> V,
+    ) {
+        bar.update(test_app, |bar, _, cx| {
+            bar.child = Some(cx.new(child).into());
+            cx.notify();
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn a_reused_view_keeps_confining_the_tooltips() {
+        let mut test_app = TestAppContext::single();
+        let bar = test_app.add_window(|_, _| TooltipBar::default());
+        let window: AnyWindowHandle = bar.into();
+        set_child(&mut test_app, bar, |_| Confine(c_area()));
+        redraw(&mut test_app, window);
+        // Each tooltip change refreshes the window, which draws no cached view, so the test
+        // reads the confines of a frame that reuses the view.
+        bar.update(&mut test_app, |_, _, cx| cx.notify()).unwrap();
+        redraw(&mut test_app, window);
+        let confines = test_app
+            .update_window(window, |_, window, _| {
+                window.rendered_frame.tooltip_confines.clone()
+            })
+            .unwrap();
+        assert_eq!(confines, [c_area()]);
+    }
+
+    #[test]
+    fn a_failed_transaction_drops_its_tooltip_confines() {
+        let mut test_app = TestAppContext::single();
+        let bar = test_app.add_window(|_, _| TooltipBar::default());
+        let window: AnyWindowHandle = bar.into();
+        set_child(&mut test_app, bar, |_| FailedConfine(c_area()));
+        redraw(&mut test_app, window);
+        hover(&mut test_app, window, point(px(5.), px(105.)));
+        test_app
+            .dispatcher
+            .advance_clock(DEFAULT_TOOLTIP_SHOW_DELAY);
+        redraw(&mut test_app, window).expect("the tooltip of a shows");
     }
 
     #[test]

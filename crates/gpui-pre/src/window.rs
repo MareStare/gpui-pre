@@ -1084,6 +1084,8 @@ pub(crate) struct Frame {
     pub(crate) cursors: Vec<HitboxCursorRequest>,
     /// The hitboxes that capture the pointer in this frame. The last one wins.
     pointer_captures: Vec<HitboxId>,
+    /// The areas that the tooltips of this frame show in. With none, they show anywhere.
+    pub(crate) tooltip_confines: Vec<Bounds<Pixels>>,
     /// The frame draws a one-shot animation or a spring before its end.
     pub(crate) animating: bool,
     #[cfg(any(test, feature = "headless"))]
@@ -1099,6 +1101,7 @@ pub(crate) struct Frame {
 pub(crate) struct PrepaintStateIndex {
     hitboxes_index: usize,
     pointer_captures_index: usize,
+    tooltip_confines_index: usize,
     tooltips_index: usize,
     deferred_draws_index: usize,
     dispatch_tree_index: usize,
@@ -1187,6 +1190,7 @@ impl Frame {
             tooltip_requests: Vec::new(),
             cursors: Vec::new(),
             pointer_captures: Vec::new(),
+            tooltip_confines: Vec::new(),
             animating: false,
 
             #[cfg(any(test, feature = "headless"))]
@@ -1211,6 +1215,7 @@ impl Frame {
         self.tooltip_requests.clear();
         self.cursors.clear();
         self.pointer_captures.clear();
+        self.tooltip_confines.clear();
         self.hitboxes.clear();
         self.window_control_hitboxes.clear();
         self.deferred_draws.clear();
@@ -3846,6 +3851,31 @@ impl Window {
         }
     }
 
+    /// Shows the tooltips of this frame only while the pointer is in `bounds`, or in the bounds
+    /// of another call in this frame. A popup that sits over the window calls this, so that no
+    /// tooltip of an element outside it covers it. Call this in the prepaint of each frame. A
+    /// hoverable tooltip that shows stays while the pointer is on the tooltip itself.
+    pub fn confine_tooltips(&mut self, bounds: Bounds<Pixels>) {
+        self.invalidator.debug_assert_prepaint();
+        self.next_frame.tooltip_confines.push(bounds);
+    }
+
+    /// Whether a tooltip may show with the pointer where it is: no hitbox captures the pointer,
+    /// and the pointer is in the areas that the frame confines the tooltips to, if any. In
+    /// prepaint, this reads the frame in draw, else the frame on screen.
+    pub(crate) fn tooltips_may_show(&self) -> bool {
+        let frame = match self.invalidator.draw_phase() {
+            DrawPhase::Prepaint => &self.next_frame,
+            DrawPhase::None | DrawPhase::Focus | DrawPhase::Paint => &self.rendered_frame,
+        };
+        let confines = &frame.tooltip_confines;
+        self.captured_hitbox().is_none()
+            && (confines.is_empty()
+                || confines
+                    .iter()
+                    .any(|bounds| bounds.contains(&self.mouse_position)))
+    }
+
     /// Returns the hitbox that has captured the pointer, if any.
     pub fn captured_hitbox(&self) -> Option<HitboxId> {
         self.mouse_hover.captured()
@@ -4464,6 +4494,7 @@ impl Window {
         PrepaintStateIndex {
             hitboxes_index: self.next_frame.hitboxes.len(),
             pointer_captures_index: self.next_frame.pointer_captures.len(),
+            tooltip_confines_index: self.next_frame.tooltip_confines.len(),
             tooltips_index: self.next_frame.tooltip_requests.len(),
             deferred_draws_index: self.next_frame.deferred_draws.len(),
             dispatch_tree_index: self.next_frame.dispatch_tree.len(),
@@ -4481,6 +4512,10 @@ impl Window {
         self.next_frame.pointer_captures.extend_from_slice(
             &self.rendered_frame.pointer_captures
                 [range.start.pointer_captures_index..range.end.pointer_captures_index],
+        );
+        self.next_frame.tooltip_confines.extend_from_slice(
+            &self.rendered_frame.tooltip_confines
+                [range.start.tooltip_confines_index..range.end.tooltip_confines_index],
         );
         self.next_frame.tooltip_requests.extend(
             self.rendered_frame.tooltip_requests
@@ -4771,6 +4806,9 @@ impl Window {
             self.next_frame
                 .pointer_captures
                 .truncate(index.pointer_captures_index);
+            self.next_frame
+                .tooltip_confines
+                .truncate(index.tooltip_confines_index);
             self.next_frame
                 .tooltip_requests
                 .truncate(index.tooltips_index);

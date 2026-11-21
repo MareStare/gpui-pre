@@ -225,6 +225,10 @@ gpui-pre version goes.
   `Window::set_tooltip` keeps the place at the pointer. While a tooltip
   shows, and for 300 ms after its element lost the pointer, the next
   tooltip shows with no delay.
+- Tooltip confines: `Window::confine_tooltips` limits the tooltips of a
+  frame to areas, such as the cards of open popups. A tooltip shows only
+  while the pointer is in one of them, so no tooltip of an element outside
+  a popup covers it.
 - Element opacity: `Window::element_opacity` gives the opacity that the
   current element draws with, in its prepaint and paint.
   `Window::with_element_opacity` multiplies the opacity of the elements
