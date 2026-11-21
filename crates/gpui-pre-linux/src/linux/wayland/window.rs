@@ -1846,11 +1846,6 @@ impl PlatformWindow for WaylandWindow {
             .unwrap_or_default()
     }
 
-    fn set_mouse_position(&self, position: Point<Pixels>) {
-        let client = self.borrow().client.get_client();
-        client.borrow().warp_pointer(&self.0, position);
-    }
-
     fn modifiers(&self) -> Modifiers {
         self.borrow().client.get_client().borrow().modifiers
     }

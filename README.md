@@ -127,9 +127,6 @@ gpui-pre version goes.
   theme loads once for each scale of the outputs under the pointer and the
   tools. A platform that cannot show the image shows the fallback style.
   The native cursor of an image lives as long as the image.
-- Cursor warp: `Window::set_mouse_position` moves the mouse cursor of the
-  system to a point of the window. Wayland uses `wp_pointer_warp_v1`
-  while the pointer is over the window, and the compositor may refuse it.
 - Pen input on Windows: `Window::on_pen` reads the pointer messages of
   Windows Ink, with the whole history of each message, and the packets
   of a WinTab context. `App::set_pen_api` picks Windows Ink, WinTab, or
