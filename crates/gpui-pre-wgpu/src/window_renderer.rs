@@ -239,7 +239,7 @@ fn surface_config(size: Size<DevicePixels>, transparent: bool) -> WgpuSurfaceCon
         // A present that also waits for a vertical blank makes a frame take two
         // refreshes. Mailbox does not wait. A surface with no Mailbox, such as Metal,
         // falls back to Fifo.
-        preferred_present_mode: Some(wgpu::PresentMode::Mailbox),
+        preferred_present_mode: None,
     }
 }
 
