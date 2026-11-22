@@ -185,11 +185,7 @@ impl WgpuWindowRenderer {
         transparent: bool,
         color_space: wgpu::SurfaceColorSpace,
     ) -> Result<Self> {
-        let config = WgpuSurfaceConfig {
-            size,
-            transparent,
-            preferred_present_mode: None,
-        };
+        let config = surface_config(size, transparent);
         let context = WINDOW_CONTEXT.with(Rc::clone);
         let renderer = WgpuRenderer::new_from_source(context, &*source, config, color_space, None)
             .context("Creating wgpu renderer")?;
@@ -232,5 +228,37 @@ impl WgpuWindowRenderer {
 
     pub fn render_to_pending_image(&mut self, scene: &Scene) -> Result<gpui::PendingImage> {
         self.renderer.render_to_pending_image(scene)
+    }
+}
+
+fn surface_config(size: Size<DevicePixels>, transparent: bool) -> WgpuSurfaceConfig {
+    WgpuSurfaceConfig {
+        size,
+        transparent,
+        // The platform paces the frames of the window at the refresh of the display.
+        // A present that also waits for a vertical blank makes a frame take two
+        // refreshes. Mailbox does not wait. A surface with no Mailbox, such as Metal,
+        // falls back to Fifo.
+        preferred_present_mode: Some(wgpu::PresentMode::Mailbox),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wgpu_renderer::present_mode;
+
+    #[test]
+    fn a_window_presents_with_no_wait_for_a_vertical_blank() {
+        let config = surface_config(Size::default(), false);
+        let modes = [wgpu::PresentMode::Fifo, wgpu::PresentMode::Mailbox];
+        assert_eq!(
+            present_mode(&modes, config.preferred_present_mode),
+            wgpu::PresentMode::Mailbox
+        );
+        assert_eq!(
+            present_mode(&[wgpu::PresentMode::Fifo], config.preferred_present_mode),
+            wgpu::PresentMode::Fifo
+        );
     }
 }

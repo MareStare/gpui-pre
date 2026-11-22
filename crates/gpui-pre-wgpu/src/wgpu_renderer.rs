@@ -2562,7 +2562,7 @@ impl SurfaceSource for MetalLayerSource {
 
 /// The preferred present mode when the surface supports it, or else `Fifo`, which every
 /// surface supports.
-fn present_mode(
+pub(crate) fn present_mode(
     supported: &[wgpu::PresentMode],
     preferred: Option<wgpu::PresentMode>,
 ) -> wgpu::PresentMode {

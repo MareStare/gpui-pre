@@ -62,6 +62,11 @@ gpui-pre version goes.
   backgrounds. DX12 with `WGPU_DX12_PRESENTATION_SYSTEM=visual` offers a
   premultiplied alpha mode. On macOS the wgpu renderer tries the integrated
   GPU first.
+- Present with no wait for a vertical blank: the wgpu window renderer of
+  Windows and macOS prefers Mailbox, since the platform already paces the
+  frames at the refresh of the display. On DX12 it presents with a sync
+  interval of 0, like the Direct3D 11 renderer. Metal has no Mailbox and
+  keeps Fifo.
 - Startup log: `GPUI_STARTUP_LOG` logs the time of the startup stages of
   the renderers.
 - Startup speed: the render pipelines build in parallel, wgpu does not
