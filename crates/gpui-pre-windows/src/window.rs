@@ -51,7 +51,8 @@ pub struct WindowsWindowState {
     pub appearance: Cell<WindowAppearance>,
     pub background_appearance: Cell<WindowBackgroundAppearance>,
     pub scale_factor: Cell<f32>,
-    pub restore_from_minimized: Cell<Option<Box<dyn FnMut(RequestFrameOptions)>>>,
+    /// The window is minimized. It draws no frame then.
+    pub minimized: Cell<bool>,
 
     pub callbacks: Callbacks,
     pub frame_signal: Arc<PlatformFrameSignal>,
@@ -142,7 +143,6 @@ impl WindowsWindowState {
             size: logical_size,
         };
         let border_offset = WindowBorderOffset::default();
-        let restore_from_minimized = None;
         let renderer = new_renderer(
             hwnd,
             directx_devices,
@@ -171,7 +171,7 @@ impl WindowsWindowState {
             appearance: Cell::new(appearance),
             background_appearance: Cell::new(WindowBackgroundAppearance::Opaque),
             scale_factor: Cell::new(scale_factor),
-            restore_from_minimized: Cell::new(restore_from_minimized),
+            minimized: Cell::new(false),
             min_size,
             callbacks,
             frame_signal: Arc::new(PlatformFrameSignal::new()),
