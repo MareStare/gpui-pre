@@ -72,12 +72,13 @@ gpui-pre version goes.
 - Startup log: `GPUI_STARTUP_LOG` logs the time of the startup stages of
   the renderers.
 - Startup speed: the render pipelines build in parallel, wgpu does not
-  validate indirect calls, DX12 starts only when no Vulkan adapter can
+  validate indirect calls, Vulkan starts only when no DX12 adapter can
   draw to the window, and a resize does not wait for the GPU.
 - Backends from the environment: `WGPU_BACKEND` and the wgpu backend
-  options override the default, Vulkan and then DX12 on Windows. On
+  options override the default, DX12 and then Vulkan on Windows. On
   Windows each backend gets an instance of its own, so no instance with
-  Vulkan and DX12 drops after use.
+  Vulkan and DX12 drops after use. DX12 comes first: on a display of an
+  NVIDIA GPU, a Vulkan window shows black frames while it moves.
 - Device loss recovery: the wgpu window renderer of macOS and Windows makes
   a new device after a lost one, and asks the next frame to build the scene
   again. The renderer keeps its settings, such as the text contrast and the

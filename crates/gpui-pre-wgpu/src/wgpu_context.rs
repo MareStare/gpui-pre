@@ -498,14 +498,15 @@ impl WgpuContext {
     /// On Windows, each backend gets an instance of its own, also the backends of
     /// `WGPU_BACKEND`. The NVIDIA driver can crash the process when an instance with the
     /// Vulkan and DX12 backends drops after it made a device: a driver thread that starts
-    /// late jumps through freed state. DX12 comes after Vulkan: a DX12 instance takes 200
-    /// to 400 ms to enumerate its adapters on an Intel UHD iGPU, so it starts only when no
-    /// Vulkan adapter can draw to the window.
+    /// late jumps through freed state. DX12 comes before Vulkan. The window manager of
+    /// Windows composes DXGI swapchains, and Vulkan drivers present to a window on their
+    /// own path. On a display of an NVIDIA GPU, that path shows black frames while the
+    /// window moves. A DX12 start costs 200 to 400 ms more on an Intel UHD iGPU.
     #[cfg(not(target_family = "wasm"))]
     pub(crate) fn backend_groups() -> Vec<wgpu::Backends> {
         let from_env = wgpu::Backends::from_env();
         if cfg!(windows) {
-            one_backend_each(from_env.unwrap_or(wgpu::Backends::VULKAN | wgpu::Backends::DX12))
+            one_backend_each(from_env.unwrap_or(wgpu::Backends::DX12 | wgpu::Backends::VULKAN))
         } else if cfg!(target_vendor = "apple") {
             vec![from_env.unwrap_or(wgpu::Backends::METAL)]
         } else {
@@ -916,13 +917,13 @@ fn parse_pci_id(id: &str) -> anyhow::Result<u32> {
     u32::from_str_radix(id, 16).context("parsing PCI ID as hex")
 }
 
-/// Each backend of `backends` as a group of its own: Vulkan, DX12 and GL first, then the
+/// Each backend of `backends` as a group of its own: DX12, Vulkan and GL first, then the
 /// others.
 #[cfg(not(target_family = "wasm"))]
 fn one_backend_each(backends: wgpu::Backends) -> Vec<wgpu::Backends> {
     const PREFERRED: [wgpu::Backends; 3] = [
-        wgpu::Backends::VULKAN,
         wgpu::Backends::DX12,
+        wgpu::Backends::VULKAN,
         wgpu::Backends::GL,
     ];
     let mut groups: Vec<_> = backends.iter().collect();
@@ -991,13 +992,13 @@ mod tests {
         use wgpu::Backends;
         assert_eq!(
             one_backend_each(Backends::DX12 | Backends::VULKAN),
-            [Backends::VULKAN, Backends::DX12]
+            [Backends::DX12, Backends::VULKAN]
         );
         assert_eq!(
             one_backend_each(Backends::all()),
             [
-                Backends::VULKAN,
                 Backends::DX12,
+                Backends::VULKAN,
                 Backends::GL,
                 Backends::NOOP,
                 Backends::METAL,
