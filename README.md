@@ -60,8 +60,10 @@ gpui-pre version goes.
   so do common Vulkan drivers, so a transparent, blurred or Mica window of
   the wgpu renderer draws opaque. `GPUI_RENDERER=dx11` draws these
   backgrounds. DX12 with `WGPU_DX12_PRESENTATION_SYSTEM=visual` offers a
-  premultiplied alpha mode. On macOS the wgpu renderer tries the integrated
-  GPU first.
+  premultiplied alpha mode. A window of the wgpu renderer keeps its
+  redirection surface, since some drivers present through it, so a
+  Direct3D 11 fallback draws with no DirectComposition. On macOS the wgpu
+  renderer tries the integrated GPU first.
 - Present with no wait for a vertical blank: the wgpu window renderer of
   Windows and macOS prefers Mailbox, since the platform already paces the
   frames at the refresh of the display. On DX12 it presents with a sync

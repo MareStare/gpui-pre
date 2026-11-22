@@ -47,6 +47,11 @@ pub enum WindowRenderer<N: NativeRenderer> {
 }
 
 impl<N: NativeRenderer> WindowRenderer<N> {
+    /// Whether windows start with the wgpu renderer, unless it fails.
+    pub fn wgpu_requested() -> bool {
+        wgpu_requested(N::NAME)
+    }
+
     /// Starts the renderer of a window, and logs the time of the start. It starts the
     /// wgpu renderer with `new_wgpu`, unless `GPUI_RENDERER` picks the native renderer.
     /// It starts the native renderer with `new_native` in that case, and when the wgpu
@@ -57,7 +62,7 @@ impl<N: NativeRenderer> WindowRenderer<N> {
     ) -> Result<Self> {
         time_window_renderer(
             || {
-                if wgpu_requested(N::NAME) {
+                if Self::wgpu_requested() {
                     match new_wgpu() {
                         Ok((renderer, target)) => return Ok(Self::Wgpu { renderer, target }),
                         Err(error) => log::error!("Using the {} renderer: {error:#}", N::NAME),

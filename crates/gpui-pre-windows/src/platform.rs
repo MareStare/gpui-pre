@@ -251,8 +251,13 @@ impl WindowsPlatform {
             .context("CreateWindowExW did not run correctly")?;
         let handle = result?;
 
-        let disable_direct_composition = std::env::var(DISABLE_DIRECT_COMPOSITION)
-            .is_ok_and(|value| value == "true" || value == "1");
+        // The wgpu renderer presents to the window itself. Some drivers present
+        // through the redirection surface of the window, such as NVIDIA Vulkan with
+        // Mailbox on a display of the NVIDIA GPU. DirectComposition needs a window
+        // with no redirection surface, so only the Direct3D 11 renderer uses it.
+        let disable_direct_composition = Renderer::wgpu_requested()
+            || std::env::var(DISABLE_DIRECT_COMPOSITION)
+                .is_ok_and(|value| value == "true" || value == "1");
         let background_executor = BackgroundExecutor::new(dispatcher.clone());
         let foreground_executor = ForegroundExecutor::new(dispatcher);
 
