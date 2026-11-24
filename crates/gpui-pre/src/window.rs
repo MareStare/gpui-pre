@@ -3805,6 +3805,16 @@ impl Window {
         self.mouse_position
     }
 
+    /// Moves the mouse cursor of the system to `position` in the window.
+    /// The system may refuse it, e.g. while the pointer is over another
+    /// window. The window takes `position` as the mouse position at once,
+    /// because the move gives no mouse event on some platforms.
+    pub fn set_mouse_position(&mut self, position: Point<Pixels>) {
+        self.platform_window.set_mouse_position(position);
+        self.mouse_position = position;
+        self.update_mouse_hover();
+    }
+
     /// Captures the pointer for the hitbox, as in
     /// <https://w3c.github.io/pointerevents/#pointer-capture>. While the capture lasts, this
     /// hitbox and the hitboxes beneath it, such as its ancestors, are hovered as if the mouse
