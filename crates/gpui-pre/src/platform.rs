@@ -1301,14 +1301,6 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn appearance(&self) -> WindowAppearance;
     fn display(&self) -> Option<Rc<dyn PlatformDisplay>>;
     fn mouse_position(&self) -> Point<Pixels>;
-
-    /// Moves the mouse cursor of the system to `position` in the window.
-    /// Returns whether the system moved it, as far as the platform can tell.
-    /// A platform that cannot move it does nothing and returns false.
-    fn set_mouse_position(&self, position: Point<Pixels>) -> bool {
-        let _ = position;
-        false
-    }
     fn modifiers(&self) -> Modifiers;
     fn capslock(&self) -> Capslock;
     fn set_input_handler(&mut self, input_handler: PlatformInputHandler);

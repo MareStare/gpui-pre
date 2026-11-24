@@ -47,7 +47,6 @@ use wayland_protocols::ext::background_effect::v1::client::{
 use wayland_protocols::wp::pointer_gestures::zv1::client::{
     zwp_pointer_gesture_pinch_v1, zwp_pointer_gestures_v1,
 };
-use wayland_protocols::wp::pointer_warp::v1::client::wp_pointer_warp_v1;
 use wayland_protocols::wp::primary_selection::zv1::client::zwp_primary_selection_offer_v1::{
     self, ZwpPrimarySelectionOfferV1,
 };
@@ -266,7 +265,6 @@ pub struct Globals {
     pub dialog: Option<xdg_wm_dialog_v1::XdgWmDialogV1>,
     pub system_bell: Option<xdg_system_bell_v1::XdgSystemBellV1>,
     pub tablet_manager: Option<ZwpTabletManagerV2>,
-    pub pointer_warp: Option<wp_pointer_warp_v1::WpPointerWarpV1>,
     pub executor: ForegroundExecutor,
     pub frame_ping: Ping,
 }
@@ -319,7 +317,6 @@ impl Globals {
             dialog: globals.bind(&qh, dialog_v..=dialog_v, ()).ok(),
             system_bell: globals.bind(&qh, 1..=1, ()).ok(),
             tablet_manager: globals.bind(&qh, 1..=1, ()).ok(),
-            pointer_warp: globals.bind(&qh, 1..=1, ()).ok(),
             executor,
             qh,
             frame_ping,
@@ -951,35 +948,6 @@ impl WaylandClientState {
         }
         let serial = self.serial_tracker.get(SerialKind::MouseEnter);
         self.apply_cursor(serial.as_raw());
-    }
-
-    /// Moves the pointer to `position` on the surface of `window`, while
-    /// the pointer is over it. Returns whether it sent the request. The
-    /// compositor may still refuse it, with no reply.
-    pub(crate) fn warp_pointer(
-        &self,
-        window: &WaylandWindowStatePtr,
-        position: Point<Pixels>,
-    ) -> bool {
-        let (Some(warp), Some(pointer), Some(focused)) = (
-            &self.globals.pointer_warp,
-            &self.wl_pointer,
-            &self.mouse_focused_window,
-        ) else {
-            return false;
-        };
-        if !focused.ptr_eq(window) {
-            return false;
-        }
-        let serial = self.serial_tracker.get(SerialKind::MouseEnter);
-        warp.warp_pointer(
-            &window.surface(),
-            pointer,
-            f64::from(position.x.as_f32()),
-            f64::from(position.y.as_f32()),
-            serial.as_raw(),
-        );
-        true
     }
 
     /// Shows the current cursor on the pointer.
@@ -1764,7 +1732,6 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandClientStat
 
 delegate_noop!(WaylandClientStatePtr: ignore xdg_activation_v1::XdgActivationV1);
 delegate_noop!(WaylandClientStatePtr: ignore xdg_system_bell_v1::XdgSystemBellV1);
-delegate_noop!(WaylandClientStatePtr: ignore wp_pointer_warp_v1::WpPointerWarpV1);
 delegate_noop!(WaylandClientStatePtr: ignore wl_compositor::WlCompositor);
 delegate_noop!(WaylandClientStatePtr: ignore wp_cursor_shape_device_v1::WpCursorShapeDeviceV1);
 delegate_noop!(WaylandClientStatePtr: ignore wp_cursor_shape_manager_v1::WpCursorShapeManagerV1);

@@ -6117,26 +6117,6 @@ mod tests {
     }
 
     #[test]
-    fn a_cursor_warp_moves_the_hover_with_no_mouse_event() {
-        let mut test_app = TestAppContext::single();
-        let probes = PointerProbes::default();
-        let window = pointer_capture_window(&mut test_app, &probes);
-
-        hover(&mut test_app, window, BUTTON);
-        assert!(probes.button_hovered.get());
-        test_app
-            .update_window(window, |_, window, _| {
-                assert!(window.set_mouse_position(SLIDER));
-            })
-            .unwrap();
-        redraw(&mut test_app, window);
-        assert_eq!(test_app.system_mouse_position(window), SLIDER);
-        assert!(!probes.button_hovered.get());
-        assert!(probes.slider_hovered.get());
-        assert_eq!(cursor(&test_app), CursorStyle::ResizeLeftRight);
-    }
-
-    #[test]
     fn a_drag_and_drop_hovers_the_drop_targets() {
         let mut test_app = TestAppContext::single();
         let probes = PointerProbes::default();
