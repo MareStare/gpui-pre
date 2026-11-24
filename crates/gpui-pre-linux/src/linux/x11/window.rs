@@ -1515,10 +1515,10 @@ impl PlatformWindow for X11Window {
         })
     }
 
-    fn set_mouse_position(&self, position: Point<Pixels>) {
+    fn set_mouse_position(&self, position: Point<Pixels>) -> bool {
         let scale_factor = self.0.state.borrow().scale_factor;
         let device = position.scale(scale_factor);
-        check_reply(
+        let moved = check_reply(
             || "X11 WarpPointer failed.",
             self.0.xcb.warp_pointer(
                 x11rb::NONE,
@@ -1531,8 +1531,10 @@ impl PlatformWindow for X11Window {
                 device.y.as_f32().round() as i16,
             ),
         )
-        .log_err();
+        .log_err()
+        .is_some();
         xcb_flush(&self.0.xcb);
+        moved
     }
 
     fn modifiers(&self) -> Modifiers {

@@ -6125,7 +6125,9 @@ mod tests {
         hover(&mut test_app, window, BUTTON);
         assert!(probes.button_hovered.get());
         test_app
-            .update_window(window, |_, window, _| window.set_mouse_position(SLIDER))
+            .update_window(window, |_, window, _| {
+                assert!(window.set_mouse_position(SLIDER));
+            })
             .unwrap();
         redraw(&mut test_app, window);
         assert_eq!(test_app.system_mouse_position(window), SLIDER);

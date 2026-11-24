@@ -954,17 +954,22 @@ impl WaylandClientState {
     }
 
     /// Moves the pointer to `position` on the surface of `window`, while
-    /// the pointer is over it. The compositor may refuse it.
-    pub(crate) fn warp_pointer(&self, window: &WaylandWindowStatePtr, position: Point<Pixels>) {
+    /// the pointer is over it. Returns whether it sent the request. The
+    /// compositor may still refuse it, with no reply.
+    pub(crate) fn warp_pointer(
+        &self,
+        window: &WaylandWindowStatePtr,
+        position: Point<Pixels>,
+    ) -> bool {
         let (Some(warp), Some(pointer), Some(focused)) = (
             &self.globals.pointer_warp,
             &self.wl_pointer,
             &self.mouse_focused_window,
         ) else {
-            return;
+            return false;
         };
         if !focused.ptr_eq(window) {
-            return;
+            return false;
         }
         let serial = self.serial_tracker.get(SerialKind::MouseEnter);
         warp.warp_pointer(
@@ -974,6 +979,7 @@ impl WaylandClientState {
             f64::from(position.y.as_f32()),
             serial.as_raw(),
         );
+        true
     }
 
     /// Shows the current cursor on the pointer.

@@ -3807,12 +3807,17 @@ impl Window {
 
     /// Moves the mouse cursor of the system to `position` in the window.
     /// The system may refuse it, e.g. while the pointer is over another
-    /// window. The window takes `position` as the mouse position at once,
-    /// because the move gives no mouse event on some platforms.
-    pub fn set_mouse_position(&mut self, position: Point<Pixels>) {
-        self.platform_window.set_mouse_position(position);
-        self.mouse_position = position;
-        self.update_mouse_hover();
+    /// window. Returns whether the system moved it, as far as the platform
+    /// can tell. On a move, the window takes `position` as the mouse
+    /// position at once, because the move gives no mouse event on some
+    /// platforms.
+    pub fn set_mouse_position(&mut self, position: Point<Pixels>) -> bool {
+        let moved = self.platform_window.set_mouse_position(position);
+        if moved {
+            self.mouse_position = position;
+            self.update_mouse_hover();
+        }
+        moved
     }
 
     /// Captures the pointer for the hitbox, as in

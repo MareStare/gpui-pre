@@ -434,8 +434,9 @@ impl PlatformWindow for TestWindow {
         self.0.lock().mouse_position
     }
 
-    fn set_mouse_position(&self, position: Point<Pixels>) {
+    fn set_mouse_position(&self, position: Point<Pixels>) -> bool {
         self.0.lock().mouse_position = position;
+        true
     }
 
     fn modifiers(&self) -> crate::Modifiers {
