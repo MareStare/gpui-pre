@@ -314,6 +314,9 @@ gpui-pre version goes.
   windows then releases the entities and the focus handles that the draw
   dropped, as the update of a platform frame does. A release observer of an
   element state that stops drawing runs before the flush ends.
+- Wheel scroll settings on Windows: a change of the wheel scroll lines or
+  chars in the Windows settings takes effect at once. `WM_SETTINGCHANGE`
+  gives the `SPI_SET*` action of the change, and the window matches it.
 
 ## License
 
