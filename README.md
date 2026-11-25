@@ -87,7 +87,8 @@ gpui-pre version goes.
   one: wgpu can compare them as equal. `Window::gpu_failure` gives the GPU
   error of a wgpu window that stays after the renderer dropped its GPU
   caches to recover. The renderer keeps trying to recover and does not
-  panic.
+  panic. The wgpu windows of a thread share one device. It drops with the
+  last of them, so a thread can end after it closed its windows.
 - Adapter by name: the wgpu renderer tries first the adapter whose name
   contains `WGPU_ADAPTER_NAME`, case-insensitive. It ranks above the
   adapter of `ZED_DEVICE_ID`. The first window panics when no adapter has

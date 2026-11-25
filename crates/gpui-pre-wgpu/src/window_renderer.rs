@@ -1,9 +1,10 @@
 //! The renderer of a native window, for the platforms that also have a native
 //! renderer. The default is wgpu. `GPUI_RENDERER` can pick the native renderer, and
 //! a window whose wgpu renderer fails to start uses the native renderer too. The wgpu
-//! renderers of a thread share one device.
+//! renderers of a thread share one device. It drops with the last of them.
 
-use std::rc::Rc;
+use std::cell::RefCell;
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
@@ -13,7 +14,7 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use crate::renderer_choice::wgpu_requested;
 use crate::startup_log::{StartedRenderer, time_window_renderer};
 use crate::wgpu_renderer::{SurfaceSource, WindowSource};
-use crate::{GpuContext, WgpuRenderer, WgpuSurfaceConfig};
+use crate::{GpuContext, WgpuContext, WgpuRenderer, WgpuSurfaceConfig};
 
 /// The native renderer of a platform.
 pub trait NativeRenderer {
@@ -143,7 +144,22 @@ impl<N: NativeRenderer> WindowRenderer<N> {
 }
 
 thread_local! {
-    static WINDOW_CONTEXT: GpuContext = Rc::default();
+    /// The renderers hold the context. A thread local that held it would drop it at the
+    /// end of the thread, possibly after the thread locals of wgpu, and that drop aborts.
+    static WINDOW_CONTEXT: RefCell<Weak<RefCell<Option<WgpuContext>>>> = RefCell::default();
+}
+
+/// The context of the wgpu renderers of the thread. It is empty when no renderer holds
+/// it.
+fn window_context() -> GpuContext {
+    WINDOW_CONTEXT.with(|shared| {
+        let held = shared.borrow().upgrade();
+        held.unwrap_or_else(|| {
+            let context = GpuContext::default();
+            shared.replace(Rc::downgrade(&context));
+            context
+        })
+    })
 }
 
 pub struct WgpuWindowRenderer {
@@ -191,7 +207,7 @@ impl WgpuWindowRenderer {
         color_space: wgpu::SurfaceColorSpace,
     ) -> Result<Self> {
         let config = surface_config(size, transparent);
-        let context = WINDOW_CONTEXT.with(Rc::clone);
+        let context = window_context();
         let renderer = WgpuRenderer::new_from_source(context, &*source, config, color_space, None)
             .context("Creating wgpu renderer")?;
         Ok(Self {

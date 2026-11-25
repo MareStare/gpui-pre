@@ -1727,8 +1727,26 @@ fn set_non_rude_hwnd(hwnd: HWND, non_rude: bool) {
 #[cfg(test)]
 mod tests {
     use super::ClickState;
-    use gpui::{DevicePixels, MouseButton, point};
+    use crate::test_window;
+    use gpui::{DevicePixels, MouseButton, WindowParams, point};
     use std::time::Duration;
+
+    /// The test thread ends after the window closed. The thread locals of wgpu can drop
+    /// before the GPU context then, and a drop of the context after them aborts.
+    #[test]
+    fn a_thread_ends_after_it_closed_a_wgpu_window() {
+        let params = WindowParams {
+            focus: false,
+            show: false,
+            ..test_window::params()
+        };
+        let (_platform, window) = test_window::open(params);
+        assert!(
+            window.draws_custom_surfaces(),
+            "the window does not use the wgpu renderer"
+        );
+        test_window::close(window);
+    }
 
     #[test]
     fn test_double_click_interval() {

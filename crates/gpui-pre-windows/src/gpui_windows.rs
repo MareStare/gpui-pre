@@ -18,6 +18,8 @@ mod platform;
 mod renderer;
 mod system_notifications;
 mod system_settings;
+#[cfg(test)]
+mod test_window;
 mod util;
 mod vsync;
 mod window;
