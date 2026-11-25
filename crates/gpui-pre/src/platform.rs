@@ -1301,6 +1301,19 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn appearance(&self) -> WindowAppearance;
     fn display(&self) -> Option<Rc<dyn PlatformDisplay>>;
     fn mouse_position(&self) -> Point<Pixels>;
+
+    /// Holds the system cursor at `at` in the window, or releases it with `None`. While the
+    /// cursor is held, the positions of the mouse events and the mouse position of the window
+    /// report a virtual pointer: `at` plus the summed relative motion of the mouse. A pen moves
+    /// the virtual pointer by the motion of its tip. Returns whether the cursor is held. The
+    /// window calls this only when the state changes. A platform with no lock returns false.
+    ///
+    /// The platform can end the lock by itself. When the window stays active, it then calls
+    /// the pointer unlock callback.
+    fn set_pointer_lock(&self, at: Option<Point<Pixels>>) -> bool {
+        let _ = at;
+        false
+    }
     fn modifiers(&self) -> Modifiers;
     fn capslock(&self) -> Capslock;
     fn set_input_handler(&mut self, input_handler: PlatformInputHandler);
@@ -1347,6 +1360,9 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     /// of any window update.
     fn on_visibility_change(&self, callback: Box<dyn FnMut(WindowVisibility)>);
     fn on_hover_status_change(&self, callback: Box<dyn FnMut(bool)>);
+    /// Called when the platform ends the pointer lock by itself in an active window. The
+    /// cursor is then at the point of the lock.
+    fn on_pointer_unlock(&self, _callback: Box<dyn FnMut()>) {}
     fn on_resize(&self, callback: Box<dyn FnMut(Size<Pixels>, f32)>);
     fn on_moved(&self, callback: Box<dyn FnMut()>);
     /// Registers the callback invoked when the window moves to another

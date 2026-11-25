@@ -311,6 +311,26 @@ gpui-pre version goes.
   element state that stops drawing runs before the flush ends.
 - X11-only builds: the pipe helpers that only Wayland reads build only with
   the `wayland` feature, so a build with only `x11` has no dead code.
+- Pointer lock: `Window::lock_pointer` holds the system cursor at the mouse
+  position, as the pointer lock of browsers, and `Window::pointer_lock`
+  gives that point. While locked, the mouse events and the mouse position
+  report a virtual pointer that the relative motion of the mouse moves. A
+  call outside a draw starts a lock, and it fails in a window that is not
+  active. A frame keeps the lock when it calls it in prepaint, so a lock
+  lasts one frame. The release of the last held button ends it after its
+  listeners, and so do a change of the active status or of the bounds.
+  Then the mouse moves to the point of the lock. A platform that ends the
+  lock by itself, such as a Wayland compositor that breaks it, tells the
+  window through `PlatformWindow::on_pointer_unlock`. Windows clips the
+  cursor to one pixel and reads raw input at the pointer speed of the
+  system, as SDL. macOS moves the cursor to the point and disconnects the
+  mouse from it. X11 grabs
+  the pointer into a child window of one pixel and reads raw motion of
+  XInput 2. Wayland locks the pointer with the pointer constraints protocol
+  and reads the relative pointer protocol. A pen moves the virtual pointer
+  by the motion of its tip, so the virtual pointer follows it, and a touch
+  of the pen reports the virtual pointer. On Wayland the lock holds no pen
+  cursor, and the pen events keep their positions.
 
 ## License
 

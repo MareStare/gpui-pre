@@ -6116,6 +6116,310 @@ mod tests {
         assert_eq!(cursor(&test_app), CursorStyle::PointingHand);
     }
 
+    #[derive(Clone, Default)]
+    struct PointerLockProbes {
+        /// The thumb is in a drag and declares the lock in each frame.
+        dragging: Rc<Cell<bool>>,
+        locked_on_press: Rc<Cell<Option<bool>>>,
+        locked_on_declaration: Rc<Cell<Option<bool>>>,
+        lock_on_release: Rc<Cell<Option<Point<Pixels>>>>,
+        last_move: Rc<Cell<Option<(Point<Pixels>, Option<MouseButton>)>>>,
+    }
+
+    /// A thumb of 20 by 20 px at the origin that locks the pointer from a press until
+    /// `dragging` ends.
+    struct PointerLockView {
+        probes: PointerLockProbes,
+    }
+
+    impl Render for PointerLockView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let probes = self.probes.clone();
+            canvas(
+                {
+                    let probes = probes.clone();
+                    move |bounds, window, _| {
+                        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+                        if probes.dragging.get() {
+                            probes
+                                .locked_on_declaration
+                                .set(Some(window.lock_pointer()));
+                        }
+                        hitbox
+                    }
+                },
+                move |_, hitbox, window, _| {
+                    let press_probes = probes.clone();
+                    window.on_mouse_event(move |_: &MouseDownEvent, phase, window, _| {
+                        if phase.bubble() && hitbox.is_hovered(window) {
+                            press_probes.dragging.set(true);
+                            press_probes
+                                .locked_on_press
+                                .set(Some(window.lock_pointer()));
+                        }
+                    });
+                    let release_probes = probes.clone();
+                    window.on_mouse_event(move |_: &MouseUpEvent, phase, window, _| {
+                        if phase.bubble() {
+                            release_probes.dragging.set(false);
+                            release_probes.lock_on_release.set(window.pointer_lock());
+                        }
+                    });
+                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, _| {
+                        if phase.bubble() {
+                            probes
+                                .last_move
+                                .set(Some((event.position, event.pressed_button)));
+                        }
+                    });
+                },
+            )
+            .size(px(20.))
+        }
+    }
+
+    /// Draws a `PointerLockView` as a cached view.
+    struct CachedPointerLockView {
+        child: Entity<PointerLockView>,
+    }
+
+    impl Render for CachedPointerLockView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .child(AnyView::from(self.child.clone()).cached(StyleRefinement::default()))
+        }
+    }
+
+    fn pointer_lock_window(
+        test_app: &mut TestAppContext,
+        probes: &PointerLockProbes,
+    ) -> AnyWindowHandle {
+        let window = test_app
+            .add_window({
+                let probes = probes.clone();
+                |_, _| PointerLockView { probes }
+            })
+            .into();
+        activate(test_app, window);
+        window
+    }
+
+    fn activate(test_app: &mut TestAppContext, window: AnyWindowHandle) {
+        let test_window = test_app.test_window(window);
+        test_window.simulate_hover_status_change(true);
+        test_window.simulate_active_status_change(true);
+        redraw(test_app, window);
+    }
+
+    fn pointer_lock(
+        test_app: &mut TestAppContext,
+        window: AnyWindowHandle,
+    ) -> Option<Point<Pixels>> {
+        let lock = test_app
+            .update_window(window, |_, window, _| window.pointer_lock())
+            .unwrap();
+        assert_eq!(lock, test_app.test_window(window).pointer_lock());
+        lock
+    }
+
+    fn mouse_position(test_app: &mut TestAppContext, window: AnyWindowHandle) -> Point<Pixels> {
+        test_app
+            .update_window(window, |_, window, _| window.mouse_position())
+            .unwrap()
+    }
+
+    /// Draws the window with no cached view.
+    fn refresh(test_app: &mut TestAppContext, window: AnyWindowHandle) {
+        test_app
+            .update_window(window, |_, window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            })
+            .unwrap();
+    }
+
+    const FAR: Point<Pixels> = point(px(300.), px(250.));
+
+    #[test]
+    fn a_press_locks_the_pointer_until_its_release() {
+        let mut test_app = TestAppContext::single();
+        let probes = PointerLockProbes::default();
+        let window = pointer_lock_window(&mut test_app, &probes);
+
+        hover(&mut test_app, window, THUMB);
+        dispatch(&mut test_app, window, press(THUMB));
+        assert_eq!(probes.locked_on_press.get(), Some(true));
+        assert_eq!(pointer_lock(&mut test_app, window), Some(THUMB));
+        dispatch(&mut test_app, window, drag(FAR));
+        assert_eq!(probes.locked_on_declaration.get(), Some(true));
+        assert_eq!(pointer_lock(&mut test_app, window), Some(THUMB));
+        assert_eq!(probes.last_move.get(), Some((FAR, Some(MouseButton::Left))));
+
+        dispatch(&mut test_app, window, release(FAR));
+        assert_eq!(
+            probes.lock_on_release.get(),
+            Some(THUMB),
+            "the release listeners run in the lock"
+        );
+        assert_eq!(pointer_lock(&mut test_app, window), None);
+        assert_eq!(mouse_position(&mut test_app, window), THUMB);
+        assert_eq!(
+            probes.last_move.get(),
+            Some((THUMB, None)),
+            "the mouse moves back to the point of the lock"
+        );
+    }
+
+    #[test]
+    fn a_pointer_lock_starts_only_outside_a_draw() {
+        let mut test_app = TestAppContext::single();
+        let probes = PointerLockProbes::default();
+        let window = pointer_lock_window(&mut test_app, &probes);
+
+        hover(&mut test_app, window, THUMB);
+        probes.dragging.set(true);
+        refresh(&mut test_app, window);
+        assert_eq!(probes.locked_on_declaration.get(), Some(false));
+        assert_eq!(pointer_lock(&mut test_app, window), None);
+
+        probes.dragging.set(false);
+        let scheduled = test_app
+            .update_window(window, |_, window, _| {
+                assert!(window.lock_pointer());
+                window.invalidator.is_dirty()
+            })
+            .unwrap();
+        assert!(scheduled, "the lock schedules the frame that ends it");
+        test_app
+            .update_window(window, |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+        assert_eq!(pointer_lock(&mut test_app, window), None);
+    }
+
+    #[test]
+    fn a_frame_with_no_declaration_ends_the_pointer_lock() {
+        let mut test_app = TestAppContext::single();
+        let probes = PointerLockProbes::default();
+        let window = pointer_lock_window(&mut test_app, &probes);
+
+        hover(&mut test_app, window, THUMB);
+        dispatch(&mut test_app, window, press(THUMB));
+        dispatch(&mut test_app, window, drag(FAR));
+        assert_eq!(pointer_lock(&mut test_app, window), Some(THUMB));
+
+        probes.dragging.set(false);
+        refresh(&mut test_app, window);
+        assert_eq!(pointer_lock(&mut test_app, window), None);
+        assert_eq!(
+            probes.last_move.get(),
+            Some((THUMB, Some(MouseButton::Left))),
+            "the button stays held"
+        );
+    }
+
+    #[test]
+    fn a_change_of_the_window_ends_the_pointer_lock() {
+        let mut test_app = TestAppContext::single();
+        let probes = PointerLockProbes::default();
+        let window = pointer_lock_window(&mut test_app, &probes);
+        let test_window = test_app.test_window(window);
+
+        hover(&mut test_app, window, THUMB);
+        dispatch(&mut test_app, window, press(THUMB));
+        dispatch(&mut test_app, window, drag(FAR));
+        test_window.simulate_active_status_change(false);
+        test_app.run_until_parked();
+        assert_eq!(pointer_lock(&mut test_app, window), None);
+        assert_eq!(mouse_position(&mut test_app, window), THUMB);
+        assert_eq!(
+            probes.last_move.get(),
+            Some((THUMB, Some(MouseButton::Left)))
+        );
+
+        dispatch(&mut test_app, window, release(THUMB));
+        dispatch(&mut test_app, window, press(THUMB));
+        assert_eq!(
+            probes.locked_on_press.get(),
+            Some(false),
+            "a window that is not active locks no pointer"
+        );
+
+        test_window.simulate_active_status_change(true);
+        test_app.run_until_parked();
+        dispatch(&mut test_app, window, release(THUMB));
+        dispatch(&mut test_app, window, press(THUMB));
+        assert_eq!(pointer_lock(&mut test_app, window), Some(THUMB));
+        let mut resized_window = test_window.clone();
+        let window_size = test_app
+            .update_window(window, |_, window, _| window.bounds().size)
+            .unwrap();
+        resized_window.simulate_resize(window_size);
+        test_app.run_until_parked();
+        assert_eq!(
+            pointer_lock(&mut test_app, window),
+            Some(THUMB),
+            "a resize to the same size keeps the lock"
+        );
+        resized_window.simulate_resize(size(px(500.), px(400.)));
+        test_app.run_until_parked();
+        assert_eq!(pointer_lock(&mut test_app, window), None);
+
+        dispatch(&mut test_app, window, release(THUMB));
+        dispatch(&mut test_app, window, press(THUMB));
+        dispatch(&mut test_app, window, drag(FAR));
+        test_window.simulate_pointer_unlock();
+        test_app.run_until_parked();
+        assert_eq!(pointer_lock(&mut test_app, window), None);
+        assert_eq!(
+            probes.last_move.get(),
+            Some((THUMB, Some(MouseButton::Left))),
+            "the platform leaves the cursor at the point of the lock"
+        );
+        refresh(&mut test_app, window);
+        assert_eq!(probes.locked_on_declaration.get(), Some(false));
+    }
+
+    #[test]
+    fn a_cached_view_keeps_its_pointer_lock() {
+        let mut test_app = TestAppContext::single();
+        let probes = PointerLockProbes::default();
+        let parent = test_app.add_window({
+            let probes = probes.clone();
+            |_, cx| CachedPointerLockView {
+                child: cx.new(|_| PointerLockView { probes }),
+            }
+        });
+        let window: AnyWindowHandle = parent.into();
+        activate(&mut test_app, window);
+        let child = parent
+            .update(&mut test_app, |view, _, _| view.child.clone())
+            .unwrap();
+
+        hover(&mut test_app, window, THUMB);
+        test_app
+            .update_window(window, |_, window, cx| {
+                window.dispatch_event(press(THUMB), cx);
+                // The drag changes the state of the view.
+                child.update(cx, |_, cx| cx.notify());
+                window.draw(cx).clear(cx);
+            })
+            .unwrap();
+        assert_eq!(pointer_lock(&mut test_app, window), Some(THUMB));
+
+        parent
+            .update(&mut test_app, |_, _, cx| cx.notify())
+            .unwrap();
+        probes.locked_on_declaration.set(None);
+        redraw(&mut test_app, window);
+        assert_eq!(
+            probes.locked_on_declaration.get(),
+            None,
+            "the frame reuses the view"
+        );
+        assert_eq!(pointer_lock(&mut test_app, window), Some(THUMB));
+    }
+
     #[test]
     fn a_drag_and_drop_hovers_the_drop_targets() {
         let mut test_app = TestAppContext::single();

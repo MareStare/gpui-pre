@@ -24,12 +24,27 @@ pub(super) struct Pens {
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct PenDevice {
     valuator: u16,
-    min: f32,
-    max: f32,
+    pressure_range: AxisRange,
 
     /// The last pressure from `0.0` to `1.0`. An event has the valuator only
     /// when its value changed.
     pressure: f32,
+}
+
+/// The range of the values of a valuator.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct AxisRange {
+    pub min: f32,
+    pub max: f32,
+}
+
+impl AxisRange {
+    pub(super) fn of(valuator: &xinput::DeviceClassDataValuator) -> Self {
+        Self {
+            min: fp3232_to_f32(valuator.min),
+            max: fp3232_to_f32(valuator.max),
+        }
+    }
 }
 
 /// A pointer event of the master pointer.
@@ -88,15 +103,14 @@ impl Pens {
             .iter()
             .filter(|info| info.type_ == xinput::DeviceType::SLAVE_POINTER)
             .filter_map(|info| {
-                let valuator = info
+                let pressure = info
                     .classes
                     .iter()
                     .filter_map(|class| class.data.as_valuator())
                     .find(|valuator| valuator.label == pressure_label)?;
                 let pen = PenDevice {
-                    valuator: valuator.number,
-                    min: fp3232_to_f32(valuator.min),
-                    max: fp3232_to_f32(valuator.max),
+                    valuator: pressure.number,
+                    pressure_range: AxisRange::of(pressure),
                     pressure: 0.0,
                 };
                 Some((info.deviceid, pen))
@@ -113,9 +127,9 @@ impl Pens {
         if let Some(value) = get_valuator_axis_index(sample.valuator_mask, pen.valuator)
             .and_then(|index| sample.axisvalues.get(index))
         {
-            let range = pen.max - pen.min;
-            if range > 0.0 {
-                pen.pressure = ((fp3232_to_f32(*value) - pen.min) / range).clamp(0.0, 1.0);
+            let AxisRange { min, max } = pen.pressure_range;
+            if max > min {
+                pen.pressure = ((fp3232_to_f32(*value) - min) / (max - min)).clamp(0.0, 1.0);
             }
         }
         Some(if sample.touches {
@@ -153,8 +167,10 @@ mod tests {
     fn pens() -> Pens {
         let pen = PenDevice {
             valuator: 2,
-            min: 0.0,
-            max: 2048.0,
+            pressure_range: AxisRange {
+                min: 0.0,
+                max: 2048.0,
+            },
             pressure: 0.0,
         };
         Pens {

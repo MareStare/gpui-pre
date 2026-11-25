@@ -911,6 +911,11 @@ impl Drop for X11Window {
         // connection once no window is left in the client's window map, so both go now.
         state.renderer.take();
 
+        // The lock destroys its child window, so it ends before the window.
+        state
+            .client
+            .set_pointer_lock(self.0.x_window, state.x_root_window, None);
+
         maybe!({
             check_reply(
                 || "X11 DestroyWindow failure.",
@@ -1501,6 +1506,10 @@ impl PlatformWindow for X11Window {
     }
 
     fn mouse_position(&self) -> Point<Pixels> {
+        let client = self.0.state.borrow().client.clone();
+        if let Some(position) = client.pointer_lock_position(self.0.x_window) {
+            return position;
+        }
         get_reply(
             || "X11 QueryPointer failed.",
             self.0.xcb.query_pointer(self.0.x_window),
@@ -1513,6 +1522,13 @@ impl PlatformWindow for X11Window {
                 px(reply.win_y as f32 / scale_factor),
             )
         })
+    }
+
+    fn set_pointer_lock(&self, at: Option<Point<Pixels>>) -> bool {
+        let state = self.0.state.borrow();
+        let (client, root) = (state.client.clone(), state.x_root_window);
+        drop(state);
+        client.set_pointer_lock(self.0.x_window, root, at)
     }
 
     fn modifiers(&self) -> Modifiers {

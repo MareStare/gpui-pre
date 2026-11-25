@@ -17,7 +17,7 @@ use std::{
     rc::Rc,
 };
 
-use gpui::{PenApi, PenEvent, Point, point, px};
+use gpui::{PenApi, PenEvent, Pixels, Point, point, px};
 use windows::{
     Win32::{
         Foundation::{HANDLE, HWND, LPARAM, POINT, RECT, WPARAM},
@@ -172,8 +172,16 @@ impl WindowPen {
 
     /// Reads the pen input from a message of the window. The message goes
     /// on to the window procedure after it. `scale` is the scale factor of
-    /// the window.
-    pub(crate) fn handle_msg(&self, msg: u32, wparam: WPARAM, lparam: LPARAM, scale: f32) {
+    /// the window. A pen touches at `locked_pointer` while the pointer lock
+    /// holds the cursor.
+    pub(crate) fn handle_msg(
+        &self,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        scale: f32,
+        locked_pointer: Option<Point<Pixels>>,
+    ) {
         if !self.listening() {
             return;
         }
@@ -184,16 +192,17 @@ impl WindowPen {
                     && let Some(newest) = history.first()
                 {
                     let device = Some(newest.pointerInfo.sourceDevice);
-                    self.on_ink(&history, &WindowMap::read(hwnd, device, scale));
+                    let map = WindowMap::read(hwnd, device, scale);
+                    self.on_ink(&history, &map, locked_pointer);
                 }
             }
             WM_POINTERLEAVE | WM_POINTERCAPTURECHANGED if self.api.ink_on() => {
                 self.emit_one(PenEvent::Leave)
             }
             wintab::WT_PACKET | wintab::WT_PROXIMITY if !self.api.wintab_on() => {}
-            wintab::WT_PACKET => {
-                self.emit(|emit| self.wintab.read_packets(hwnd, lparam, scale, emit))
-            }
+            wintab::WT_PACKET => self.emit(locked_pointer, |emit| {
+                self.wintab.read_packets(hwnd, lparam, scale, emit)
+            }),
             // The low word is zero when the pen leaves the tablet.
             wintab::WT_PROXIMITY if lparam.loword() == 0 => self.emit_one(PenEvent::Leave),
             wintab::WT_PROXIMITY => self.emit_one(PenEvent::Hover),
@@ -211,9 +220,14 @@ impl WindowPen {
     }
 
     /// Gives the pen states of one Windows Ink message.
-    fn on_ink(&self, history: &[POINTER_PEN_INFO], map: &WindowMap) {
+    fn on_ink(
+        &self,
+        history: &[POINTER_PEN_INFO],
+        map: &WindowMap,
+        locked_pointer: Option<Point<Pixels>>,
+    ) {
         if self.api.note_ink(history) {
-            self.emit(|emit| ink_events(history, map, emit));
+            self.emit(locked_pointer, |emit| ink_events(history, map, emit));
         }
     }
 
@@ -223,17 +237,29 @@ impl WindowPen {
     }
 
     fn emit_one(&self, event: PenEvent) {
-        self.emit(|emit| emit(event));
+        self.emit(None, |emit| emit(event));
     }
 
-    /// Drops the events of a message that comes while the callback runs.
-    fn emit(&self, events: impl FnOnce(&mut dyn FnMut(PenEvent))) {
+    /// Drops the events of a message that comes while the callback runs. A
+    /// touch is at `locked_pointer` when it is set.
+    fn emit(
+        &self,
+        locked_pointer: Option<Point<Pixels>>,
+        events: impl FnOnce(&mut dyn FnMut(PenEvent)),
+    ) {
         let Some(callback) = self.callback.borrow().clone() else {
             return;
         };
-        if let Ok(mut callback) = callback.try_borrow_mut() {
-            events(&mut **callback);
-        }
+        let Ok(mut callback) = callback.try_borrow_mut() else {
+            return;
+        };
+        events(&mut |mut event| {
+            if let (PenEvent::Touch { position, .. }, Some(pointer)) = (&mut event, locked_pointer)
+            {
+                *position = pointer;
+            }
+            callback(event)
+        });
     }
 }
 
@@ -411,7 +437,7 @@ mod tests {
     #[test]
     fn the_pen_leaves_on_capture_change_out_of_proximity_and_on_deactivation() {
         let (pen, events) = window(&Rc::default());
-        let msg = |msg, wparam, lparam| pen.handle_msg(msg, WPARAM(wparam), lparam, 1.0);
+        let msg = |msg, wparam, lparam| pen.handle_msg(msg, WPARAM(wparam), lparam, 1.0, None);
         // Pointer 0 is not a pen.
         msg(WM_POINTERUPDATE, 0, OUT);
         msg(WM_ACTIVATE, 1, OUT);
@@ -430,7 +456,7 @@ mod tests {
     fn a_window_that_does_not_listen_gives_no_events() {
         let (pen, events) = window(&Rc::default());
         *pen.callback.borrow_mut() = None;
-        pen.handle_msg(wintab::WT_PROXIMITY, WPARAM(0), ENTER, 1.0);
+        pen.handle_msg(wintab::WT_PROXIMITY, WPARAM(0), ENTER, 1.0, None);
         pen.use_api();
         assert_eq!(take(&events), []);
     }
@@ -542,16 +568,23 @@ mod tests {
         let (pen, events) = window(&api);
         let map = WindowMap::new(None, POINT { x: 0, y: 0 }, 1.0);
         // A driver with no Windows Ink sends one message of a hovering pen.
-        pen.on_ink(&[state((0, 0), (5, 6), 0)], &map);
-        pen.handle_msg(wintab::WT_PROXIMITY, WPARAM(0), ENTER, 1.0);
+        pen.on_ink(&[state((0, 0), (5, 6), 0)], &map, None);
+        pen.handle_msg(wintab::WT_PROXIMITY, WPARAM(0), ENTER, 1.0, None);
         assert_eq!(take(&events), [PenEvent::Hover, PenEvent::Hover]);
         // Windows Ink gives a touch: the WinTab pen then does not come near.
-        pen.on_ink(&[state((0, 0), (5, 6), 512)], &map);
-        pen.handle_msg(wintab::WT_PROXIMITY, WPARAM(0), ENTER, 1.0);
+        pen.on_ink(&[state((0, 0), (5, 6), 512)], &map, None);
+        pen.handle_msg(wintab::WT_PROXIMITY, WPARAM(0), ENTER, 1.0, None);
         assert_eq!(take(&events), [touch(5.0, 6.0, 0.5)]);
+        // The pointer lock moves the touch to the virtual pointer.
+        pen.on_ink(
+            &[state((0, 0), (5, 6), 512)],
+            &map,
+            Some(point(px(1.0), px(2.0))),
+        );
+        assert_eq!(take(&events), [touch(1.0, 2.0, 0.5)]);
         // The other windows share the state of the API.
         let (other, other_events) = window(&api);
-        other.handle_msg(wintab::WT_PROXIMITY, WPARAM(0), ENTER, 1.0);
+        other.handle_msg(wintab::WT_PROXIMITY, WPARAM(0), ENTER, 1.0, None);
         assert_eq!(take(&other_events), []);
     }
 
@@ -563,17 +596,17 @@ mod tests {
         api.set(PenApi::Wintab);
         pen.use_api();
         assert_eq!(take(&events), [PenEvent::Leave]);
-        pen.handle_msg(wintab::WT_PROXIMITY, WPARAM(0), ENTER, 1.0);
-        pen.on_ink(&[state((0, 0), (5, 6), 512)], &map);
-        pen.handle_msg(WM_POINTERLEAVE, WPARAM(0), OUT, 1.0);
+        pen.handle_msg(wintab::WT_PROXIMITY, WPARAM(0), ENTER, 1.0, None);
+        pen.on_ink(&[state((0, 0), (5, 6), 512)], &map, None);
+        pen.handle_msg(WM_POINTERLEAVE, WPARAM(0), OUT, 1.0, None);
         assert_eq!(take(&events), [PenEvent::Hover]);
         assert!(!api.ink_touched.get());
         api.set(PenApi::WindowsInk);
         pen.use_api();
-        pen.handle_msg(wintab::WT_PROXIMITY, WPARAM(0), ENTER, 1.0);
-        pen.on_ink(&[state((0, 0), (5, 6), 512)], &map);
-        pen.handle_msg(wintab::WT_PROXIMITY, WPARAM(0), OUT, 1.0);
-        pen.handle_msg(WM_POINTERLEAVE, WPARAM(0), OUT, 1.0);
+        pen.handle_msg(wintab::WT_PROXIMITY, WPARAM(0), ENTER, 1.0, None);
+        pen.on_ink(&[state((0, 0), (5, 6), 512)], &map, None);
+        pen.handle_msg(wintab::WT_PROXIMITY, WPARAM(0), OUT, 1.0, None);
+        pen.handle_msg(WM_POINTERLEAVE, WPARAM(0), OUT, 1.0, None);
         assert_eq!(
             take(&events),
             [PenEvent::Leave, touch(5.0, 6.0, 0.5), PenEvent::Leave]

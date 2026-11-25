@@ -88,9 +88,13 @@ impl WindowsWindowInner {
     ) -> LRESULT {
         // The pen events go first: the window reads them on the mouse
         // events that the default window procedure makes from the message.
-        self.state
-            .pen
-            .handle_msg(msg, wparam, lparam, self.state.scale_factor.get());
+        self.state.pen.handle_msg(
+            msg,
+            wparam,
+            lparam,
+            self.state.scale_factor.get(),
+            self.locked_pointer(),
+        );
         let handled = match msg {
             // `DefWindowProc` answers `MA_NOACTIVATE` for a left click on `HTCAPTION`.
             // The activation is only triggered when `DefWindowProc` handles the following `WM_NCLBUTTONDOWN`.
@@ -115,6 +119,7 @@ impl WindowsWindowInner {
             WM_CLOSE => self.handle_close_msg(),
             WM_DESTROY => self.handle_destroy_msg(handle),
             WM_MOUSEMOVE => self.handle_mouse_move_msg(handle, lparam, wparam),
+            WM_INPUT => self.handle_input_msg(lparam),
             WM_MOUSELEAVE | WM_NCMOUSELEAVE => self.handle_mouse_leave_msg(),
             WM_NCMOUSEMOVE => self.handle_nc_mouse_move_msg(handle, lparam),
             // Treat double click as a second single click, since we track the double clicks ourselves.
@@ -330,6 +335,7 @@ impl WindowsWindowInner {
     }
 
     fn handle_destroy_msg(&self, handle: HWND) -> Option<isize> {
+        self.set_pointer_lock(None);
         let callback = { self.state.callbacks.close.take() };
         // Re-enable parent window if this was a modal dialog
         if let Some(parent_hwnd) = self.parent_hwnd {
@@ -355,6 +361,11 @@ impl WindowsWindowInner {
     }
 
     fn handle_mouse_move_msg(&self, handle: HWND, lparam: LPARAM, wparam: WPARAM) -> Option<isize> {
+        // The raw input moves the virtual pointer. The cursor moves only when it lost its clip.
+        if let Some(lock) = self.state.pointer_lock.get() {
+            lock.restore_clip();
+            return Some(0);
+        }
         self.start_tracking_mouse(handle, TME_LEAVE);
         self.restore_cursor_after_hide();
 
@@ -363,18 +374,7 @@ impl WindowsWindowInner {
         let scale_factor = self.state.scale_factor.get();
         let new_position = logical_point(x, y, scale_factor);
 
-        let pressed_button = match MODIFIERKEYS_FLAGS(wparam.loword() as u32) {
-            flags if flags.contains(MK_LBUTTON) => Some(MouseButton::Left),
-            flags if flags.contains(MK_RBUTTON) => Some(MouseButton::Right),
-            flags if flags.contains(MK_MBUTTON) => Some(MouseButton::Middle),
-            flags if flags.contains(MK_XBUTTON1) => {
-                Some(MouseButton::Navigate(NavigationDirection::Back))
-            }
-            flags if flags.contains(MK_XBUTTON2) => {
-                Some(MouseButton::Navigate(NavigationDirection::Forward))
-            }
-            _ => None,
-        };
+        let pressed_button = pressed_button(MODIFIERKEYS_FLAGS(wparam.loword() as u32));
 
         // Suppress synthetic WM_MOUSEMOVE events that Windows fires when a window
         // repaints under the cursor (e.g. command palette opening). These are not
@@ -397,6 +397,26 @@ impl WindowsWindowInner {
         let handled = !func(input).propagate;
         self.state.callbacks.input.set(Some(func));
         if handled { Some(0) } else { Some(1) }
+    }
+
+    fn handle_input_msg(&self, lparam: LPARAM) -> Option<isize> {
+        let mut lock = self.state.pointer_lock.get()?;
+        let moved = lock.move_by_raw_input(lparam, self.state.scale_factor.get());
+        self.state.pointer_lock.set(Some(lock));
+        if !moved {
+            return None;
+        }
+        self.restore_cursor_after_hide();
+        if let Some(mut func) = self.state.callbacks.input.take() {
+            func(PlatformInput::MouseMove(MouseMoveEvent {
+                position: lock.position,
+                pressed_button: pressed_button(held_mouse_buttons()),
+                modifiers: current_modifiers(),
+            }));
+            self.state.callbacks.input.set(Some(func));
+        }
+        // The default window procedure frees the raw input.
+        None
     }
 
     fn handle_mouse_leave_msg(&self) -> Option<isize> {
@@ -498,11 +518,10 @@ impl WindowsWindowInner {
         let y = lparam.signed_hiword();
         let physical_point = point(DevicePixels(x as i32), DevicePixels(y as i32));
         let click_count = self.state.click_state.update(button, physical_point);
-        let scale_factor = self.state.scale_factor.get();
 
         let input = PlatformInput::MouseDown(MouseDownEvent {
             button,
-            position: logical_point(x as f32, y as f32, scale_factor),
+            position: self.event_position(x as f32, y as f32),
             modifiers: current_modifiers(),
             click_count,
             first_mouse: false,
@@ -527,11 +546,10 @@ impl WindowsWindowInner {
         let x = lparam.signed_loword() as f32;
         let y = lparam.signed_hiword() as f32;
         let click_count = self.state.click_state.current_count.get();
-        let scale_factor = self.state.scale_factor.get();
 
         let input = PlatformInput::MouseUp(MouseUpEvent {
             button,
-            position: logical_point(x, y, scale_factor),
+            position: self.event_position(x, y),
             modifiers: current_modifiers(),
             click_count,
         });
@@ -567,7 +585,6 @@ impl WindowsWindowInner {
         let Some(mut func) = self.state.callbacks.input.take() else {
             return Some(1);
         };
-        let scale_factor = self.state.scale_factor.get();
         let wheel_scroll_amount = match modifiers.shift {
             true => self
                 .system_settings()
@@ -589,7 +606,7 @@ impl WindowsWindowInner {
         };
         unsafe { ScreenToClient(handle, &mut cursor_point).ok().log_err() };
         let input = PlatformInput::Scroll(ScrollEvent {
-            position: logical_point(cursor_point.x as f32, cursor_point.y as f32, scale_factor),
+            position: self.event_position(cursor_point.x as f32, cursor_point.y as f32),
             delta: ScrollDelta::Lines(match modifiers.shift {
                 true => Point {
                     x: wheel_distance,
@@ -619,7 +636,6 @@ impl WindowsWindowInner {
         let Some(mut func) = self.state.callbacks.input.take() else {
             return Some(1);
         };
-        let scale_factor = self.state.scale_factor.get();
         let wheel_scroll_chars = self
             .system_settings()
             .mouse_wheel_settings
@@ -634,7 +650,7 @@ impl WindowsWindowInner {
         };
         unsafe { ScreenToClient(handle, &mut cursor_point).ok().log_err() };
         let event = PlatformInput::Scroll(ScrollEvent {
-            position: logical_point(cursor_point.x as f32, cursor_point.y as f32, scale_factor),
+            position: self.event_position(cursor_point.x as f32, cursor_point.y as f32),
             delta: ScrollDelta::Lines(Point {
                 x: wheel_distance,
                 y: 0.0,
@@ -1795,6 +1811,36 @@ fn should_use_ime_cursor_position(ctx: HIMC, cursor_pos: usize) -> bool {
 #[inline]
 fn is_virtual_key_pressed(vkey: VIRTUAL_KEY) -> bool {
     unsafe { GetKeyState(vkey.0 as i32) < 0 }
+}
+
+/// The button that a mouse move reports when the `flags` show buttons as held.
+fn pressed_button(flags: MODIFIERKEYS_FLAGS) -> Option<MouseButton> {
+    match flags {
+        flags if flags.contains(MK_LBUTTON) => Some(MouseButton::Left),
+        flags if flags.contains(MK_RBUTTON) => Some(MouseButton::Right),
+        flags if flags.contains(MK_MBUTTON) => Some(MouseButton::Middle),
+        flags if flags.contains(MK_XBUTTON1) => {
+            Some(MouseButton::Navigate(NavigationDirection::Back))
+        }
+        flags if flags.contains(MK_XBUTTON2) => {
+            Some(MouseButton::Navigate(NavigationDirection::Forward))
+        }
+        _ => None,
+    }
+}
+
+/// The held mouse buttons, as of the message that the thread handles.
+fn held_mouse_buttons() -> MODIFIERKEYS_FLAGS {
+    [
+        (VK_LBUTTON, MK_LBUTTON),
+        (VK_RBUTTON, MK_RBUTTON),
+        (VK_MBUTTON, MK_MBUTTON),
+        (VK_XBUTTON1, MK_XBUTTON1),
+        (VK_XBUTTON2, MK_XBUTTON2),
+    ]
+    .into_iter()
+    .filter(|(vkey, _)| is_virtual_key_pressed(*vkey))
+    .fold(MODIFIERKEYS_FLAGS(0), |flags, (_, flag)| flags | flag)
 }
 
 #[inline]

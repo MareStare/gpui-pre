@@ -38,11 +38,18 @@ pub(crate) struct TestWindowState {
     visibility: WindowVisibility,
     visibility_callback: Option<Box<dyn FnMut(WindowVisibility)>>,
     hover_status_change_callback: Option<Box<dyn FnMut(bool)>>,
+    pointer_unlock_callback: Option<Box<dyn FnMut()>>,
     resize_callback: Option<Box<dyn FnMut(Size<Pixels>, f32)>>,
     visual_viewport: Option<Bounds<Pixels>>,
     visual_viewport_callback: Option<Box<dyn FnMut()>>,
     insets: WindowInsets,
     decorations: Decorations,
+
+    /// Where the system cursor is. It moves only to the point of a pointer lock.
+    mouse_position: Point<Pixels>,
+
+    /// The point that the pointer lock holds the system cursor at.
+    pointer_lock: Option<Point<Pixels>>,
     insets_callback: Option<Box<dyn FnMut(WindowInsets)>>,
     virtual_keyboard_requests: usize,
     virtual_keyboard_dismissals: usize,
@@ -117,11 +124,14 @@ impl TestWindow {
             visibility: WindowVisibility::Visible,
             visibility_callback: None,
             hover_status_change_callback: None,
+            pointer_unlock_callback: None,
             resize_callback: None,
             visual_viewport: None,
             visual_viewport_callback: None,
             insets: WindowInsets::default(),
             decorations: Decorations::Server,
+            mouse_position: Point::default(),
+            pointer_lock: None,
             insets_callback: None,
             virtual_keyboard_requests: 0,
             virtual_keyboard_dismissals: 0,
@@ -227,6 +237,11 @@ impl TestWindow {
         }
     }
 
+    /// The point that the pointer lock holds the system cursor at.
+    pub fn pointer_lock(&self) -> Option<Point<Pixels>> {
+        self.0.lock().pointer_lock
+    }
+
     pub fn virtual_keyboard_requests(&self) -> usize {
         self.0.lock().virtual_keyboard_requests
     }
@@ -283,6 +298,19 @@ impl TestWindow {
     #[cfg(test)]
     pub(crate) fn simulate_hover_status_change(&self, hovered: bool) {
         self.simulate_status_change(|state| &mut state.hover_status_change_callback, hovered);
+    }
+
+    /// Ends the pointer lock as a platform that releases the cursor by itself.
+    #[cfg(test)]
+    pub(crate) fn simulate_pointer_unlock(&self) {
+        let mut lock = self.0.lock();
+        lock.pointer_lock = None;
+        let Some(mut callback) = lock.pointer_unlock_callback.take() else {
+            return;
+        };
+        drop(lock);
+        callback();
+        self.0.lock().pointer_unlock_callback = Some(callback);
     }
 
     fn simulate_status_change(
@@ -427,7 +455,16 @@ impl PlatformWindow for TestWindow {
     }
 
     fn mouse_position(&self) -> Point<Pixels> {
-        Point::default()
+        self.0.lock().mouse_position
+    }
+
+    fn set_pointer_lock(&self, at: Option<Point<Pixels>>) -> bool {
+        let mut state = self.0.lock();
+        if let Some(at) = at {
+            state.mouse_position = at;
+        }
+        state.pointer_lock = at;
+        at.is_some()
     }
 
     fn modifiers(&self) -> crate::Modifiers {
@@ -574,6 +611,10 @@ impl PlatformWindow for TestWindow {
 
     fn on_hover_status_change(&self, callback: Box<dyn FnMut(bool)>) {
         self.0.lock().hover_status_change_callback = Some(callback)
+    }
+
+    fn on_pointer_unlock(&self, callback: Box<dyn FnMut()>) {
+        self.0.lock().pointer_unlock_callback = Some(callback)
     }
 
     fn on_resize(&self, callback: Box<dyn FnMut(Size<Pixels>, f32)>) {

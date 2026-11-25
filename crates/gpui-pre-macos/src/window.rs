@@ -22,7 +22,7 @@ use gpui::{
 use core_foundation::base::{CFRelease, CFTypeRef};
 use core_foundation_sys::base::CFEqual;
 use core_foundation_sys::number::{CFBooleanGetValue, CFBooleanRef};
-use core_graphics::display::CGDirectDisplayID;
+use core_graphics::display::{CGDirectDisplayID, CGDisplay, CGPoint};
 use ctor::ctor;
 use futures::channel::oneshot;
 use gpui_apple::display_link::MetalFrameSource;
@@ -717,6 +717,9 @@ struct MacWindowState {
     accesskit_adapter: Option<accesskit_macos::SubclassingAdapter>,
     // The parent window if this window is a sheet (Dialog kind)
     sheet_parent: Option<*mut AnyObject>,
+
+    /// The virtual pointer of the pointer lock, in the coordinates of the content view.
+    pointer_lock: Option<Point<Pixels>>,
 }
 
 impl MacWindowState {
@@ -1008,6 +1011,16 @@ impl MacWindowState {
         get_scale_factor(self.native_window)
     }
 
+    /// Connects the mouse to the cursor again. Does nothing when the pointer is not locked.
+    fn release_pointer_lock(&mut self) {
+        if self.pointer_lock.take().is_none() {
+            return;
+        }
+        if let Err(error) = CGDisplay::associate_mouse_and_mouse_cursor_position(true) {
+            log::error!("failed to release the pointer lock: CGError {error}");
+        }
+    }
+
     fn window_bounds(&self) -> WindowBounds {
         if self.is_fullscreen() {
             WindowBounds::Fullscreen(self.fullscreen_restore_bounds)
@@ -1244,6 +1257,7 @@ impl MacWindow {
                     closed: Arc::new(AtomicBool::new(false)),
                     accesskit_adapter: None,
                     sheet_parent: None,
+                    pointer_lock: None,
                 })
             });
             let frame_wakers = Rc::new(FrameWakers {
@@ -1493,6 +1507,7 @@ impl Drop for MacWindow {
         // the adapter here so the native view, its `CAMetalLayer` and the
         // renderer's command queue are actually released with the window.
         drop(this.accesskit_adapter.take());
+        this.release_pointer_lock();
         this.renderer.destroy();
         let window = this.native_window;
         let sheet_parent = this.sheet_parent.take();
@@ -1769,12 +1784,54 @@ impl PlatformWindow for MacWindow {
     }
 
     fn mouse_position(&self) -> Point<Pixels> {
-        let position = self
-            .0
-            .lock()
-            .native_window()
-            .mouseLocationOutsideOfEventStream();
-        convert_mouse_position(position, self.content_size().height)
+        let lock = self.0.lock();
+        if let Some(pointer) = lock.pointer_lock {
+            return pointer;
+        }
+        let position = lock.native_window().mouseLocationOutsideOfEventStream();
+        convert_mouse_position(position, lock.content_size().height)
+    }
+
+    // See https://github.com/libsdl-org/SDL/blob/c561a675b676f42d0d2980516649a3cbe14a991a/src/video/cocoa/SDL_cocoamouse.m#L635
+    // and https://github.com/rust-windowing/winit/blob/b1a0534633c3afffd604c8ed7156e7d8617b266d/winit-appkit/src/window_delegate.rs#L1697
+    fn set_pointer_lock(&self, at: Option<Point<Pixels>>) -> bool {
+        let mut lock = self.0.lock();
+        let Some(at) = at else {
+            lock.release_pointer_lock();
+            return false;
+        };
+        if lock.pointer_lock.is_none() {
+            let height = lock.content_size().height;
+            let cursor = convert_mouse_position(
+                lock.native_window().mouseLocationOutsideOfEventStream(),
+                height,
+            );
+            // The cursor can be away from `at` when it left the window.
+            if (cursor - at).magnitude() >= 0.5 {
+                let on_screen = lock.native_window().convertPointToScreen(NSPoint::new(
+                    f64::from(at.x.as_f32()),
+                    f64::from((height - at.y).as_f32()),
+                ));
+                // The display space has its origin at the top left of the main display, and
+                // its y axis goes down.
+                let main_height = CGDisplay::main().bounds().size.height;
+                let point = CGPoint::new(on_screen.x, main_height - on_screen.y);
+                if let Err(error) = CGDisplay::warp_mouse_cursor_position(point) {
+                    log::error!("failed to move the cursor to the pointer lock: CGError {error}");
+                    return false;
+                }
+                // A warp stops the mouse events for a short time. This gives them back at
+                // once.
+                let _ = CGDisplay::associate_mouse_and_mouse_cursor_position(true);
+            }
+            let result = CGDisplay::associate_mouse_and_mouse_cursor_position(false);
+            if let Err(error) = result {
+                log::error!("failed to lock the pointer: CGError {error}");
+                return false;
+            }
+        }
+        lock.pointer_lock = Some(at);
+        true
     }
 
     fn modifiers(&self) -> Modifiers {
@@ -2818,7 +2875,7 @@ extern "C" fn handle_key_event(
     let mut lock = window_state.as_ref().lock();
 
     let window_height = lock.content_size().height;
-    let event = unsafe { platform_input_from_native(native_event, Some(window_height)) };
+    let event = unsafe { platform_input_from_native(native_event, Some(window_height), None) };
 
     let Some(event) = event else {
         return Bool::NO;
@@ -2979,10 +3036,25 @@ extern "C" fn handle_view_event(this: &AnyObject, _: Sel, native_event: *mut Any
         }
         _ => {}
     }
+    let ns_event = unsafe { native_event.cast::<NSEvent>().as_ref() };
+    let is_motion = matches!(
+        native_event_type,
+        NSEventType::MouseMoved
+            | NSEventType::LeftMouseDragged
+            | NSEventType::RightMouseDragged
+            | NSEventType::OtherMouseDragged
+    );
+    if let (Some(pointer), Some(ns_event), true) = (&mut lock.pointer_lock, ns_event, is_motion) {
+        // The cursor stays still, so the relative motion moves the virtual pointer.
+        *pointer += point(px(ns_event.deltaX() as f32), px(ns_event.deltaY() as f32));
+    }
+    let pointer = lock.pointer_lock;
     // The pen state goes first: the window reads it on the mouse event of
     // the same sample.
-    let pen = unsafe { native_event.cast::<NSEvent>().as_ref() }
-        .and_then(|event| pen_event(event, window_height));
+    let mut pen = ns_event.and_then(|event| pen_event(event, window_height));
+    if let (Some(PenEvent::Touch { position, .. }), Some(pointer)) = (&mut pen, pointer) {
+        *position = pointer;
+    }
     if let Some(pen) = pen
         && let Some(mut callback) = lock.pen_callback.take()
     {
@@ -2991,7 +3063,7 @@ extern "C" fn handle_view_event(this: &AnyObject, _: Sel, native_event: *mut Any
         lock = window_state.as_ref().lock();
         lock.pen_callback = Some(callback);
     }
-    let event = unsafe { platform_input_from_native(native_event, Some(window_height)) };
+    let event = unsafe { platform_input_from_native(native_event, Some(window_height), pointer) };
 
     if let Some(mut event) = event {
         // AppKit unhides the cursor on the next mouse movement; mirror that here.
@@ -3340,8 +3412,14 @@ fn report_display_change(window_state: &Rc<Mutex<MacWindowState>>) {
 extern "C" fn window_did_change_key_status(this: &AnyObject, selector: Sel, _: *mut AnyObject) {
     let signal_at = PlatformFrameSignal::capture(scheduler::Instant::now);
     let window_state = unsafe { get_window_state(this) };
-    let lock = window_state.lock();
+    let mut lock = window_state.lock();
     let is_active = lock.native_window().isKeyWindow();
+
+    // The pointer lock disconnects the mouse from the cursor in the whole system. The window
+    // also resigns key when the app deactivates.
+    if selector == sel!(windowDidResignKey:) {
+        lock.release_pointer_lock();
+    }
 
     // AppKit also unhides the cursor on activation changes, so mirror that here.
     lock.cursor_visible.store(true, Ordering::Relaxed);
@@ -3441,6 +3519,7 @@ extern "C" fn close_window(this: &AnyObject, _: Sel) {
             let window_state = get_window_state(this);
             let mut lock = window_state.as_ref().lock();
             lock.closed.store(true, Ordering::Release);
+            lock.release_pointer_lock();
             (
                 lock.close_callback.take(),
                 lock.simple_fullscreen_state.take(),

@@ -1084,6 +1084,9 @@ pub(crate) struct Frame {
     pub(crate) cursors: Vec<HitboxCursorRequest>,
     /// The hitboxes that capture the pointer in this frame. The last one wins.
     pointer_captures: Vec<HitboxId>,
+
+    /// The number of times this frame declares the pointer lock. With none, the lock ends.
+    pointer_locks: usize,
     /// The areas that the tooltips of this frame show in. With none, they show anywhere.
     pub(crate) tooltip_confines: Vec<Bounds<Pixels>>,
     /// The frame draws a one-shot animation or a spring before its end.
@@ -1101,6 +1104,7 @@ pub(crate) struct Frame {
 pub(crate) struct PrepaintStateIndex {
     hitboxes_index: usize,
     pointer_captures_index: usize,
+    pointer_locks_index: usize,
     tooltip_confines_index: usize,
     tooltips_index: usize,
     deferred_draws_index: usize,
@@ -1190,6 +1194,7 @@ impl Frame {
             tooltip_requests: Vec::new(),
             cursors: Vec::new(),
             pointer_captures: Vec::new(),
+            pointer_locks: 0,
             tooltip_confines: Vec::new(),
             animating: false,
 
@@ -1215,6 +1220,7 @@ impl Frame {
         self.tooltip_requests.clear();
         self.cursors.clear();
         self.pointer_captures.clear();
+        self.pointer_locks = 0;
         self.tooltip_confines.clear();
         self.hitboxes.clear();
         self.window_control_hitboxes.clear();
@@ -1358,6 +1364,8 @@ pub struct Window {
     default_prevented: bool,
     click_cancelled: bool,
     mouse_position: Point<Pixels>,
+
+    pointer_lock: Option<PointerLock>,
     mouse_hover: MouseHover,
     modifiers: Modifiers,
     capslock: Capslock,
@@ -1402,6 +1410,18 @@ pub struct Window {
     #[cfg(feature = "profiler")]
     debug_frame_overlay: crate::debug_overlay::DebugFrameOverlay,
     pub(crate) a11y: A11y,
+}
+
+/// A pointer lock of a window.
+#[derive(Clone, Copy)]
+struct PointerLock {
+    /// The point that the lock holds the system cursor at.
+    at: Point<Pixels>,
+
+    /// The bounds of the window when the lock started. The cursor stays at a point of the
+    /// screen, so a change of the bounds or of the scale factor ends the lock.
+    bounds: Bounds<Pixels>,
+    scale_factor: f32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2233,6 +2253,14 @@ impl Window {
                     .log_err();
             }
         }));
+        platform_window.on_pointer_unlock(Box::new({
+            let mut cx = cx.to_async();
+            move || {
+                handle
+                    .update(&mut cx, |_, window, cx| window.pointer_unlocked(cx))
+                    .log_err();
+            }
+        }));
         platform_window.on_display_changed(Box::new({
             let cx = cx.to_async();
             move || cx.update(|cx| Window::display_changed(handle, cx))
@@ -2279,6 +2307,7 @@ impl Window {
                 handle
                     .update(&mut cx, |_, window, cx| {
                         window.active.set(active);
+                        window.unlock_pointer(cx);
                         window.modifiers = window.platform_window.modifiers();
                         window.capslock = window.platform_window.capslock();
                         window
@@ -2484,6 +2513,7 @@ impl Window {
             default_prevented: true,
             click_cancelled: false,
             mouse_position,
+            pointer_lock: None,
             mouse_hover: MouseHover::default(),
             modifiers,
             capslock,
@@ -3128,6 +3158,12 @@ impl Window {
     /// the platform window, then notifies observers. Normally called automatically
     /// by the platform's resize callback, but exposed publicly for test infrastructure.
     pub fn bounds_changed(&mut self, cx: &mut App) {
+        if self.pointer_lock.is_some_and(|lock| {
+            lock.bounds != self.platform_window.bounds()
+                || lock.scale_factor != self.platform_window.scale_factor()
+        }) {
+            self.unlock_pointer(cx);
+        }
         self.scale_factor = self.platform_window.scale_factor();
         self.viewport_size = self.platform_window.content_size();
         self.mouse_position = self.platform_window.mouse_position();
@@ -3805,6 +3841,71 @@ impl Window {
         self.mouse_position
     }
 
+    /// Locks the pointer, as in <https://w3c.github.io/pointerlock/>: holds the system cursor
+    /// at the mouse position, while the mouse events report a virtual pointer that the
+    /// relative motion of the mouse moves. The cursor style still decides if the cursor shows.
+    ///
+    /// Only a call outside a draw starts a lock, such as in the press listener of a drag. It
+    /// fails when the window is not active or the platform has no pointer lock. A lock lasts
+    /// one frame. Call this in the prepaint of each frame of the drag to keep the lock. A call
+    /// in prepaint starts no lock. The release of the last held mouse button ends the lock
+    /// after its listeners run, and so do a change of the active status and of the bounds of
+    /// the window. At the end of the lock, the mouse moves to the point of the lock, where the
+    /// cursor is. Returns whether the pointer is locked.
+    pub fn lock_pointer(&mut self) -> bool {
+        match self.invalidator.draw_phase() {
+            DrawPhase::Prepaint => self.next_frame.pointer_locks += 1,
+            DrawPhase::Paint => gpui_util::debug_panic!("a pointer lock can't start in paint"),
+            DrawPhase::None | DrawPhase::Focus => {
+                if self.pointer_lock.is_none()
+                    && self.is_window_active()
+                    && self
+                        .platform_window
+                        .set_pointer_lock(Some(self.mouse_position))
+                {
+                    self.pointer_lock = Some(PointerLock {
+                        at: self.mouse_position,
+                        bounds: self.platform_window.bounds(),
+                        scale_factor: self.scale_factor,
+                    });
+                    // A frame with no declaration ends the lock.
+                    self.refresh();
+                }
+            }
+        }
+        self.pointer_lock.is_some()
+    }
+
+    /// The point that the pointer lock holds the system cursor at, if the pointer is locked.
+    pub fn pointer_lock(&self) -> Option<Point<Pixels>> {
+        Some(self.pointer_lock?.at)
+    }
+
+    /// Ends the pointer lock. The mouse moves to the point of the lock, where the cursor is.
+    fn unlock_pointer(&mut self, cx: &mut App) {
+        if self.pointer_lock.is_some() {
+            self.platform_window.set_pointer_lock(None);
+            self.pointer_unlocked(cx);
+        }
+    }
+
+    /// Ends the pointer lock that the platform released. The mouse moves to the point of the
+    /// lock, where the cursor is.
+    fn pointer_unlocked(&mut self, cx: &mut App) {
+        let Some(lock) = self.pointer_lock.take() else {
+            return;
+        };
+        self.mouse_position = lock.at;
+        self.defer(cx, |window, cx| {
+            let event = MouseMoveEvent {
+                position: window.mouse_position,
+                pressed_button: window.mouse_hover.held_button(),
+                modifiers: window.modifiers,
+            };
+            window.dispatch_event(PlatformInput::MouseMove(event), cx);
+        });
+    }
+
     /// Captures the pointer for the hitbox, as in
     /// <https://w3c.github.io/pointerevents/#pointer-capture>. While the capture lasts, this
     /// hitbox and the hitboxes beneath it, such as its ancestors, are hovered as if the mouse
@@ -4247,6 +4348,9 @@ impl Window {
         }
 
         self.capture_pointer_as_declared();
+        if self.next_frame.pointer_locks == 0 {
+            self.unlock_pointer(cx);
+        }
         self.mouse_hover
             .update(&self.next_frame, self.mouse_position);
 
@@ -4494,6 +4598,7 @@ impl Window {
         PrepaintStateIndex {
             hitboxes_index: self.next_frame.hitboxes.len(),
             pointer_captures_index: self.next_frame.pointer_captures.len(),
+            pointer_locks_index: self.next_frame.pointer_locks,
             tooltip_confines_index: self.next_frame.tooltip_confines.len(),
             tooltips_index: self.next_frame.tooltip_requests.len(),
             deferred_draws_index: self.next_frame.deferred_draws.len(),
@@ -4513,6 +4618,8 @@ impl Window {
             &self.rendered_frame.pointer_captures
                 [range.start.pointer_captures_index..range.end.pointer_captures_index],
         );
+        self.next_frame.pointer_locks +=
+            range.end.pointer_locks_index - range.start.pointer_locks_index;
         self.next_frame.tooltip_confines.extend_from_slice(
             &self.rendered_frame.tooltip_confines
                 [range.start.tooltip_confines_index..range.end.tooltip_confines_index],
@@ -4806,6 +4913,7 @@ impl Window {
             self.next_frame
                 .pointer_captures
                 .truncate(index.pointer_captures_index);
+            self.next_frame.pointer_locks = index.pointer_locks_index;
             self.next_frame
                 .tooltip_confines
                 .truncate(index.tooltip_confines_index);
@@ -6599,6 +6707,8 @@ impl Window {
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         if self.is_inspector_picking(cx) {
+            // The inspector picks with the system cursor.
+            self.unlock_pointer(cx);
             self.reset_cursor_style(cx);
             self.handle_inspector_mouse_event(event, cx);
             // When inspector is picking, all other mouse handling is skipped.
@@ -6650,6 +6760,9 @@ impl Window {
             .end_mouse_event(event, capture, cx.has_active_drag())
         {
             self.update_mouse_hover();
+        }
+        if event.is::<MouseUpEvent>() && self.mouse_hover.held_button().is_none() {
+            self.unlock_pointer(cx);
         }
 
         // Runs after the listeners so that a drag they start takes effect in this event. Resolving

@@ -55,6 +55,7 @@ pub(crate) struct Callbacks {
     active_status_change: Option<Box<dyn FnMut(bool)>>,
     visibility_change: Option<Box<dyn FnMut(WindowVisibility)>>,
     hover_status_change: Option<Box<dyn FnMut(bool)>>,
+    pointer_unlock: Option<Box<dyn FnMut()>>,
     resize: Option<Box<dyn FnMut(Size<Pixels>, f32)>>,
     moved: Option<Box<dyn FnMut()>>,
     display_changed: Option<Box<dyn FnMut()>>,
@@ -1633,6 +1634,14 @@ impl WaylandWindowStatePtr {
         }
     }
 
+    pub fn pointer_unlocked(&self) {
+        let callback = self.callbacks.borrow_mut().pointer_unlock.take();
+        if let Some(mut fun) = callback {
+            fun();
+            self.callbacks.borrow_mut().pointer_unlock = Some(fun);
+        }
+    }
+
     fn report_display_changed(&self) {
         let callback = self.callbacks.borrow_mut().display_changed.take();
         if let Some(mut callback) = callback {
@@ -1846,6 +1855,11 @@ impl PlatformWindow for WaylandWindow {
             .unwrap_or_default()
     }
 
+    fn set_pointer_lock(&self, at: Option<Point<Pixels>>) -> bool {
+        let client = self.borrow().client.clone();
+        client.set_pointer_lock(&self.0, at)
+    }
+
     fn modifiers(&self) -> Modifiers {
         self.borrow().client.get_client().borrow().modifiers
     }
@@ -2008,6 +2022,10 @@ impl PlatformWindow for WaylandWindow {
 
     fn on_moved(&self, callback: Box<dyn FnMut()>) {
         self.0.callbacks.borrow_mut().moved = Some(callback);
+    }
+
+    fn on_pointer_unlock(&self, callback: Box<dyn FnMut()>) {
+        self.0.callbacks.borrow_mut().pointer_unlock = Some(callback);
     }
 
     fn on_display_changed(&self, callback: Box<dyn FnMut()>) {

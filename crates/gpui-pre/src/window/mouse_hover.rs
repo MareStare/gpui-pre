@@ -43,6 +43,11 @@ impl MouseHover {
         self.follows_capture
     }
 
+    /// The first held mouse button.
+    pub(super) fn held_button(&self) -> Option<MouseButton> {
+        self.held.first().copied()
+    }
+
     pub(super) fn captured(&self) -> Option<HitboxId> {
         self.captured
     }

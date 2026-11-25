@@ -44,6 +44,9 @@ use wayland_client::{
 use wayland_protocols::ext::background_effect::v1::client::{
     ext_background_effect_manager_v1, ext_background_effect_surface_v1,
 };
+use wayland_protocols::wp::pointer_constraints::zv1::client::{
+    zwp_locked_pointer_v1, zwp_pointer_constraints_v1,
+};
 use wayland_protocols::wp::pointer_gestures::zv1::client::{
     zwp_pointer_gesture_pinch_v1, zwp_pointer_gestures_v1,
 };
@@ -53,6 +56,9 @@ use wayland_protocols::wp::primary_selection::zv1::client::zwp_primary_selection
 use wayland_protocols::wp::primary_selection::zv1::client::{
     zwp_primary_selection_device_manager_v1, zwp_primary_selection_device_v1,
     zwp_primary_selection_source_v1,
+};
+use wayland_protocols::wp::relative_pointer::zv1::client::{
+    zwp_relative_pointer_manager_v1, zwp_relative_pointer_v1,
 };
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::{
     ContentHint, ContentPurpose,
@@ -262,6 +268,9 @@ pub struct Globals {
         Option<ext_background_effect_manager_v1::ExtBackgroundEffectManagerV1>,
     pub text_input_manager: Option<zwp_text_input_manager_v3::ZwpTextInputManagerV3>,
     pub gesture_manager: Option<zwp_pointer_gestures_v1::ZwpPointerGesturesV1>,
+    pub pointer_constraints: Option<zwp_pointer_constraints_v1::ZwpPointerConstraintsV1>,
+    pub relative_pointer_manager:
+        Option<zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1>,
     pub dialog: Option<xdg_wm_dialog_v1::XdgWmDialogV1>,
     pub system_bell: Option<xdg_system_bell_v1::XdgSystemBellV1>,
     pub tablet_manager: Option<ZwpTabletManagerV2>,
@@ -314,6 +323,8 @@ impl Globals {
             background_effects_manager: globals.bind(&qh, 1..=1, ()).ok(),
             text_input_manager: globals.bind(&qh, 1..=1, ()).ok(),
             gesture_manager: globals.bind(&qh, 1..=3, ()).ok(),
+            pointer_constraints: globals.bind(&qh, 1..=1, ()).ok(),
+            relative_pointer_manager: globals.bind(&qh, 1..=1, ()).ok(),
             dialog: globals.bind(&qh, dialog_v..=dialog_v, ()).ok(),
             system_bell: globals.bind(&qh, 1..=1, ()).ok(),
             tablet_manager: globals.bind(&qh, 1..=1, ()).ok(),
@@ -399,7 +410,12 @@ pub(crate) struct WaylandClientState {
     pub modifiers: Modifiers,
     pub capslock: Capslock,
     axis_source: AxisSource,
+
+    /// Where the mouse is on the focused window. While the pointer is locked, the
+    /// relative motion of the mouse moves it from the point of the lock.
     pub mouse_location: Option<Point<Pixels>>,
+
+    pointer_lock: Option<PointerLock>,
     continuous_scroll_delta: Option<Point<Pixels>>,
     discrete_scroll_delta: Option<Point<f32>>,
     vertical_modifier: f32,
@@ -425,6 +441,27 @@ pub(crate) struct WaylandClientState {
     registrations: Vec<RegistrationToken>,
     pub common: Rc<RefCell<LinuxCommon>>,
     ime_enabled: Option<bool>,
+}
+
+/// Holds the cursor at a point of the window under the mouse.
+struct PointerLock {
+    window: WaylandWindowStatePtr,
+
+    /// The point that the lock holds the cursor at.
+    at: Point<Pixels>,
+
+    /// The compositor holds the cursor. Until then, the cursor moves the mouse as with no
+    /// lock.
+    active: bool,
+    locked_pointer: zwp_locked_pointer_v1::ZwpLockedPointerV1,
+    relative_pointer: zwp_relative_pointer_v1::ZwpRelativePointerV1,
+}
+
+impl PointerLock {
+    fn destroy(&self) {
+        self.relative_pointer.destroy();
+        self.locked_pointer.destroy();
+    }
 }
 
 struct DragState<DataOffer = wl_data_offer::WlDataOffer, Window = WaylandWindowStatePtr> {
@@ -907,7 +944,57 @@ impl WaylandClientStatePtr {
         {
             state.cursor_hidden_window = Some(window);
         }
+        state.end_pointer_lock(|lock| lock.window.ptr_eq(&closed_window));
         state.tablets.drop_window(&closed_window);
+    }
+
+    /// Holds the cursor at `at` in the window, or releases it with `None`. Returns whether
+    /// the cursor is held.
+    pub(super) fn set_pointer_lock(
+        &self,
+        window: &WaylandWindowStatePtr,
+        at: Option<Point<Pixels>>,
+    ) -> bool {
+        let client = self.get_client();
+        let mut state = client.borrow_mut();
+        let Some(at) = at else {
+            state.end_pointer_lock(|lock| lock.window.ptr_eq(window));
+            return false;
+        };
+        // The pointer has one lock.
+        if !state.is_mouse_over(window) || state.pointer_lock.is_some() {
+            return false;
+        }
+        let globals = &state.globals;
+        let (Some(constraints), Some(relative_pointer_manager), Some(wl_pointer)) = (
+            &globals.pointer_constraints,
+            &globals.relative_pointer_manager,
+            &state.wl_pointer,
+        ) else {
+            return false;
+        };
+        let surface = window.surface();
+        let locked_pointer = constraints.lock_pointer(
+            &surface,
+            wl_pointer,
+            None,
+            zwp_pointer_constraints_v1::Lifetime::Oneshot,
+            &globals.qh,
+            (),
+        );
+        locked_pointer.set_cursor_position_hint(at.x.into(), at.y.into());
+        // The hint applies on the next commit of the surface.
+        surface.commit();
+        let relative_pointer =
+            relative_pointer_manager.get_relative_pointer(wl_pointer, &globals.qh, ());
+        state.pointer_lock = Some(PointerLock {
+            window: window.clone(),
+            at,
+            active: false,
+            locked_pointer,
+            relative_pointer,
+        });
+        true
     }
 }
 
@@ -950,6 +1037,50 @@ impl WaylandClientState {
         self.apply_cursor(serial.as_raw());
     }
 
+    /// Ends the pointer lock if `ends` holds for it. The position hint of the lock puts the
+    /// cursor at its point. Returns the window of the lock.
+    fn end_pointer_lock(
+        &mut self,
+        ends: impl FnOnce(&PointerLock) -> bool,
+    ) -> Option<WaylandWindowStatePtr> {
+        let lock = self.pointer_lock.take_if(|lock| ends(lock))?;
+        if lock.active {
+            self.mouse_location = Some(lock.at);
+        }
+        lock.destroy();
+        Some(lock.window)
+    }
+
+    /// Moves the mouse to `position` on the focused window. Returns the window and the
+    /// event to send to it.
+    fn move_mouse(
+        &mut self,
+        position: Point<Pixels>,
+    ) -> Option<(WaylandWindowStatePtr, PlatformInput)> {
+        let window = self.mouse_focused_window.clone()?;
+        self.mouse_location = Some(position);
+        self.restore_cursor_after_hide();
+        if window.is_blocked() {
+            let default_cursor = CursorRequest::default();
+            if self.requested_cursor.as_ref() != Some(&default_cursor) {
+                self.set_cursor(default_cursor);
+            }
+        }
+        if self
+            .keyboard_focused_window
+            .as_ref()
+            .is_some_and(|keyboard_window| window.ptr_eq(keyboard_window))
+        {
+            self.enter_token = None;
+        }
+        let input = PlatformInput::MouseMove(MouseMoveEvent {
+            position,
+            pressed_button: self.button_pressed,
+            modifiers: self.modifiers,
+        });
+        Some((window, input))
+    }
+
     /// Shows the current cursor on the pointer.
     fn apply_cursor(&mut self, serial: u32) {
         let Some(cursor) = &self.requested_cursor else {
@@ -989,6 +1120,7 @@ impl Drop for WaylandConnection {
         }
 
         let mut state = self.0.borrow_mut();
+        state.end_pointer_lock(|_| true);
         state.windows.clear();
 
         if let Some(wl_pointer) = &state.wl_pointer {
@@ -1210,6 +1342,7 @@ impl WaylandConnection {
             scroll_event_received: false,
             axis_source: AxisSource::Wheel,
             mouse_location: None,
+            pointer_lock: None,
             continuous_scroll_delta: None,
             discrete_scroll_delta: None,
             vertical_modifier: -1.0,
@@ -2072,11 +2205,16 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandClientStatePtr {
                     },
                 );
 
+                let unlocked = state.end_pointer_lock(|_| true);
                 if let Some(wl_pointer) = &state.wl_pointer {
                     wl_pointer.release();
                 }
 
                 state.wl_pointer = Some(pointer);
+                drop(state);
+                if let Some(window) = unlocked {
+                    window.pointer_unlocked();
+                }
             }
         }
     }
@@ -2476,6 +2614,11 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
                 }
             }
             wl_pointer::Event::Leave { .. } => {
+                if let Some(window) = state.end_pointer_lock(|_| true) {
+                    drop(state);
+                    window.pointer_unlocked();
+                    state = client.borrow_mut();
+                }
                 if let Some(focused_window) = state.mouse_focused_window.clone() {
                     let input = PlatformInput::MouseExited(MouseExitEvent {
                         position: state.mouse_location.unwrap(),
@@ -2497,31 +2640,12 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
                 surface_y,
                 ..
             } => {
-                if state.mouse_focused_window.is_none() {
+                // The relative motion moves the locked pointer.
+                if state.pointer_lock.as_ref().is_some_and(|lock| lock.active) {
                     return;
                 }
-                state.mouse_location = Some(point(px(surface_x as f32), px(surface_y as f32)));
-                state.restore_cursor_after_hide();
-
-                if let Some(window) = state.mouse_focused_window.clone() {
-                    if window.is_blocked() {
-                        let default_cursor = CursorRequest::default();
-                        if state.requested_cursor.as_ref() != Some(&default_cursor) {
-                            state.set_cursor(default_cursor);
-                        }
-                    }
-                    if state
-                        .keyboard_focused_window
-                        .as_ref()
-                        .is_some_and(|keyboard_window| window.ptr_eq(keyboard_window))
-                    {
-                        state.enter_token = None;
-                    }
-                    let input = PlatformInput::MouseMove(MouseMoveEvent {
-                        position: state.mouse_location.unwrap(),
-                        pressed_button: state.button_pressed,
-                        modifiers: state.modifiers,
-                    });
+                let position = point(px(surface_x as f32), px(surface_y as f32));
+                if let Some((window, input)) = state.move_mouse(position) {
                     drop(state);
                     window.handle_input(input);
                 }
@@ -2714,6 +2838,74 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
                 }
             }
             _ => {}
+        }
+    }
+}
+
+delegate_noop!(WaylandClientStatePtr: ignore zwp_pointer_constraints_v1::ZwpPointerConstraintsV1);
+delegate_noop!(WaylandClientStatePtr: ignore zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1);
+
+impl Dispatch<zwp_locked_pointer_v1::ZwpLockedPointerV1, ()> for WaylandClientStatePtr {
+    fn event(
+        this: &mut Self,
+        locked_pointer: &zwp_locked_pointer_v1::ZwpLockedPointerV1,
+        event: zwp_locked_pointer_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let client = this.get_client();
+        let mut state = client.borrow_mut();
+        match event {
+            zwp_locked_pointer_v1::Event::Locked => {
+                if let Some(lock) = state
+                    .pointer_lock
+                    .as_mut()
+                    .filter(|lock| lock.locked_pointer == *locked_pointer)
+                {
+                    lock.active = true;
+                }
+            }
+            // The compositor ends a lock, such as when the user breaks it. The absolute
+            // motion moves the mouse again.
+            zwp_locked_pointer_v1::Event::Unlocked => {
+                let unlocked =
+                    state.end_pointer_lock(|lock| lock.locked_pointer == *locked_pointer);
+                drop(state);
+                if let Some(window) = unlocked {
+                    window.pointer_unlocked();
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<zwp_relative_pointer_v1::ZwpRelativePointerV1, ()> for WaylandClientStatePtr {
+    fn event(
+        this: &mut Self,
+        relative_pointer: &zwp_relative_pointer_v1::ZwpRelativePointerV1,
+        event: zwp_relative_pointer_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let zwp_relative_pointer_v1::Event::RelativeMotion { dx, dy, .. } = event else {
+            return;
+        };
+        let client = this.get_client();
+        let mut state = client.borrow_mut();
+        let is_locked = state
+            .pointer_lock
+            .as_ref()
+            .is_some_and(|lock| lock.active && lock.relative_pointer == *relative_pointer);
+        let Some(position) = state.mouse_location.filter(|_| is_locked) else {
+            return;
+        };
+        let position = position + point(px(dx as f32), px(dy as f32));
+        if let Some((window, input)) = state.move_mouse(position) {
+            drop(state);
+            window.handle_input(input);
         }
     }
 }

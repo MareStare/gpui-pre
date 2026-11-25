@@ -48,7 +48,8 @@ use super::{
     event_position, fp3232_to_f32, get_reply, get_valuator_axis_index, handle_connection_error,
     image_cursor::ImageCursors,
     modifiers_from_state,
-    pen::{Pens, PointerAction, PointerSample},
+    pen::{AxisRange, Pens, PointerAction, PointerSample},
+    pointer_lock::{self, PointerLock},
     pressed_button_from_mask, xcb_flush,
 };
 
@@ -242,6 +243,14 @@ pub struct X11ClientState {
     pointer_device_states: BTreeMap<xinput::DeviceId, PointerDeviceState>,
     pens: Pens,
 
+    /// The ranges of the X and Y axes of each pointer with absolute axes.
+    absolute_axes: BTreeMap<xinput::DeviceId, [AxisRange; 2]>,
+    pointer_lock: Option<PointerLock>,
+
+    /// The device that a window grabs for the rest of a drag after its
+    /// pointer lock.
+    drag_grab: Option<xinput::DeviceId>,
+
     pub(crate) supports_xinput_gestures: bool,
 
     pub(crate) common: Rc<RefCell<LinuxCommon>>,
@@ -281,6 +290,56 @@ impl X11ClientStatePtr {
             state.cursor_hidden_window = None;
         }
         state.window_cursors.remove(&x_window);
+    }
+
+    /// Holds the cursor at `at` in `x_window`, or releases the cursor that
+    /// `x_window` holds. Returns whether the cursor is held.
+    pub(crate) fn set_pointer_lock(
+        &self,
+        x_window: xproto::Window,
+        root: xproto::Window,
+        at: Option<Point<Pixels>>,
+    ) -> bool {
+        let Some(client) = self.get_client() else {
+            return false;
+        };
+        let mut state = client.0.borrow_mut();
+        let Some(at) = at else {
+            if let Some(lock) = state.pointer_lock.take_if(|lock| lock.window == x_window) {
+                state.release_pointer_lock(&lock);
+            }
+            return false;
+        };
+        // A client has one pointer grab.
+        if state.pointer_lock.is_some() {
+            return false;
+        }
+        let Some(lock) = PointerLock::new(
+            &state.xcb_connection,
+            root,
+            x_window,
+            at,
+            state.scale_factor,
+        )
+        .context("Failed to lock the pointer")
+        .log_err() else {
+            return false;
+        };
+        if let Err(error) = lock.grab(&state.xcb_connection) {
+            log::error!("Failed to lock the pointer: {error:?}");
+            state.release_pointer_lock(&lock);
+            return false;
+        }
+        state.drag_grab = None;
+        state.pointer_lock = Some(lock);
+        true
+    }
+
+    /// The virtual pointer of the lock that holds the cursor in `x_window`.
+    pub(crate) fn pointer_lock_position(&self, x_window: xproto::Window) -> Option<Point<Pixels>> {
+        let client = self.get_client()?;
+        let state = client.0.borrow();
+        state.locked_pointer(x_window).map(|lock| lock.position)
     }
 
     pub fn update_ime_position(&self, bounds: Bounds<Pixels>) {
@@ -425,6 +484,7 @@ impl X11Connection {
             .context("Failed to get XCB atoms")?;
         let mut pens = Pens::default();
         pens.set_devices(&devices, atoms.AbsPressure);
+        let absolute_axes = pointer_lock::absolute_axes(&devices);
 
         let root = xcb_connection.setup().roots[0].root;
         let compositor_present = check_compositor_present(&xcb_connection, root);
@@ -561,6 +621,9 @@ impl X11Connection {
 
                 pointer_device_states,
                 pens,
+                absolute_axes,
+                pointer_lock: None,
+                drag_grab: None,
 
                 supports_xinput_gestures,
 
@@ -1263,7 +1326,8 @@ impl X11Client {
                 let modifiers = modifiers_from_xinput_info(event.mods);
                 state.modifiers = modifiers;
 
-                let position = event_position(event.event_x, event.event_y, state.scale_factor);
+                state.note_pointer_event(&event, PointerAction::Press);
+                let position = state.pointer_position(event.event, event.event_x, event.event_y);
                 let sample = PointerSample::new(&event, PointerAction::Press, position);
                 state = self.handle_pen_sample(state, &window, sample);
 
@@ -1340,7 +1404,19 @@ impl X11Client {
                 let modifiers = modifiers_from_xinput_info(event.mods);
                 state.modifiers = modifiers;
 
-                let position = event_position(event.event_x, event.event_y, state.scale_factor);
+                state.note_pointer_event(&event, PointerAction::Release);
+                if pointer_lock::buttons_after(&event, PointerAction::Release) == 0
+                    && let Some(device) = state.drag_grab.take()
+                {
+                    check_reply(
+                        || "X11 XiUngrabDevice of the drag failed.",
+                        state
+                            .xcb_connection
+                            .xinput_xi_ungrab_device(x11rb::CURRENT_TIME, device),
+                    )
+                    .log_err();
+                }
+                let position = state.pointer_position(event.event, event.event_x, event.event_y);
                 let sample = PointerSample::new(&event, PointerAction::Release, position);
                 state = self.handle_pen_sample(state, &window, sample);
                 match button_or_scroll_from_event_detail(event.detail) {
@@ -1368,13 +1444,16 @@ impl X11Client {
                     state.set_window_cursor(window.x_window, CursorRequest::default());
                 }
                 let pressed_button = pressed_button_from_mask(event.button_mask[0]);
-                let position = event_position(event.event_x, event.event_y, state.scale_factor);
+                state.note_pointer_event(&event, PointerAction::Motion);
+                let position = state.pointer_position(event.event, event.event_x, event.event_y);
+                let locked = state.locked_pointer(event.event).is_some();
                 let modifiers = modifiers_from_xinput_info(event.mods);
                 state.modifiers = modifiers;
                 let sample = PointerSample::new(&event, PointerAction::Motion, position);
                 drop(self.handle_pen_sample(state, &window, sample));
 
-                if event.valuator_mask[0] & 3 != 0 {
+                // Raw motion moves the pointer of a lock.
+                if !locked && event.valuator_mask[0] & 3 != 0 {
                     window.handle_input(PlatformInput::MouseMove(gpui::MouseMoveEvent {
                         position,
                         pressed_button,
@@ -1395,21 +1474,29 @@ impl X11Client {
                     }
                 }
             }
-            Event::XinputEnter(event) if event.mode == xinput::NotifyMode::NORMAL => {
+            // The pointer stays in the window when it crosses to a child window.
+            Event::XinputEnter(event)
+                if event.mode == xinput::NotifyMode::NORMAL
+                    && event.detail != xinput::NotifyDetail::INFERIOR =>
+            {
                 let window = self.get_window(event.event)?;
                 window.set_hovered(true);
                 let mut state = self.0.borrow_mut();
                 state.mouse_focused_window = Some(event.event);
                 state.restore_cursor_after_hide();
             }
-            Event::XinputLeave(event) if event.mode == xinput::NotifyMode::NORMAL => {
+            Event::XinputLeave(event)
+                if event.mode == xinput::NotifyMode::NORMAL
+                    && event.detail != xinput::NotifyDetail::INFERIOR =>
+            {
+                let window = self.get_window(event.event)?;
                 let mut state = self.0.borrow_mut();
 
                 // Set last scroll values to `None` so that a large delta isn't created if scrolling is done outside the window (the valuator is global)
                 reset_all_pointer_device_scroll_positions(&mut state.pointer_device_states);
                 state.mouse_focused_window = None;
                 let pressed_button = pressed_button_from_mask(event.buttons[0]);
-                let position = event_position(event.event_x, event.event_y, state.scale_factor);
+                let position = state.pointer_position(event.event, event.event_x, event.event_y);
                 let modifiers = modifiers_from_xinput_info(event.mods);
                 state.modifiers = modifiers;
                 // The pen of a drag stays: the window keeps its input.
@@ -1420,7 +1507,6 @@ impl X11Client {
                 };
                 drop(state);
 
-                let window = self.get_window(event.event)?;
                 if let Some(pen) = pen {
                     window.handle_pen(pen);
                 }
@@ -1430,6 +1516,26 @@ impl X11Client {
                     modifiers,
                 }));
                 window.set_hovered(false);
+            }
+            Event::XinputRawMotion(event) => {
+                let mut state = self.0.borrow_mut();
+                let absolute_axes = state.absolute_axes.get(&event.sourceid).copied();
+                let scale_factor = state.scale_factor;
+                let lock = state.pointer_lock.as_mut()?;
+                if !lock.move_by(&event, absolute_axes, scale_factor) {
+                    return Some(());
+                }
+                state.restore_cursor_after_hide();
+                let lock = state.pointer_lock.as_ref()?;
+                let x_window = lock.window;
+                let mouse_move = gpui::MouseMoveEvent {
+                    position: lock.position,
+                    pressed_button: lock.pressed_button(),
+                    modifiers: state.modifiers,
+                };
+                drop(state);
+                let window = self.get_window(x_window)?;
+                window.handle_input(PlatformInput::MouseMove(mouse_move));
             }
             Event::XinputHierarchy(event) => {
                 let mut state = self.0.borrow_mut();
@@ -1443,14 +1549,19 @@ impl X11Client {
                 if let Some(devices) = query_devices(&state.xcb_connection) {
                     state.pointer_device_states =
                         current_pointer_device_states(&devices, &state.pointer_device_states);
-                    let pressure_label = state.atoms.AbsPressure;
-                    state.pens.set_devices(&devices, pressure_label);
+                    state.set_pointer_axes(&devices);
                 }
             }
             Event::XinputDeviceChanged(event) => {
                 let mut state = self.0.borrow_mut();
                 if let Some(pointer) = state.pointer_device_states.get_mut(&event.sourceid) {
                     reset_pointer_device_scroll_positions(pointer);
+                }
+                // Such as a pen that switches between absolute and relative mode.
+                if event.reason == xinput::ChangeReason::DEVICE_CHANGE
+                    && let Some(devices) = query_devices(&state.xcb_connection)
+                {
+                    state.set_pointer_axes(&devices);
                 }
             }
             Event::XinputGesturePinchBegin(event) => {
@@ -1459,7 +1570,7 @@ impl X11Client {
                 state.pinch_scale = 1.0;
                 let modifiers = modifiers_from_xinput_info(event.mods);
                 state.modifiers = modifiers;
-                let position = event_position(event.event_x, event.event_y, state.scale_factor);
+                let position = state.pointer_position(event.event, event.event_x, event.event_y);
                 drop(state);
                 window.handle_input(PlatformInput::Pinch(gpui::PinchEvent {
                     position,
@@ -1473,7 +1584,7 @@ impl X11Client {
                 let mut state = self.0.borrow_mut();
                 let modifiers = modifiers_from_xinput_info(event.mods);
                 state.modifiers = modifiers;
-                let position = event_position(event.event_x, event.event_y, state.scale_factor);
+                let position = state.pointer_position(event.event, event.event_x, event.event_y);
                 // scale is in FP16.16 format: divide by 65536 to get the float value
                 let new_absolute_scale = event.scale as f32 / 65536.0;
                 let previous_scale = state.pinch_scale;
@@ -1493,7 +1604,7 @@ impl X11Client {
                 state.pinch_scale = 1.0;
                 let modifiers = modifiers_from_xinput_info(event.mods);
                 state.modifiers = modifiers;
-                let position = event_position(event.event_x, event.event_y, state.scale_factor);
+                let position = state.pointer_position(event.event, event.event_x, event.event_y);
                 drop(state);
                 window.handle_input(PlatformInput::Pinch(gpui::PinchEvent {
                     position,
@@ -1910,6 +2021,49 @@ impl X11Client {
 }
 
 impl X11ClientState {
+    /// Reads the pens and the absolute axes of the pointers.
+    fn set_pointer_axes(&mut self, devices: &[xinput::XIDeviceInfo]) {
+        let pressure_label = self.atoms.AbsPressure;
+        self.pens.set_devices(devices, pressure_label);
+        self.absolute_axes = pointer_lock::absolute_axes(devices);
+    }
+
+    fn release_pointer_lock(&mut self, lock: &PointerLock) {
+        self.drag_grab = lock.release(&self.xcb_connection);
+    }
+
+    fn locked_pointer(&self, x_window: xproto::Window) -> Option<&PointerLock> {
+        self.pointer_lock
+            .as_ref()
+            .filter(|lock| lock.window == x_window)
+    }
+
+    /// The position of a pointer event of `x_window`. It is the virtual
+    /// pointer while a lock holds the cursor in `x_window`.
+    fn pointer_position(
+        &self,
+        x_window: xproto::Window,
+        event_x: i32,
+        event_y: i32,
+    ) -> Point<Pixels> {
+        match self.locked_pointer(x_window) {
+            Some(lock) => lock.position,
+            None => event_position(event_x, event_y, self.scale_factor),
+        }
+    }
+
+    /// A lock that holds the cursor in the window of `event` notes its
+    /// buttons.
+    fn note_pointer_event(&mut self, event: &xinput::ButtonPressEvent, action: PointerAction) {
+        if let Some(lock) = self
+            .pointer_lock
+            .as_mut()
+            .filter(|lock| lock.window == event.event)
+        {
+            lock.note(event, action);
+        }
+    }
+
     fn has_xim(&self) -> bool {
         self.ximc.is_some() && self.xim_handler.is_some()
     }

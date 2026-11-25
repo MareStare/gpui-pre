@@ -4,6 +4,7 @@ mod display;
 mod event;
 mod image_cursor;
 mod pen;
+mod pointer_lock;
 mod window;
 mod xim_handler;
 

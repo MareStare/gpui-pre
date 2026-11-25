@@ -92,6 +92,9 @@ pub struct WindowsWindowState {
     hwnd: HWND,
     pub(crate) a11y: RefCell<Option<A11yState>>,
     pub mouse_position: Cell<Point<Pixels>>,
+
+    /// Holds the cursor in place while the mouse moves a virtual pointer.
+    pub(crate) pointer_lock: Cell<Option<PointerLock>>,
 }
 
 pub(crate) struct WindowsWindowInner {
@@ -198,6 +201,7 @@ impl WindowsWindowState {
             direct_manipulation,
             a11y: RefCell::new(None),
             mouse_position: Cell::new(Point::default()),
+            pointer_lock: Cell::new(None),
         })
     }
 
@@ -395,6 +399,47 @@ impl WindowsWindowInner {
             },
         }
         Ok(())
+    }
+
+    /// The position of the system cursor in the client area.
+    fn cursor_position(&self) -> Point<Pixels> {
+        let point = unsafe {
+            let mut point: POINT = std::mem::zeroed();
+            GetCursorPos(&mut point)
+                .context("unable to get cursor position")
+                .log_err();
+            ScreenToClient(self.hwnd, &mut point).ok().log_err();
+            point
+        };
+        logical_point(
+            point.x as f32,
+            point.y as f32,
+            self.state.scale_factor.get(),
+        )
+    }
+
+    /// The virtual pointer while the pointer lock holds the cursor.
+    pub(crate) fn locked_pointer(&self) -> Option<Point<Pixels>> {
+        Some(self.state.pointer_lock.get()?.position)
+    }
+
+    /// The position of a mouse event at `x` and `y` in device pixels of the client area. It is
+    /// the virtual pointer while the pointer lock holds the cursor.
+    pub(crate) fn event_position(&self, x: f32, y: f32) -> Point<Pixels> {
+        self.locked_pointer()
+            .unwrap_or_else(|| logical_point(x, y, self.state.scale_factor.get()))
+    }
+
+    pub(crate) fn set_pointer_lock(&self, at: Option<Point<Pixels>>) -> bool {
+        if let Some(lock) = self.state.pointer_lock.take() {
+            lock.release();
+            // The cursor did not move, so a mouse move at its position is not real.
+            self.state.mouse_position.set(self.cursor_position());
+        }
+        let lock =
+            at.and_then(|at| PointerLock::hold(self.hwnd, at, self.state.scale_factor.get()));
+        self.state.pointer_lock.set(lock);
+        lock.is_some()
     }
 
     pub(crate) fn system_settings(&self) -> &WindowsSystemSettings {
@@ -701,16 +746,13 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn mouse_position(&self) -> Point<Pixels> {
-        let scale_factor = self.scale_factor();
-        let point = unsafe {
-            let mut point: POINT = std::mem::zeroed();
-            GetCursorPos(&mut point)
-                .context("unable to get cursor position")
-                .log_err();
-            ScreenToClient(self.0.hwnd, &mut point).ok().log_err();
-            point
-        };
-        logical_point(point.x as f32, point.y as f32, scale_factor)
+        self.0
+            .locked_pointer()
+            .unwrap_or_else(|| self.0.cursor_position())
+    }
+
+    fn set_pointer_lock(&self, at: Option<Point<Pixels>>) -> bool {
+        self.0.set_pointer_lock(at)
     }
 
     fn modifiers(&self) -> Modifiers {
