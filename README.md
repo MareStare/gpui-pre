@@ -309,6 +309,8 @@ gpui-pre version goes.
   windows then releases the entities and the focus handles that the draw
   dropped, as the update of a platform frame does. A release observer of an
   element state that stops drawing runs before the flush ends.
+- X11-only builds: the pipe helpers that only Wayland reads build only with
+  the `wayland` feature, so a build with only `x11` has no dead code.
 
 ## License
 
