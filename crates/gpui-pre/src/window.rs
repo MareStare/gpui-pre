@@ -19,13 +19,13 @@ use crate::{
     PlatformInput, PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, Priority,
     PromptButton, PromptLevel, Quad, Render, RenderGlyphParams, RenderImage, RenderImageParams,
     RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X,
-    SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size, StrikethroughStyle,
-    Style, SubpixelSprite, Subscription, SystemWindowTab, SystemWindowTabController, TabStopMap,
-    Task, TextInputConfiguration, TextInputStateChange, TextRenderingMode, TextStyle,
-    TextStyleRefinement, ThermalState, TransformationMatrix, Underline, UnderlineStyle,
-    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations,
-    WindowInsets, WindowOptions, WindowParams, WindowTextSystem, WindowVisibility, point,
-    prelude::*, px, rems, size, transparent_black,
+    SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, ScrollEvent, Shadow, SharedString, Size,
+    StrikethroughStyle, Style, SubpixelSprite, Subscription, SystemWindowTab,
+    SystemWindowTabController, TabStopMap, Task, TextInputConfiguration, TextInputStateChange,
+    TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState, TransformationMatrix,
+    Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
+    WindowControls, WindowDecorations, WindowInsets, WindowOptions, WindowParams, WindowTextSystem,
+    WindowVisibility, point, prelude::*, px, rems, size, transparent_black,
 };
 
 use crate::gestures::{GestureTuning, RecognizedTouchGesture, TouchGestureRecognizer};
@@ -6402,8 +6402,12 @@ impl Window {
                 self.capslock = modifiers_changed.capslock;
                 PlatformInput::ModifiersChanged(modifiers_changed)
             }
-            PlatformInput::Scroll(scroll_wheel) => {
-                self.mouse_position = scroll_wheel.position;
+            PlatformInput::Scroll(mut scroll_wheel) => {
+                // The system cursor stays at the lock point, so the scroll goes to the view there.
+                match self.pointer_lock {
+                    Some(lock) => scroll_wheel.position = lock.at,
+                    None => self.mouse_position = scroll_wheel.position,
+                }
                 self.modifiers = scroll_wheel.modifiers;
                 PlatformInput::Scroll(scroll_wheel)
             }
@@ -6700,10 +6704,12 @@ impl Window {
         if event.is::<MouseDownEvent>() {
             self.click_cancelled = false;
         }
-        self.mouse_hover
-            .begin_mouse_event(event, self.mouse_position);
-        self.mouse_hover
-            .update(&self.rendered_frame, self.mouse_position);
+        // A locked scroll hits the views at the lock point, away from the mouse position.
+        let position = event
+            .downcast_ref::<ScrollEvent>()
+            .map_or(self.mouse_position, |scroll| scroll.position);
+        self.mouse_hover.begin_mouse_event(event, position);
+        self.mouse_hover.update(&self.rendered_frame, position);
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         if self.is_inspector_picking(cx) {
@@ -6755,10 +6761,10 @@ impl Window {
         }
 
         let capture = mem::replace(&mut self.mouse_event_capture, outer_event_capture).flatten();
-        if self
+        let hover_changed = self
             .mouse_hover
-            .end_mouse_event(event, capture, cx.has_active_drag())
-        {
+            .end_mouse_event(event, capture, cx.has_active_drag());
+        if hover_changed || position != self.mouse_position {
             self.update_mouse_hover();
         }
         if event.is::<MouseUpEvent>() && self.mouse_hover.held_button().is_none() {

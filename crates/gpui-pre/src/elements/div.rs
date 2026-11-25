@@ -6124,6 +6124,9 @@ mod tests {
         locked_on_declaration: Rc<Cell<Option<bool>>>,
         lock_on_release: Rc<Cell<Option<Point<Pixels>>>>,
         last_move: Rc<Cell<Option<(Point<Pixels>, Option<MouseButton>)>>>,
+
+        /// The position of the last scroll that the thumb handles.
+        scroll: Rc<Cell<Option<Point<Pixels>>>>,
     }
 
     /// A thumb of 20 by 20 px at the origin that locks the pointer from a press until
@@ -6149,6 +6152,7 @@ mod tests {
                     }
                 },
                 move |_, hitbox, window, _| {
+                    let hitbox_id = hitbox.id;
                     let press_probes = probes.clone();
                     window.on_mouse_event(move |_: &MouseDownEvent, phase, window, _| {
                         if phase.bubble() && hitbox.is_hovered(window) {
@@ -6165,11 +6169,17 @@ mod tests {
                             release_probes.lock_on_release.set(window.pointer_lock());
                         }
                     });
+                    let move_probes = probes.clone();
                     window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, _| {
                         if phase.bubble() {
-                            probes
+                            move_probes
                                 .last_move
                                 .set(Some((event.position, event.pressed_button)));
+                        }
+                    });
+                    window.on_mouse_event(move |event: &ScrollEvent, phase, window, _| {
+                        if phase.bubble() && hitbox_id.should_handle_scroll(window) {
+                            probes.scroll.set(Some(event.position));
                         }
                     });
                 },
@@ -6240,6 +6250,32 @@ mod tests {
     }
 
     const FAR: Point<Pixels> = point(px(300.), px(250.));
+
+    #[test]
+    fn a_locked_scroll_goes_to_the_view_at_the_lock_point() {
+        let mut test_app = TestAppContext::single();
+        let probes = PointerLockProbes::default();
+        let window = pointer_lock_window(&mut test_app, &probes);
+
+        hover(&mut test_app, window, THUMB);
+        dispatch(&mut test_app, window, press(THUMB));
+        dispatch(&mut test_app, window, drag(FAR));
+        dispatch(&mut test_app, window, scroll(FAR));
+        assert_eq!(probes.scroll.get(), Some(THUMB));
+        assert_eq!(mouse_position(&mut test_app, window), FAR);
+
+        dispatch(&mut test_app, window, release(FAR));
+        probes.scroll.set(None);
+        dispatch(&mut test_app, window, scroll(FAR));
+        assert_eq!(probes.scroll.get(), None);
+    }
+
+    fn scroll(position: Point<Pixels>) -> PlatformInput {
+        PlatformInput::Scroll(ScrollEvent {
+            position,
+            ..Default::default()
+        })
+    }
 
     #[test]
     fn a_press_locks_the_pointer_until_its_release() {
