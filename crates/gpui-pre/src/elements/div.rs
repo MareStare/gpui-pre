@@ -6127,6 +6127,9 @@ mod tests {
 
         /// The position of the last scroll that the thumb handles.
         scroll: Rc<Cell<Option<Point<Pixels>>>>,
+
+        /// The position of the last pinch that the thumb handles.
+        pinch: Rc<Cell<Option<Point<Pixels>>>>,
     }
 
     /// A thumb of 20 by 20 px at the origin that locks the pointer from a press until
@@ -6177,9 +6180,15 @@ mod tests {
                                 .set(Some((event.position, event.pressed_button)));
                         }
                     });
+                    let scroll_probes = probes.clone();
                     window.on_mouse_event(move |event: &ScrollEvent, phase, window, _| {
                         if phase.bubble() && hitbox_id.should_handle_scroll(window) {
-                            probes.scroll.set(Some(event.position));
+                            scroll_probes.scroll.set(Some(event.position));
+                        }
+                    });
+                    window.on_mouse_event(move |event: &PinchEvent, phase, window, _| {
+                        if phase.bubble() && hitbox_id.is_hovered(window) {
+                            probes.pinch.set(Some(event.position));
                         }
                     });
                 },
@@ -6252,7 +6261,7 @@ mod tests {
     const FAR: Point<Pixels> = point(px(300.), px(250.));
 
     #[test]
-    fn a_locked_scroll_goes_to_the_view_at_the_lock_point() {
+    fn a_locked_scroll_and_pinch_go_to_the_view_at_the_lock_point() {
         let mut test_app = TestAppContext::single();
         let probes = PointerLockProbes::default();
         let window = pointer_lock_window(&mut test_app, &probes);
@@ -6261,20 +6270,34 @@ mod tests {
         dispatch(&mut test_app, window, press(THUMB));
         dispatch(&mut test_app, window, drag(FAR));
         dispatch(&mut test_app, window, scroll(FAR));
+        dispatch(&mut test_app, window, pinch(FAR));
         assert_eq!(probes.scroll.get(), Some(THUMB));
+        assert_eq!(probes.pinch.get(), Some(THUMB));
         assert_eq!(mouse_position(&mut test_app, window), FAR);
 
         dispatch(&mut test_app, window, release(FAR));
         probes.scroll.set(None);
+        probes.pinch.set(None);
         dispatch(&mut test_app, window, scroll(FAR));
+        dispatch(&mut test_app, window, pinch(FAR));
         assert_eq!(probes.scroll.get(), None);
+        assert_eq!(probes.pinch.get(), None);
+    }
+
+    fn pinch(position: Point<Pixels>) -> PlatformInput {
+        PinchEvent {
+            position,
+            ..Default::default()
+        }
+        .to_platform_input()
     }
 
     fn scroll(position: Point<Pixels>) -> PlatformInput {
-        PlatformInput::Scroll(ScrollEvent {
+        ScrollEvent {
             position,
             ..Default::default()
-        })
+        }
+        .to_platform_input()
     }
 
     #[test]

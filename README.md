@@ -315,10 +315,10 @@ gpui-pre version goes.
   position, as the pointer lock of browsers, and `Window::pointer_lock`
   gives that point. While locked, the mouse events and the mouse position
   report a virtual pointer that the relative motion of the mouse moves. A
-  scroll goes to the views at the lock point and reports that point. A
-  call outside a draw starts a lock, and it fails in a window that is not
-  active. A frame keeps the lock when it calls it in prepaint, so a lock
-  lasts one frame. The release of the last held button ends it after its
+  scroll or a pinch goes to the views at the lock point and reports that
+  point. A call outside a draw starts a lock, and it fails in a window
+  that is not active. A frame keeps the lock when it calls it in prepaint,
+  so a lock lasts one frame. The release of the last held button ends it after its
   listeners, and so do a change of the active status or of the bounds.
   Then the mouse moves to the point of the lock. A platform that ends the
   lock by itself, such as a Wayland compositor that breaks it, tells the

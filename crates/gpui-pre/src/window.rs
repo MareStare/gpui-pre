@@ -15,12 +15,12 @@ use crate::{
     GlyphId, GpuFailure, GpuSpecs, Hsla, InputHandler, InputPreference, IsZero, KeyBinding,
     KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex,
     Modifiers, ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseDownEvent, MouseEvent,
-    MouseMoveEvent, MouseUpEvent, Path, PenEvent, Pixels, PlatformAtlas, PlatformDisplay,
-    PlatformInput, PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, Priority,
-    PromptButton, PromptLevel, Quad, Render, RenderGlyphParams, RenderImage, RenderImageParams,
-    RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X,
-    SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, ScrollEvent, Shadow, SharedString, Size,
-    StrikethroughStyle, Style, SubpixelSprite, Subscription, SystemWindowTab,
+    MouseMoveEvent, MouseUpEvent, Path, PenEvent, PinchEvent, Pixels, PlatformAtlas,
+    PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PolychromeSprite,
+    Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams, RenderImage,
+    RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
+    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, ScrollEvent, Shadow,
+    SharedString, Size, StrikethroughStyle, Style, SubpixelSprite, Subscription, SystemWindowTab,
     SystemWindowTabController, TabStopMap, Task, TextInputConfiguration, TextInputStateChange,
     TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState, TransformationMatrix,
     Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
@@ -6403,16 +6403,12 @@ impl Window {
                 PlatformInput::ModifiersChanged(modifiers_changed)
             }
             PlatformInput::Scroll(mut scroll_wheel) => {
-                // The system cursor stays at the lock point, so the scroll goes to the view there.
-                match self.pointer_lock {
-                    Some(lock) => scroll_wheel.position = lock.at,
-                    None => self.mouse_position = scroll_wheel.position,
-                }
+                scroll_wheel.position = self.system_cursor_event_position(scroll_wheel.position);
                 self.modifiers = scroll_wheel.modifiers;
                 PlatformInput::Scroll(scroll_wheel)
             }
-            PlatformInput::Pinch(pinch) => {
-                self.mouse_position = pinch.position;
+            PlatformInput::Pinch(mut pinch) => {
+                pinch.position = self.system_cursor_event_position(pinch.position);
                 self.modifiers = pinch.modifiers;
                 PlatformInput::Pinch(pinch)
             }
@@ -6700,14 +6696,31 @@ impl Window {
         });
     }
 
+    /// The position of an event that goes to the views under the system cursor, such as a
+    /// scroll. The cursor stays at the lock point while the pointer is locked. Without a lock,
+    /// the event moves the mouse to `position`.
+    fn system_cursor_event_position(&mut self, position: Point<Pixels>) -> Point<Pixels> {
+        match self.pointer_lock {
+            Some(lock) => lock.at,
+            None => {
+                self.mouse_position = position;
+                position
+            }
+        }
+    }
+
     fn dispatch_mouse_event(&mut self, event: &dyn Any, cx: &mut App) {
         if event.is::<MouseDownEvent>() {
             self.click_cancelled = false;
         }
-        // A locked scroll hits the views at the lock point, away from the mouse position.
-        let position = event
-            .downcast_ref::<ScrollEvent>()
-            .map_or(self.mouse_position, |scroll| scroll.position);
+        // A locked scroll or pinch hits the views at the lock point, away from the mouse position.
+        let position = if let Some(scroll) = event.downcast_ref::<ScrollEvent>() {
+            scroll.position
+        } else if let Some(pinch) = event.downcast_ref::<PinchEvent>() {
+            pinch.position
+        } else {
+            self.mouse_position
+        };
         self.mouse_hover.begin_mouse_event(event, position);
         self.mouse_hover.update(&self.rendered_frame, position);
 
