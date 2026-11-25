@@ -327,7 +327,9 @@ gpui-pre version goes.
   system, as SDL. macOS moves the cursor to the point and disconnects the
   mouse from it. X11 grabs
   the pointer into a child window of one pixel and reads raw motion of
-  XInput 2. Wayland locks the pointer with the pointer constraints protocol
+  XInput 2. The motion events of the window that the server sends before
+  raw motion starts, such as the motion right after a press, move the
+  virtual pointer to their position. Wayland locks the pointer with the pointer constraints protocol
   and reads the relative pointer protocol. A pen moves the virtual pointer
   by the motion of its tip, so the virtual pointer follows it, and a touch
   of the pen reports the virtual pointer. On Wayland the lock holds no pen

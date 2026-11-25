@@ -3,7 +3,10 @@
 //!
 //! An active pointer grab confines the cursor to a 1x1 input-only child window
 //! at the point. Raw motion of XInput 2 on the root window gives the motion,
-//! because raw events come before the server clamps the cursor.
+//! because raw events come before the server clamps the cursor. The server
+//! can send motion events of the window before raw motion starts, such as
+//! the motion of a drag right after its press. Such an event gives the
+//! position of the cursor, because the cursor is free until the grab.
 //!
 //! The server maps the range of each axis of an absolute device, such as a
 //! pen or the tablet of a virtual machine, to the whole screen. The raw values of the device hold its
@@ -44,6 +47,10 @@ pub(super) struct PointerLock {
 
     /// The virtual pointer in logical pixels of the window.
     pub position: Point<Pixels>,
+
+    /// The sequence number of the request that starts raw motion, until a
+    /// raw event or another event that the server sends after it comes.
+    raw_motion_start: Option<u16>,
 
     /// The buttons that are down, as an XInput 2 button mask.
     buttons: u32,
@@ -99,14 +106,28 @@ impl PointerLock {
             confine,
             device,
             position: at,
+            raw_motion_start: None,
             buttons,
             screen,
             absolute: BTreeMap::new(),
         })
     }
 
-    /// Holds the cursor. Ends the grab of a drag that an earlier lock left.
-    pub(super) fn grab(&self, xcb: &XCBConnection) -> anyhow::Result<()> {
+    /// Starts raw motion and holds the cursor. Ends the grab of a drag that an
+    /// earlier lock left.
+    pub(super) fn grab(&mut self, xcb: &XCBConnection) -> anyhow::Result<()> {
+        let raw_motion = xcb.xinput_xi_select_events(
+            self.root,
+            &[xinput::EventMask {
+                deviceid: XINPUT_ALL_DEVICE_GROUPS,
+                mask: vec![xinput::XIEventMask::RAW_MOTION],
+            }],
+        )?;
+        // Events hold the low 16 bits of the sequence number.
+        self.raw_motion_start = Some(raw_motion.sequence_number() as u16);
+        raw_motion
+            .check()
+            .context("X11 XiSelectEvents of raw motion failed.")?;
         check_reply(
             || "X11 MapWindow of the pointer lock failed.",
             xcb.map_window(self.confine),
@@ -117,10 +138,10 @@ impl PointerLock {
             || "X11 XiUngrabDevice failed.",
             xcb.xinput_xi_ungrab_device(CURRENT_TIME, self.device),
         )?;
-        // The window keeps its XInput 2 events because the grab reports
-        // events to the windows of this client as usual. The grab client gets
-        // raw events through the grab too. The server skips the second copy
-        // on the root window only when the grab window is the root window.
+        // The grab reports events to the windows of this client as usual, so
+        // the window keeps its XInput 2 events and the root window its raw
+        // events. The server skips the second copy of a raw event on the root
+        // window only when the grab window is the root window.
         let status = xcb
             .grab_pointer(
                 true,
@@ -141,16 +162,7 @@ impl PointerLock {
             status == xproto::GrabStatus::SUCCESS,
             "X11 GrabPointer failed: {status:?}"
         );
-        check_reply(
-            || "X11 XiSelectEvents of raw motion failed.",
-            xcb.xinput_xi_select_events(
-                self.root,
-                &[xinput::EventMask {
-                    deviceid: XINPUT_ALL_DEVICE_GROUPS,
-                    mask: vec![xinput::XIEventMask::RAW_MOTION],
-                }],
-            ),
-        )
+        Ok(())
     }
 
     /// Releases the cursor. It stays at the point of the lock. Returns the
@@ -214,6 +226,25 @@ impl PointerLock {
         self.buttons = buttons_after(event, action);
     }
 
+    /// Moves the virtual pointer to the `position` of a motion event of the
+    /// window with the sequence number `sequence`, when the server sent the
+    /// event before raw motion started. Returns whether the virtual pointer
+    /// moved.
+    pub(super) fn move_to(&mut self, sequence: u16, position: Point<Pixels>) -> bool {
+        let Some(start) = self.raw_motion_start else {
+            return false;
+        };
+        // The numbers wrap. The events of the queue are much closer than half
+        // of the range.
+        if sequence.wrapping_sub(start).cast_signed() >= 0 {
+            self.raw_motion_start = None;
+            return false;
+        }
+        let moved = position != self.position;
+        self.position = position;
+        moved
+    }
+
     /// Moves the virtual pointer by the motion of a raw event. The event of
     /// an absolute device has `absolute_axes`, the ranges of its X and Y
     /// axes. Returns whether the virtual pointer moved.
@@ -223,6 +254,8 @@ impl PointerLock {
         absolute_axes: Option<[AxisRange; 2]>,
         scale_factor: f32,
     ) -> bool {
+        // Each later event comes after the start of raw motion.
+        self.raw_motion_start = None;
         let value = |axis: usize| {
             get_valuator_axis_index(&event.valuator_mask, axis as u16)
                 .and_then(|index| event.axisvalues.get(index))
@@ -303,7 +336,122 @@ fn core_button_mask(mask: xproto::KeyButMask) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
+    use x11rb::{
+        protocol::{Event, xtest::ConnectionExt as _},
+        wrapper::ConnectionExt as _,
+    };
+
     use super::*;
+    use crate::linux::x11::{event_position, xvfb::Xvfb};
+
+    /// Reads the events of `xcb` until `done` gives true for them, or until a
+    /// second passes.
+    fn events_until(xcb: &XCBConnection, done: impl Fn(&[Event]) -> bool) -> Vec<Event> {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut events = Vec::new();
+        while !done(&events) && Instant::now() < deadline {
+            match xcb.poll_for_event().unwrap() {
+                Some(event) => events.push(event),
+                None => std::thread::sleep(Duration::from_millis(5)),
+            }
+        }
+        events
+    }
+
+    fn count_motion(events: &[Event]) -> usize {
+        let motion =
+            |event: &&Event| matches!(event, Event::XinputMotion(_) | Event::XinputRawMotion(_));
+        events.iter().filter(motion).count()
+    }
+
+    #[test]
+    fn the_motion_of_a_drag_from_its_press_on_moves_the_virtual_pointer() {
+        let xvfb = Xvfb::start();
+        let (xcb, screen) = xvfb.connect();
+        xcb.xinput_xi_query_version(2, 4).unwrap().reply().unwrap();
+        let root = xcb.setup().roots[screen].root;
+        let window = xcb.generate_id().unwrap();
+        xcb.create_window(
+            COPY_DEPTH_FROM_PARENT,
+            window,
+            root,
+            0,
+            0,
+            400,
+            200,
+            0,
+            xproto::WindowClass::INPUT_OUTPUT,
+            COPY_FROM_PARENT,
+            &xproto::CreateWindowAux::new(),
+        )
+        .unwrap();
+        xcb.xinput_xi_select_events(
+            window,
+            &[xinput::EventMask {
+                deviceid: XINPUT_ALL_DEVICE_GROUPS,
+                mask: vec![
+                    xinput::XIEventMask::MOTION
+                        | xinput::XIEventMask::BUTTON_PRESS
+                        | xinput::XIEventMask::BUTTON_RELEASE,
+                ],
+            }],
+        )
+        .unwrap();
+        xcb.map_window(window).unwrap();
+        xcb.set_input_focus(xproto::InputFocus::PARENT, window, CURRENT_TIME)
+            .unwrap();
+        xcb.sync().unwrap();
+
+        // Another client sends the input, as a device does.
+        let (input, _) = xvfb.connect();
+        let fake = |kind, detail, x, y| {
+            input
+                .xtest_fake_input(kind, detail, CURRENT_TIME, root, x, y, 0)
+                .unwrap();
+            input.sync().unwrap();
+        };
+        let move_by = |x| fake(xproto::MOTION_NOTIFY_EVENT, 1, x, 0);
+        fake(xproto::MOTION_NOTIFY_EVENT, 0, 50, 40);
+        let at = point(px(50.), px(40.));
+        events_until(&xcb, |events| count_motion(events) == 1);
+        fake(xproto::BUTTON_PRESS_EVENT, 1, 0, 0);
+        // The window gets the press and the motion right after it before it locks.
+        for _ in 0..3 {
+            move_by(20);
+        }
+        let mut events = events_until(&xcb, |events| count_motion(events) == 3);
+
+        let mut lock = PointerLock::new(&xcb, root, window, at, 1.).unwrap();
+        lock.grab(&xcb).unwrap();
+        for _ in 0..3 {
+            move_by(20);
+        }
+        events.extend(events_until(&xcb, |events| {
+            events
+                .iter()
+                .filter(|event| matches!(event, Event::XinputRawMotion(_)))
+                .count()
+                == 3
+        }));
+        for event in &events {
+            match event {
+                Event::XinputMotion(event) => {
+                    let position = event_position(event.event_x, event.event_y, 1.);
+                    lock.move_to(event.sequence, position);
+                }
+                Event::XinputRawMotion(event) => {
+                    lock.move_by(event, None, 1.);
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(lock.position, point(px(170.), px(40.)));
+        let pointer = xcb.query_pointer(window).unwrap().reply().unwrap();
+        assert_eq!((pointer.win_x, pointer.win_y), (50, 40), "the cursor stays");
+    }
 
     #[test]
     fn core_buttons_become_xinput_buttons() {
@@ -391,6 +539,7 @@ mod tests {
             confine: 3,
             device: 4,
             position: point(px(100.), px(50.)),
+            raw_motion_start: None,
             buttons: 0,
             screen: [1920., 1080.],
             absolute: BTreeMap::new(),

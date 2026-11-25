@@ -7,6 +7,8 @@ mod pen;
 mod pointer_lock;
 mod window;
 mod xim_handler;
+#[cfg(test)]
+mod xvfb;
 
 pub(crate) use client::*;
 pub(crate) use clipboard::wait_for_clipboard_handovers;

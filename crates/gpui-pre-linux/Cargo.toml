@@ -252,6 +252,10 @@ features = [
 ]
 optional = true
 
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dev-dependencies.x11rb]
+version = "0.13.1"
+features = ["xtest"]
+
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.xim]
 version = "0.4.0-zed"
 features = [

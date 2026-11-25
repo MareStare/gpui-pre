@@ -314,7 +314,7 @@ impl X11ClientStatePtr {
         if state.pointer_lock.is_some() {
             return false;
         }
-        let Some(lock) = PointerLock::new(
+        let Some(mut lock) = PointerLock::new(
             &state.xcb_connection,
             root,
             x_window,
@@ -1445,15 +1445,20 @@ impl X11Client {
                 }
                 let pressed_button = pressed_button_from_mask(event.button_mask[0]);
                 state.note_pointer_event(&event, PointerAction::Motion);
+                let cursor = event_position(event.event_x, event.event_y, state.scale_factor);
+                // Raw motion moves the pointer of a lock, apart from the motion before raw motion.
+                let moved_lock = state
+                    .pointer_lock
+                    .as_mut()
+                    .filter(|lock| lock.window == event.event)
+                    .map(|lock| lock.move_to(event.sequence, cursor));
                 let position = state.pointer_position(event.event, event.event_x, event.event_y);
-                let locked = state.locked_pointer(event.event).is_some();
                 let modifiers = modifiers_from_xinput_info(event.mods);
                 state.modifiers = modifiers;
                 let sample = PointerSample::new(&event, PointerAction::Motion, position);
                 drop(self.handle_pen_sample(state, &window, sample));
 
-                // Raw motion moves the pointer of a lock.
-                if !locked && event.valuator_mask[0] & 3 != 0 {
+                if moved_lock.unwrap_or(event.valuator_mask[0] & 3 != 0) {
                     window.handle_input(PlatformInput::MouseMove(gpui::MouseMoveEvent {
                         position,
                         pressed_button,
