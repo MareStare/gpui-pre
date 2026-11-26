@@ -1069,15 +1069,15 @@ impl VisualTestContext {
         self.update(|window, cx| {
             let arena_scope = ElementArenaScope::enter(&cx.element_arena);
 
-            window.invalidator.set_phase(DrawPhase::Prepaint);
+            window.invalidator.set_phase(DrawPhase::Prepaint, cx);
             let mut element = Drawable::new(f(window, cx));
             element.layout_as_root(space.into(), window, cx);
             window.with_absolute_element_offset(origin, |window| element.prepaint(window, cx));
 
-            window.invalidator.set_phase(DrawPhase::Paint);
+            window.invalidator.set_phase(DrawPhase::Paint, cx);
             let (request_layout_state, prepaint_state) = element.paint(window, cx);
 
-            window.invalidator.set_phase(DrawPhase::None);
+            window.invalidator.set_phase(DrawPhase::None, cx);
             window.refresh();
 
             drop(element);

@@ -244,8 +244,18 @@ impl WindowInvalidator {
         }
     }
 
-    pub fn set_phase(&self, phase: DrawPhase) {
-        self.inner.borrow_mut().draw_phase = phase
+    /// Sets the draw phase, and counts the window in the windows of `cx`
+    /// that draw.
+    pub fn set_phase(&self, phase: DrawPhase, cx: &mut App) {
+        let mut inner = self.inner.borrow_mut();
+        let was_drawing = inner.draw_phase != DrawPhase::None;
+        let drawing = phase != DrawPhase::None;
+        inner.draw_phase = phase;
+        match (was_drawing, drawing) {
+            (false, true) => cx.drawing_windows += 1,
+            (true, false) => cx.drawing_windows -= 1,
+            _ => {}
+        }
     }
 
     pub fn update_count(&self) -> usize {
@@ -4108,7 +4118,7 @@ impl Window {
         self.text_system().finish_frame();
         self.next_frame.finish(&mut self.rendered_frame);
 
-        self.invalidator.set_phase(DrawPhase::Focus);
+        self.invalidator.set_phase(DrawPhase::Focus, cx);
         let previous_focus_path = self.rendered_frame.focus_path();
         let previous_window_active = self.rendered_frame.window_active;
         mem::swap(&mut self.rendered_frame, &mut self.next_frame);
@@ -4156,7 +4166,7 @@ impl Window {
         self.record_entities_accessed(cx);
         self.reset_cursor_style(cx);
         self.refreshing = false;
-        self.invalidator.set_phase(DrawPhase::None);
+        self.invalidator.set_phase(DrawPhase::None, cx);
         // Focus listeners may move focus (e.g. a dock forwarding focus to its active
         // panel). `Window::focus` suppresses `refresh` while a draw is in progress, so
         // schedule another frame here to render the new focus state and dispatch the
@@ -4275,7 +4285,7 @@ impl Window {
     }
 
     fn draw_roots(&mut self, cx: &mut App) {
-        self.invalidator.set_phase(DrawPhase::Prepaint);
+        self.invalidator.set_phase(DrawPhase::Prepaint, cx);
         self.tooltip_bounds.take();
 
         self.a11y.sync_active_flag();
@@ -4357,7 +4367,7 @@ impl Window {
         // Now actually paint the elements.
         #[cfg(feature = "profiler")]
         let paint_start = Instant::now();
-        self.invalidator.set_phase(DrawPhase::Paint);
+        self.invalidator.set_phase(DrawPhase::Paint, cx);
         root_element.paint(self, cx);
 
         #[cfg(any(feature = "inspector", debug_assertions))]
