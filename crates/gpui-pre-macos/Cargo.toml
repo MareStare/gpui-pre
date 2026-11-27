@@ -346,5 +346,5 @@ default-features = false
 
 [target.'cfg(target_os = "macos")'.dev-dependencies.objc2-core-graphics]
 version = "0.3.2"
-features = ["CGEvent", "CGEventTypes", "objc2"]
+features = ["CGEvent", "CGEventTypes", "CGRemoteOperation", "objc2"]
 default-features = false

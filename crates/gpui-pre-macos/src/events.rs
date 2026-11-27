@@ -36,6 +36,11 @@ const NUMPAD_ENTER_KEY: u32 = 0x03;
 const TAB_KEY: u32 = 0x09;
 const SHIFT_TAB_KEY: u32 = 0x19;
 
+/// The virtual key code of the menu key of a PC keyboard,
+/// `kVK_ContextualMenu` of the Carbon `Events.h`. Its characters name no
+/// key, so it is told by its code.
+const CONTEXTUAL_MENU_KEY_CODE: u16 = 0x6e;
+
 // Menu key equivalents use different character values than the ones NSEvent
 // reports for the same physical keys.
 //
@@ -344,6 +349,7 @@ fn parse_keystroke(native_event: &NSEvent) -> Keystroke {
 
     #[allow(non_upper_case_globals)]
     let key = match first_char {
+        _ if native_event.keyCode() == CONTEXTUAL_MENU_KEY_CODE => "menu".to_string(),
         Some(SPACE_KEY) => {
             key_char = Some(" ".to_string());
             "space".to_string()
@@ -586,5 +592,14 @@ mod tests {
         assert_eq!(position(None), location);
         let pointer = point(px(5.5), px(7.25));
         assert_eq!(position(Some(pointer)), pointer);
+    }
+
+    #[test]
+    fn the_menu_key_of_a_pc_keyboard_is_named_menu() {
+        let cg_event = CGEvent::new_keyboard_event(None, CONTEXTUAL_MENU_KEY_CODE, true);
+        let event = NSEvent::eventWithCGEvent(&cg_event.unwrap()).unwrap();
+        let keystroke = parse_keystroke(&event);
+        assert_eq!(keystroke.key, "menu");
+        assert!(!keystroke.modifiers.modified());
     }
 }

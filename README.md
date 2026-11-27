@@ -346,6 +346,9 @@ gpui-pre version goes.
   its last draw held. `App::is_building_frame` tells that a window builds
   a frame, from its layout until its focus listeners run, so an app can
   check its writes there.
+- Menu key on macOS: the menu key of a PC keyboard, `kVK_ContextualMenu`,
+  gives the key `menu`, as it does on Linux and Windows. Its characters
+  name no key, so the key code tells it, as in Chromium and Firefox.
 
 ## License
 
