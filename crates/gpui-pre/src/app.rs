@@ -982,8 +982,8 @@ pub struct App {
     /// accesskit APIs will be called when this flag is set.
     pub(crate) accessibility_force_disabled: bool,
     pending_updates: usize,
-    /// The count of the windows that draw.
-    pub(crate) drawing_windows: usize,
+    /// The count of the windows that build a frame.
+    pub(crate) windows_building_frame: usize,
     quit_mode: QuitMode,
     quitting: bool,
 
@@ -1029,7 +1029,7 @@ impl App {
                 mode: GpuiMode::Production,
                 actions: Rc::new(ActionRegistry::default()),
                 pending_updates: 0,
-                drawing_windows: 0,
+                windows_building_frame: 0,
                 active_drag: None,
                 platform_owned_drag: None,
                 background_executor,
@@ -2490,11 +2490,11 @@ impl App {
             .spawn_with_priority(priority, async move { f(&mut cx).await }.boxed_local())
     }
 
-    /// True while a window draws: from the layout of its frame to the end of
-    /// its focus listeners. A notify of a view that the window draws schedules
-    /// no frame then and is lost.
-    pub fn is_drawing(&self) -> bool {
-        self.drawing_windows > 0
+    /// True while a window builds a frame: from the layout of the frame to
+    /// the end of its paint. A view that a notify then marks dirty draws in
+    /// the next frame, after the views of this frame read it.
+    pub fn is_building_frame(&self) -> bool {
+        self.windows_building_frame > 0
     }
 
     /// Schedules the given function to be run at the end of the current effect cycle, allowing entities

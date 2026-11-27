@@ -131,6 +131,10 @@ struct WindowInvalidatorInner {
     pub dirty: bool,
     pub draw_phase: DrawPhase,
     pub dirty_views: FxHashSet<EntityId>,
+
+    /// The views notified while the window draws. Their notify effects and
+    /// the next frame wait for the end of the draw.
+    pub notified_in_draw: FxHashSet<EntityId>,
     pub update_count: usize,
     #[cfg(feature = "profiler")]
     pub frame_dirty: FrameDirtyAccumulator,
@@ -163,6 +167,7 @@ impl WindowInvalidator {
                 dirty: true,
                 draw_phase: DrawPhase::None,
                 dirty_views: FxHashSet::default(),
+                notified_in_draw: FxHashSet::default(),
                 update_count: 0,
                 #[cfg(feature = "profiler")]
                 frame_dirty: FrameDirtyAccumulator::default(),
@@ -171,30 +176,40 @@ impl WindowInvalidator {
         }
     }
 
+    /// Marks the view `entity` dirty. Out of a draw, it pushes the notify
+    /// effect of the view and schedules a frame, and returns true. In a
+    /// draw, both wait for the end of the draw.
     pub fn invalidate_view(&self, entity: EntityId, cx: &mut App) -> bool {
         let mut inner = self.inner.borrow_mut();
         inner.update_count += 1;
         inner.dirty_views.insert(entity);
-        if inner.draw_phase == DrawPhase::None {
-            #[cfg(feature = "profiler")]
-            let dirty_at = Self::record_frame_dirty(&mut inner);
-            let became_dirty = !inner.dirty;
-            inner.dirty = true;
-            let waker = became_dirty.then(|| inner.platform_waker.clone()).flatten();
-            #[cfg(feature = "profiler")]
-            let window_id = inner.window_id;
-            drop(inner);
-            #[cfg(feature = "profiler")]
-            if became_dirty {
-                profiler::journal::record_frame_pending(window_id, dirty_at);
-            }
-            cx.push_effect(Effect::Notify { emitter: entity });
-            if let Some(waker) = waker {
-                waker();
-            }
-            true
-        } else {
-            false
+        if inner.draw_phase != DrawPhase::None {
+            inner.notified_in_draw.insert(entity);
+            return false;
+        }
+        drop(inner);
+        self.notify_view(entity, cx);
+        true
+    }
+
+    /// Pushes the notify effect of the view `entity` and schedules a frame.
+    fn notify_view(&self, entity: EntityId, cx: &mut App) {
+        let mut inner = self.inner.borrow_mut();
+        #[cfg(feature = "profiler")]
+        let dirty_at = Self::record_frame_dirty(&mut inner);
+        let became_dirty = !inner.dirty;
+        inner.dirty = true;
+        let waker = became_dirty.then(|| inner.platform_waker.clone()).flatten();
+        #[cfg(feature = "profiler")]
+        let window_id = inner.window_id;
+        drop(inner);
+        #[cfg(feature = "profiler")]
+        if became_dirty {
+            profiler::journal::record_frame_pending(window_id, dirty_at);
+        }
+        cx.push_effect(Effect::Notify { emitter: entity });
+        if let Some(waker) = waker {
+            waker();
         }
     }
 
@@ -245,16 +260,25 @@ impl WindowInvalidator {
     }
 
     /// Sets the draw phase, and counts the window in the windows of `cx`
-    /// that draw.
+    /// that build a frame. At the end of the draw, it notifies the views
+    /// that the draw notified.
     pub fn set_phase(&self, phase: DrawPhase, cx: &mut App) {
         let mut inner = self.inner.borrow_mut();
-        let was_drawing = inner.draw_phase != DrawPhase::None;
-        let drawing = phase != DrawPhase::None;
+        let was_building = inner.draw_phase.builds_frame();
+        let building = phase.builds_frame();
         inner.draw_phase = phase;
-        match (was_drawing, drawing) {
-            (false, true) => cx.drawing_windows += 1,
-            (true, false) => cx.drawing_windows -= 1,
+        match (was_building, building) {
+            (false, true) => cx.windows_building_frame += 1,
+            (true, false) => cx.windows_building_frame -= 1,
             _ => {}
+        }
+        if phase != DrawPhase::None {
+            return;
+        }
+        let notified = mem::take(&mut inner.notified_in_draw);
+        drop(inner);
+        for entity in notified {
+            self.notify_view(entity, cx);
         }
     }
 
@@ -1551,6 +1575,16 @@ pub(crate) enum DrawPhase {
     Prepaint,
     Paint,
     Focus,
+}
+
+impl DrawPhase {
+    /// True in the passes that build the frame: layout, prepaint and paint.
+    fn builds_frame(self) -> bool {
+        match self {
+            Self::Prepaint | Self::Paint => true,
+            Self::None | Self::Focus => false,
+        }
+    }
 }
 
 pub(crate) const PENDING_INPUT_TIMEOUT: Duration = Duration::from_secs(1);
@@ -10275,6 +10309,93 @@ mod tests {
             })
             .unwrap();
         assert_eq!(b_focus_count.get(), 1);
+    }
+
+    /// A view that draws its value, and sets it in a focus listener or in
+    /// its prepaint.
+    struct NotifiedInDraw {
+        focus: FocusHandle,
+        value: Entity<u32>,
+        set_in_prepaint: Option<u32>,
+        drawn: Rc<RefCell<Vec<u32>>>,
+    }
+
+    impl Render for NotifiedInDraw {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.drawn.borrow_mut().push(*self.value.read(cx));
+            let (value, set) = (self.value.clone(), self.set_in_prepaint.take());
+            div().size_full().track_focus(&self.focus).child(
+                canvas(
+                    move |_, _, cx| {
+                        if let Some(set) = set {
+                            value.update(cx, |value, cx| {
+                                *value = set;
+                                cx.notify();
+                            });
+                        }
+                    },
+                    |_, (), _, _| {},
+                )
+                .size_full(),
+            )
+        }
+    }
+
+    fn notified_in_draw(
+        cx: &mut TestAppContext,
+    ) -> (crate::WindowHandle<NotifiedInDraw>, Rc<RefCell<Vec<u32>>>) {
+        let drawn = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.add_window({
+            let drawn = drawn.clone();
+            move |window, cx| {
+                let focus = cx.focus_handle();
+                let value = cx.new(|_| 0);
+                cx.observe(&value, |_, _, cx| cx.notify()).detach();
+                cx.on_focus(&focus, window, |this: &mut NotifiedInDraw, _, cx| {
+                    this.value.update(cx, |value, cx| {
+                        *value = 1;
+                        cx.notify();
+                    });
+                })
+                .detach();
+                NotifiedInDraw {
+                    focus,
+                    value,
+                    set_in_prepaint: None,
+                    drawn,
+                }
+            }
+        });
+        cx.executor().run_until_parked();
+        (window, drawn)
+    }
+
+    #[gpui::test]
+    fn a_notify_in_a_prepaint_draws_the_next_frame(cx: &mut TestAppContext) {
+        let (window, drawn) = notified_in_draw(cx);
+        // The window tracks the value once a frame read it, so a notify of
+        // the value in a later draw reaches only the window.
+        window
+            .update(cx, |this, _, cx| {
+                this.set_in_prepaint = Some(2);
+                cx.notify();
+            })
+            .unwrap();
+        cx.executor().run_until_parked();
+        assert_eq!(drawn.borrow().last(), Some(&2));
+    }
+
+    #[gpui::test]
+    fn a_notify_in_a_focus_listener_draws_the_next_frame(cx: &mut TestAppContext) {
+        let (window, drawn) = notified_in_draw(cx);
+        window
+            .update(cx, |this, window, cx| {
+                window.activate_window();
+                window.focus(&this.focus, cx);
+            })
+            .unwrap();
+        cx.executor().run_until_parked();
+        assert_eq!(drawn.borrow().last(), Some(&1));
     }
 
     #[gpui::test]

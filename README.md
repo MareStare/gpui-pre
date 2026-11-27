@@ -334,9 +334,11 @@ gpui-pre version goes.
   by the motion of its tip, so the virtual pointer follows it, and a touch
   of the pen reports the virtual pointer. On Wayland the lock holds no pen
   cursor, and the pen events keep their positions.
-- Draw state: `App::is_drawing` tells that a window draws, from the layout
-  of its frame to the end of its focus listeners. A notify of a view that
-  the window draws is lost then, so an app can check its writes.
+- Notifies in a draw: a notify of a view while its window draws keeps its
+  notify effect and schedules the next frame at the end of the draw. In
+  Zed's GPUI the notify is lost. `App::is_building_frame` tells that a
+  window builds a frame, from its layout to the end of its paint, so an app
+  can check its writes there.
 
 ## License
 
