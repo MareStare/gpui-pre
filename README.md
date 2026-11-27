@@ -349,6 +349,8 @@ gpui-pre version goes.
 - Menu key on macOS: the menu key of a PC keyboard, `kVK_ContextualMenu`,
   gives the key `menu`, as it does on Linux and Windows. Its characters
   name no key, so the key code tells it, as in Chromium and Firefox.
+  `Interactivity::is_focusable` tells whether an element takes focus, so
+  an app binds the menu key only on an element that can have the keys.
 
 ## License
 

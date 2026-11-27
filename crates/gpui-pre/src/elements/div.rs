@@ -2388,6 +2388,11 @@ pub struct Interactivity {
 }
 
 impl Interactivity {
+    /// Whether the element takes focus, from `focusable` or `track_focus`.
+    pub fn is_focusable(&self) -> bool {
+        self.focusable
+    }
+
     /// Layout this element according to this interactivity state's configured styles
     pub fn request_layout(
         &mut self,
