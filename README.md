@@ -337,10 +337,15 @@ gpui-pre version goes.
 - Notifies in a draw: a notify while a window draws waits for the end of
   the draw. Then it reaches the observers that the draw added and the
   windows that draw the entity, also when the draw read it first. In Zed's
-  GPUI the notify of a view that the window draws is lost.
-  `App::is_building_frame` tells that a window builds a frame, from its
-  layout until its focus listeners run, so an app can check its writes
-  there.
+  GPUI the notify of a view that the window draws is lost. Zed sent such
+  notifies to observers in [#4236](https://github.com/zed-industries/zed/pull/4236)
+  and reverted it in [#6152](https://github.com/zed-industries/zed/pull/6152)
+  after an infinite loop. [#24164](https://github.com/zed-industries/zed/pull/24164)
+  only marks the view dirty. In a debug build, a window that draws itself
+  in 121 frames in a row panics with the call sites of the notifies that
+  its last draw held. `App::is_building_frame` tells that a window builds
+  a frame, from its layout until its focus listeners run, so an app can
+  check its writes there.
 
 ## License
 

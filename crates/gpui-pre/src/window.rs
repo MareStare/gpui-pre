@@ -135,6 +135,8 @@ struct WindowInvalidatorInner {
     #[cfg(feature = "profiler")]
     pub frame_dirty: FrameDirtyAccumulator,
     pub platform_waker: Option<Rc<dyn Fn()>>,
+    #[cfg(debug_assertions)]
+    self_draws: SelfDraws,
 }
 
 /// Per-frame invalidation bookkeeping, drained at draw time and emitted to the
@@ -147,6 +149,76 @@ struct WindowInvalidatorInner {
 struct FrameDirtyAccumulator {
     dirty_at: Option<Instant>,
     invalidations: u64,
+}
+
+/// Finds a window that draws itself in a loop: each of its frames comes only
+/// from the effects of its last draw, such as a notify in a prepaint of a
+/// value that changes in each frame.
+#[cfg(debug_assertions)]
+#[derive(Default)]
+struct SelfDraws {
+    /// The effects of a draw marked the window dirty.
+    by_draw: bool,
+
+    /// Code out of the effects of a draw marked the window dirty.
+    by_other: bool,
+
+    /// The frames in a row that only the effects of the last draw caused.
+    in_a_row: u32,
+}
+
+#[cfg(debug_assertions)]
+impl SelfDraws {
+    /// The frames in a row after which a window draws itself in a loop.
+    const LIMIT: u32 = 120;
+
+    fn mark_dirty(&mut self, cx: &App) {
+        if cx.flushing_draw_effects {
+            self.by_draw = true;
+        } else {
+            self.by_other = true;
+        }
+    }
+
+    /// Counts the frame that starts. Panics when the window draws itself in
+    /// a loop, with the call sites of the notifies that the last draw held.
+    fn start_frame(&mut self, cx: &mut App) {
+        let by_draw_only = self.by_draw && !self.by_other;
+        self.by_draw = false;
+        self.by_other = false;
+        if !by_draw_only {
+            if self.in_a_row >= Self::LIMIT {
+                cx.held_notify_traces = None;
+            }
+            self.in_a_row = 0;
+            return;
+        }
+        self.in_a_row += 1;
+        if self.in_a_row == Self::LIMIT {
+            cx.held_notify_traces = Some(Vec::new());
+        }
+        if self.in_a_row <= Self::LIMIT {
+            return;
+        }
+        let traces = cx.held_notify_traces.take().unwrap_or_default();
+        let held = if traces.is_empty() {
+            "The last draw held no notify. Look for a deferred update or an \
+             observer that the draw starts."
+                .to_owned()
+        } else {
+            let traces = traces.iter().map(|trace| format!("{trace}"));
+            format!(
+                "The notifies that the last draw held:\n{}",
+                traces.collect::<Vec<_>>().join("\n\n")
+            )
+        };
+        panic!(
+            "a window drew itself in {} frames in a row: the effects of each \
+             draw mark it dirty again. A draw writes state only when it \
+             changes. {held}",
+            self.in_a_row
+        );
+    }
 }
 
 #[derive(Clone)]
@@ -167,6 +239,8 @@ impl WindowInvalidator {
                 #[cfg(feature = "profiler")]
                 frame_dirty: FrameDirtyAccumulator::default(),
                 platform_waker: None,
+                #[cfg(debug_assertions)]
+                self_draws: SelfDraws::default(),
             })),
         }
     }
@@ -176,6 +250,8 @@ impl WindowInvalidator {
         inner.update_count += 1;
         inner.dirty_views.insert(entity);
         if inner.draw_phase == DrawPhase::None {
+            #[cfg(debug_assertions)]
+            inner.self_draws.mark_dirty(cx);
             #[cfg(feature = "profiler")]
             let dirty_at = Self::record_frame_dirty(&mut inner);
             let became_dirty = !inner.dirty;
@@ -208,6 +284,10 @@ impl WindowInvalidator {
         inner.dirty = dirty;
         if dirty {
             inner.update_count += 1;
+            #[cfg(debug_assertions)]
+            {
+                inner.self_draws.by_other = true;
+            }
         }
         #[cfg(feature = "profiler")]
         let dirty_at = dirty.then(|| Self::record_frame_dirty(&mut inner));
@@ -260,10 +340,18 @@ impl WindowInvalidator {
             _ => {}
         }
         match (was_drawing, phase != DrawPhase::None) {
-            (false, true) => cx.windows_drawing += 1,
+            (false, true) => {
+                cx.windows_drawing += 1;
+                #[cfg(debug_assertions)]
+                self.inner.borrow_mut().self_draws.start_frame(cx);
+            }
             (true, false) => {
                 cx.windows_drawing -= 1;
                 if cx.windows_drawing == 0 {
+                    #[cfg(debug_assertions)]
+                    {
+                        cx.flushing_draw_effects = true;
+                    }
                     for entity in mem::take(&mut cx.notified_in_draw) {
                         cx.notify(entity);
                     }
@@ -10465,6 +10553,75 @@ mod tests {
         });
         cx.executor().run_until_parked();
         assert_eq!(observed.get(), 1);
+    }
+
+    /// A view that draws a copy of its input and writes the copy in its
+    /// prepaint. With `count_up`, the prepaint adds one to the copy in each
+    /// frame. Without it, the prepaint copies the input when it changed.
+    struct CopiedInPrepaint {
+        input: Entity<u32>,
+        copy: Entity<u32>,
+        count_up: bool,
+    }
+
+    impl Render for CopiedInPrepaint {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let (input, copy, count_up) = (*self.input.read(cx), self.copy.clone(), self.count_up);
+            let _ = copy.read(cx);
+            canvas(
+                move |_, _, cx| {
+                    copy.update(cx, |copy, cx| {
+                        let next = if count_up { *copy + 1 } else { input };
+                        if *copy != next {
+                            *copy = next;
+                            cx.notify();
+                        }
+                    });
+                },
+                |_, (), _, _| {},
+            )
+            .size_full()
+        }
+    }
+
+    fn copied_in_prepaint(
+        count_up: bool,
+        cx: &mut TestAppContext,
+    ) -> crate::WindowHandle<CopiedInPrepaint> {
+        let window = cx.add_window(move |_, cx| CopiedInPrepaint {
+            input: cx.new(|_| 0),
+            copy: cx.new(|_| 0),
+            count_up,
+        });
+        cx.executor().run_until_parked();
+        window
+    }
+
+    #[cfg(debug_assertions)]
+    #[gpui::test]
+    #[should_panic(expected = "a window drew itself in 121 frames in a row")]
+    fn a_window_that_draws_itself_in_a_loop_panics_in_a_debug_build(cx: &mut TestAppContext) {
+        copied_in_prepaint(true, cx);
+    }
+
+    #[gpui::test]
+    fn a_write_in_each_prepaint_that_a_change_starts_does_not_panic(cx: &mut TestAppContext) {
+        let window = copied_in_prepaint(false, cx);
+        for _ in 0..300 {
+            window
+                .update(cx, |this, _, cx| {
+                    this.input.update(cx, |input, cx| {
+                        *input += 1;
+                        cx.notify();
+                    });
+                })
+                .unwrap();
+            cx.executor().run_until_parked();
+        }
+        let copy = window
+            .update(cx, |this, _, cx| *this.copy.read(cx))
+            .unwrap();
+        assert_eq!(copy, 300);
     }
 
     #[gpui::test]

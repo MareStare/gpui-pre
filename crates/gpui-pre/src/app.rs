@@ -992,6 +992,16 @@ pub struct App {
     /// The entities notified while a window draws, in their order. Their
     /// notifies wait for the end of the draws.
     pub(crate) notified_in_draw: Vec<EntityId>,
+
+    /// True from the end of the draws until the end of the effect flush that
+    /// follows them.
+    #[cfg(debug_assertions)]
+    pub(crate) flushing_draw_effects: bool,
+
+    /// The call sites of the notifies that the draws hold, while a window
+    /// draws itself in a loop.
+    #[cfg(debug_assertions)]
+    pub(crate) held_notify_traces: Option<Vec<std::backtrace::Backtrace>>,
     quit_mode: QuitMode,
     quitting: bool,
 
@@ -1040,6 +1050,10 @@ impl App {
                 windows_building_frame: 0,
                 windows_drawing: 0,
                 notified_in_draw: Vec::new(),
+                #[cfg(debug_assertions)]
+                flushing_draw_effects: false,
+                #[cfg(debug_assertions)]
+                held_notify_traces: None,
                 active_drag: None,
                 platform_owned_drag: None,
                 background_executor,
@@ -2223,6 +2237,10 @@ impl App {
                     }
 
                     self.event_arena.clear();
+                    #[cfg(debug_assertions)]
+                    {
+                        self.flushing_draw_effects = false;
+                    }
                     break;
                 }
             }
@@ -3197,6 +3215,10 @@ impl App {
     pub fn notify(&mut self, entity_id: EntityId) {
         if self.windows_drawing > 0 {
             self.notified_in_draw.push(entity_id);
+            #[cfg(debug_assertions)]
+            if let Some(traces) = &mut self.held_notify_traces {
+                traces.push(std::backtrace::Backtrace::force_capture());
+            }
             return;
         }
         let window_invalidators = mem::take(
