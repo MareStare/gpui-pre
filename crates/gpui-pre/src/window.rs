@@ -126,6 +126,7 @@ impl DispatchPhase {
 }
 
 struct WindowInvalidatorInner {
+    #[cfg(feature = "profiler")]
     pub window_id: WindowId,
     pub dirty: bool,
     pub draw_phase: DrawPhase,
@@ -154,9 +155,10 @@ pub(crate) struct WindowInvalidator {
 }
 
 impl WindowInvalidator {
-    pub fn new(window_id: WindowId) -> Self {
+    pub fn new(#[allow(unused_variables)] window_id: WindowId) -> Self {
         WindowInvalidator {
             inner: Rc::new(RefCell::new(WindowInvalidatorInner {
+                #[cfg(feature = "profiler")]
                 window_id,
                 dirty: true,
                 draw_phase: DrawPhase::None,
@@ -169,35 +171,31 @@ impl WindowInvalidator {
         }
     }
 
-    /// Marks the view `entity` dirty and pushes its notify effect. Out of a
-    /// draw, it schedules a frame and returns true. In a draw, the frame
-    /// waits for the end of the draw.
     pub fn invalidate_view(&self, entity: EntityId, cx: &mut App) -> bool {
         let mut inner = self.inner.borrow_mut();
         inner.update_count += 1;
         inner.dirty_views.insert(entity);
-        if inner.draw_phase != DrawPhase::None {
+        if inner.draw_phase == DrawPhase::None {
+            #[cfg(feature = "profiler")]
+            let dirty_at = Self::record_frame_dirty(&mut inner);
+            let became_dirty = !inner.dirty;
+            inner.dirty = true;
+            let waker = became_dirty.then(|| inner.platform_waker.clone()).flatten();
+            #[cfg(feature = "profiler")]
+            let window_id = inner.window_id;
             drop(inner);
+            #[cfg(feature = "profiler")]
+            if became_dirty {
+                profiler::journal::record_frame_pending(window_id, dirty_at);
+            }
             cx.push_effect(Effect::Notify { emitter: entity });
-            return false;
+            if let Some(waker) = waker {
+                waker();
+            }
+            true
+        } else {
+            false
         }
-        #[cfg(feature = "profiler")]
-        let dirty_at = Self::record_frame_dirty(&mut inner);
-        let became_dirty = !inner.dirty;
-        inner.dirty = true;
-        let waker = became_dirty.then(|| inner.platform_waker.clone()).flatten();
-        #[cfg(feature = "profiler")]
-        let window_id = inner.window_id;
-        drop(inner);
-        #[cfg(feature = "profiler")]
-        if became_dirty {
-            profiler::journal::record_frame_pending(window_id, dirty_at);
-        }
-        cx.push_effect(Effect::Notify { emitter: entity });
-        if let Some(waker) = waker {
-            waker();
-        }
-        true
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -247,15 +245,16 @@ impl WindowInvalidator {
     }
 
     /// Sets the draw phase, and counts the window in the windows of `cx`
-    /// that build a frame. At the end of the draw, it schedules a frame for
-    /// the entities of the window that the draw notified.
+    /// that draw and that build a frame. At the end of the last draw, the
+    /// notifies of the draws run, so that they reach the observers that the
+    /// draws added and the windows that draw the entities.
     pub fn set_phase(&self, phase: DrawPhase, cx: &mut App) {
         let mut inner = self.inner.borrow_mut();
         let was_drawing = inner.draw_phase != DrawPhase::None;
         let was_building = inner.draw_phase.builds_frame();
-        let building = phase.builds_frame();
         inner.draw_phase = phase;
-        match (was_building, building) {
+        drop(inner);
+        match (was_building, phase.builds_frame()) {
             (false, true) => cx.windows_building_frame += 1,
             (true, false) => cx.windows_building_frame -= 1,
             _ => {}
@@ -264,22 +263,11 @@ impl WindowInvalidator {
             (false, true) => cx.windows_drawing += 1,
             (true, false) => {
                 cx.windows_drawing -= 1;
-                let drawn = cx.tracked_entities.get(&inner.window_id);
-                let notified_drawn = cx
-                    .notified_in_draw
-                    .iter()
-                    .copied()
-                    .filter(|entity| drawn.is_some_and(|drawn| drawn.contains(entity)))
-                    .collect::<Vec<_>>();
                 if cx.windows_drawing == 0 {
-                    cx.notified_in_draw.clear();
+                    for entity in mem::take(&mut cx.notified_in_draw) {
+                        cx.notify(entity);
+                    }
                 }
-                if notified_drawn.is_empty() {
-                    return;
-                }
-                inner.dirty_views.extend(notified_drawn);
-                drop(inner);
-                self.set_dirty(true);
             }
             _ => {}
         }
@@ -10431,6 +10419,52 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         assert_eq!(set_in_focus_listener(true, cx), [0, 1]);
+    }
+
+    /// A view whose first draw notifies its value in its prepaint and
+    /// observes the value in its paint.
+    struct ObservedInPaint {
+        value: Entity<u32>,
+        first: bool,
+        observed: Rc<Cell<u32>>,
+    }
+
+    impl Render for ObservedInPaint {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let first = std::mem::take(&mut self.first);
+            let (notified, observed) = (self.value.clone(), self.value.clone());
+            let count = self.observed.clone();
+            canvas(
+                move |_, _, cx| {
+                    if first {
+                        notified.update(cx, |_, cx| cx.notify());
+                    }
+                },
+                move |_, (), _, cx| {
+                    if first {
+                        let count = count.clone();
+                        cx.observe(&observed, move |_, _| count.set(count.get() + 1))
+                            .detach();
+                    }
+                },
+            )
+            .size_full()
+        }
+    }
+
+    #[gpui::test]
+    fn a_notify_in_a_prepaint_reaches_an_observer_of_the_paint(cx: &mut TestAppContext) {
+        let observed = Rc::new(Cell::new(0));
+        cx.add_window({
+            let observed = observed.clone();
+            move |_, cx| ObservedInPaint {
+                value: cx.new(|_| 0),
+                first: true,
+                observed,
+            }
+        });
+        cx.executor().run_until_parked();
+        assert_eq!(observed.get(), 1);
     }
 
     #[gpui::test]

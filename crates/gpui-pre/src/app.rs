@@ -989,9 +989,9 @@ pub struct App {
     /// draw of another window.
     pub(crate) windows_drawing: usize,
 
-    /// The entities notified while a window draws. At the end of its draw,
-    /// a window schedules a frame when it draws one of them.
-    pub(crate) notified_in_draw: FxHashSet<EntityId>,
+    /// The entities notified while a window draws, in their order. Their
+    /// notifies wait for the end of the draws.
+    pub(crate) notified_in_draw: Vec<EntityId>,
     quit_mode: QuitMode,
     quitting: bool,
 
@@ -1039,7 +1039,7 @@ impl App {
                 pending_updates: 0,
                 windows_building_frame: 0,
                 windows_drawing: 0,
-                notified_in_draw: FxHashSet::default(),
+                notified_in_draw: Vec::new(),
                 active_drag: None,
                 platform_owned_drag: None,
                 background_executor,
@@ -2501,9 +2501,7 @@ impl App {
     }
 
     /// True while a window builds a frame: from the layout of the frame
-    /// until its focus listeners run. A view that a notify then marks dirty
-    /// draws in the next frame. An observer that the frame adds misses the
-    /// notify.
+    /// until its focus listeners run.
     pub fn is_building_frame(&self) -> bool {
         self.windows_building_frame > 0
     }
@@ -3198,7 +3196,8 @@ impl App {
     /// Tell GPUI that an entity has changed and observers of it should be notified.
     pub fn notify(&mut self, entity_id: EntityId) {
         if self.windows_drawing > 0 {
-            self.notified_in_draw.insert(entity_id);
+            self.notified_in_draw.push(entity_id);
+            return;
         }
         let window_invalidators = mem::take(
             self.window_invalidators_by_entity

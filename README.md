@@ -334,12 +334,13 @@ gpui-pre version goes.
   by the motion of its tip, so the virtual pointer follows it, and a touch
   of the pen reports the virtual pointer. On Wayland the lock holds no pen
   cursor, and the pen events keep their positions.
-- Notifies in a draw: a notify of an entity while a window draws keeps its
-  notify effect. At the end of the draw, the window schedules the next
-  frame when it draws the entity, also when the draw read the entity first.
-  In Zed's GPUI the notify is lost. `App::is_building_frame` tells that a
-  window builds a frame, from its layout until its focus listeners run, so
-  an app can check its writes there.
+- Notifies in a draw: a notify while a window draws waits for the end of
+  the draw. Then it reaches the observers that the draw added and the
+  windows that draw the entity, also when the draw read it first. In Zed's
+  GPUI the notify of a view that the window draws is lost.
+  `App::is_building_frame` tells that a window builds a frame, from its
+  layout until its focus listeners run, so an app can check its writes
+  there.
 
 ## License
 
