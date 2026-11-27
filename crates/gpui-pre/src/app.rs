@@ -984,6 +984,14 @@ pub struct App {
     pending_updates: usize,
     /// The count of the windows that build a frame.
     pub(crate) windows_building_frame: usize,
+
+    /// The count of the windows that draw. A window opens and draws in the
+    /// draw of another window.
+    pub(crate) windows_drawing: usize,
+
+    /// The entities notified while a window draws. At the end of its draw,
+    /// a window schedules a frame when it draws one of them.
+    pub(crate) notified_in_draw: FxHashSet<EntityId>,
     quit_mode: QuitMode,
     quitting: bool,
 
@@ -1030,6 +1038,8 @@ impl App {
                 actions: Rc::new(ActionRegistry::default()),
                 pending_updates: 0,
                 windows_building_frame: 0,
+                windows_drawing: 0,
+                notified_in_draw: FxHashSet::default(),
                 active_drag: None,
                 platform_owned_drag: None,
                 background_executor,
@@ -2490,9 +2500,10 @@ impl App {
             .spawn_with_priority(priority, async move { f(&mut cx).await }.boxed_local())
     }
 
-    /// True while a window builds a frame: from the layout of the frame to
-    /// the end of its paint. A view that a notify then marks dirty draws in
-    /// the next frame, after the views of this frame read it.
+    /// True while a window builds a frame: from the layout of the frame
+    /// until its focus listeners run. A view that a notify then marks dirty
+    /// draws in the next frame. An observer that the frame adds misses the
+    /// notify.
     pub fn is_building_frame(&self) -> bool {
         self.windows_building_frame > 0
     }
@@ -3186,6 +3197,9 @@ impl App {
 
     /// Tell GPUI that an entity has changed and observers of it should be notified.
     pub fn notify(&mut self, entity_id: EntityId) {
+        if self.windows_drawing > 0 {
+            self.notified_in_draw.insert(entity_id);
+        }
         let window_invalidators = mem::take(
             self.window_invalidators_by_entity
                 .entry(entity_id)
