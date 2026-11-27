@@ -351,6 +351,9 @@ gpui-pre version goes.
   name no key, so the key code tells it, as in Chromium and Firefox.
   `Interactivity::is_focusable` tells whether an element takes focus, so
   an app binds the menu key only on an element that can have the keys.
+  `InteractiveElement::no_focus_on_press` makes an element that Tab
+  reaches, such as a row with a menu, pass the focus of a press to the
+  element around it.
 
 ## License
 

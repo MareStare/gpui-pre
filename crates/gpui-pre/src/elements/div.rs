@@ -844,6 +844,14 @@ pub trait InteractiveElement: Sized {
         self
     }
 
+    /// Keeps a press from focusing this element. The press focuses the
+    /// nearest focusable element around it instead, as for an element that
+    /// takes no focus. Tab still focuses this element.
+    fn no_focus_on_press(mut self) -> Self {
+        self.interactivity().no_focus_on_press = true;
+        self
+    }
+
     /// Set whether this element is a tab stop.
     ///
     /// When false, the element remains in tab-index order but cannot be reached via keyboard navigation.
@@ -2372,6 +2380,7 @@ pub struct Interactivity {
     pub(crate) tab_group: bool,
     pub(crate) tab_wrap: bool,
     pub(crate) tab_stop: bool,
+    pub(crate) no_focus_on_press: bool,
 
     pub(crate) a11y_action_listeners:
         Vec<(accesskit::Action, crate::window::a11y::A11yActionListener)>,
@@ -2987,7 +2996,11 @@ impl Interactivity {
         // If this element can be focused, register a mouse down listener
         // that will automatically transfer focus when hitting the element.
         // This behavior can be suppressed by using `cx.prevent_default()`.
-        if let Some(focus_handle) = self.tracked_focus_handle.clone() {
+        if let Some(focus_handle) = self
+            .tracked_focus_handle
+            .clone()
+            .filter(|_| !self.no_focus_on_press)
+        {
             let hitbox = hitbox.clone();
             window.on_mouse_event(move |_: &MouseDownEvent, phase, window, cx| {
                 if phase == DispatchPhase::Bubble
@@ -7236,6 +7249,63 @@ mod tests {
             .unwrap();
         draw(&mut cx);
         assert_eq!(list.offset().y, px(0.));
+    }
+
+    /// A focusable row inside a focusable view.
+    struct PressFocus {
+        view: FocusHandle,
+        row: FocusHandle,
+    }
+
+    impl Render for PressFocus {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().track_focus(&self.view).child(
+                div()
+                    .size(px(50.))
+                    .track_focus(&self.row)
+                    .no_focus_on_press(),
+            )
+        }
+    }
+
+    /// A press on an element with no focus on press focuses the view around
+    /// it, and Tab still reaches the element.
+    #[test]
+    fn a_press_passes_the_focus_to_the_view_around() {
+        let mut cx = TestAppContext::single();
+        let (view, row) = cx.update(|cx| (cx.focus_handle(), cx.focus_handle().tab_stop(true)));
+        let window: AnyWindowHandle = cx
+            .add_window({
+                let (view, row) = (view.clone(), row.clone());
+                move |_, _| PressFocus { view, row }
+            })
+            .into();
+        let focused = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, cx| window.focused(cx).map(|h| h.id))
+                .unwrap()
+        };
+        cx.update_window(window, |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+
+        cx.update_window(window, |_, window, cx| {
+            window.dispatch_event(
+                MouseDownEvent {
+                    position: point(px(10.), px(10.)),
+                    button: MouseButton::Left,
+                    modifiers: Default::default(),
+                    click_count: 1,
+                    first_mouse: false,
+                }
+                .to_platform_input(),
+                cx,
+            );
+        })
+        .unwrap();
+        assert_eq!(focused(&mut cx), Some(view.id));
+
+        cx.update_window(window, |_, window, cx| window.focus_next(cx))
+            .unwrap();
+        assert_eq!(focused(&mut cx), Some(row.id));
     }
 
     /// A wrapping group with one stop.
