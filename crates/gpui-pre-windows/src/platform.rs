@@ -802,13 +802,13 @@ impl Platform for WindowsPlatform {
     fn prompt_for_paths(
         &self,
         options: PathPromptOptions,
-    ) -> Receiver<Result<Option<Vec<PathBuf>>>> {
+    ) -> Receiver<Result<Option<Vec<PathBuf>>, PathPromptError>> {
         let owner = self
             .find_current_active_window()
             .and_then(|hwnd| self.window_from_hwnd(hwnd))
             .map(|window| window.dialog_owner.clone());
         crate::dialog::show_dialog(owner, &self.foreground_executor, move |window| {
-            file_open_dialog(options, Some(window))
+            Ok(file_open_dialog(options, Some(window))?)
         })
     }
 
@@ -816,7 +816,7 @@ impl Platform for WindowsPlatform {
         &self,
         directory: &Path,
         suggested_name: Option<&str>,
-    ) -> Receiver<Result<Option<PathBuf>>> {
+    ) -> Receiver<Result<Option<PathBuf>, PathPromptError>> {
         let directory = directory.to_owned();
         let suggested_name = suggested_name.map(|s| s.to_owned());
         let owner = self
@@ -824,7 +824,7 @@ impl Platform for WindowsPlatform {
             .and_then(|hwnd| self.window_from_hwnd(hwnd))
             .map(|window| window.dialog_owner.clone());
         crate::dialog::show_dialog(owner, &self.foreground_executor, move |window| {
-            file_save_dialog(directory, suggested_name, Some(window))
+            Ok(file_save_dialog(directory, suggested_name, Some(window))?)
         })
     }
 

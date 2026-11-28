@@ -33,10 +33,10 @@ use crate::linux::{
 };
 use gpui::{
     Action, ActivityGuard, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorRequest,
-    ForegroundExecutor, GraphicalEnvironment, Keymap, Menu, MenuItem, OwnedMenu, PathPromptOptions,
-    Platform, PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
-    PlatformWindow, PowerMode, Result, RunnableVariant, Task, ThermalState, WindowAppearance,
-    WindowButtonLayout, WindowParams, WindowingModes, WindowingRequest,
+    ForegroundExecutor, GraphicalEnvironment, Keymap, Menu, MenuItem, OwnedMenu, PathPromptError,
+    PathPromptOptions, Platform, PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper,
+    PlatformTextSystem, PlatformWindow, PowerMode, Result, RunnableVariant, Task, ThermalState,
+    WindowAppearance, WindowButtonLayout, WindowParams, WindowingModes, WindowingRequest,
 };
 #[cfg(any(feature = "wayland", feature = "x11"))]
 use gpui::{CursorStyle, Pixels, Point, px};
@@ -52,9 +52,25 @@ pub(crate) const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
 pub(crate) const DOUBLE_CLICK_DISTANCE: Pixels = px(5.0);
 pub(crate) const KEYRING_LABEL: &str = "zed-github-account";
 
+/// Sorts the failure of a request to the file chooser portal.
 #[cfg(any(feature = "wayland", feature = "x11"))]
-const FILE_PICKER_PORTAL_MISSING: &str =
-    "Couldn't open file picker due to missing xdg-desktop-portal implementation.";
+fn path_prompt_error(error: ashpd::Error) -> PathPromptError {
+    let no_file_chooser = match &error {
+        // The portal service runs, but no backend of it has a file chooser.
+        ashpd::Error::PortalNotFound(_) => true,
+        // No service of the session bus has the name of the portal.
+        ashpd::Error::Portal(ashpd::PortalError::ZBus(error)) => matches!(
+            ashpd::zbus::fdo::Error::from(error.clone()),
+            ashpd::zbus::fdo::Error::ServiceUnknown(_)
+        ),
+        _ => false,
+    };
+    if no_file_chooser {
+        PathPromptError::NoFileChooser(Box::new(error))
+    } else {
+        PathPromptError::Uncategorized(error.into())
+    }
+}
 
 #[derive(Default)]
 pub(crate) struct PlatformHandlers {
@@ -815,7 +831,7 @@ impl Platform for LinuxPlatform {
     fn prompt_for_paths(
         &self,
         options: PathPromptOptions,
-    ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
+    ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>, PathPromptError>> {
         let (done_tx, done_rx) = oneshot::channel();
 
         #[cfg(not(any(feature = "wayland", feature = "x11")))]
@@ -844,12 +860,8 @@ impl Platform for LinuxPlatform {
                     .await
                 {
                     Ok(request) => request,
-                    Err(err) => {
-                        let result = match err {
-                            ashpd::Error::PortalNotFound(_) => anyhow!(FILE_PICKER_PORTAL_MISSING),
-                            err => err.into(),
-                        };
-                        let _ = done_tx.send(Err(result));
+                    Err(error) => {
+                        let _ = done_tx.send(Err(path_prompt_error(error)));
                         return;
                     }
                 };
@@ -864,7 +876,7 @@ impl Platform for LinuxPlatform {
                             .collect::<Vec<_>>(),
                     )),
                     Err(ashpd::Error::Response(_)) => Ok(None),
-                    Err(e) => Err(e.into()),
+                    Err(error) => Err(path_prompt_error(error)),
                 };
                 let _ = done_tx.send(result);
             })
@@ -876,7 +888,7 @@ impl Platform for LinuxPlatform {
         &self,
         directory: &Path,
         suggested_name: Option<&str>,
-    ) -> oneshot::Receiver<Result<Option<PathBuf>>> {
+    ) -> oneshot::Receiver<Result<Option<PathBuf>, PathPromptError>> {
         let (done_tx, done_rx) = oneshot::channel();
 
         #[cfg(not(any(feature = "wayland", feature = "x11")))]
@@ -906,14 +918,8 @@ impl Platform for LinuxPlatform {
 
                     let request = match request_builder.send().await {
                         Ok(request) => request,
-                        Err(err) => {
-                            let result = match err {
-                                ashpd::Error::PortalNotFound(_) => {
-                                    anyhow!(FILE_PICKER_PORTAL_MISSING)
-                                }
-                                err => err.into(),
-                            };
-                            let _ = done_tx.send(Err(result));
+                        Err(error) => {
+                            let _ = done_tx.send(Err(path_prompt_error(error)));
                             return;
                         }
                     };
@@ -925,7 +931,7 @@ impl Platform for LinuxPlatform {
                             .and_then(|uri: &ashpd::Uri| url::Url::parse(uri.as_str()).ok())
                             .and_then(|uri: url::Url| uri.to_file_path().ok())),
                         Err(ashpd::Error::Response(_)) => Ok(None),
-                        Err(e) => Err(e.into()),
+                        Err(error) => Err(path_prompt_error(error)),
                     };
                     let _ = done_tx.send(result);
                 }
@@ -2011,6 +2017,44 @@ mod tests {
             writer.join().unwrap();
             assert_eq!(bytes, payload);
         }
+    }
+
+    #[cfg(any(feature = "wayland", feature = "x11"))]
+    #[test]
+    fn a_missing_portal_is_no_file_chooser() -> anyhow::Result<()> {
+        use ashpd::zbus;
+
+        let no_backend = ashpd::Error::PortalNotFound(zbus::names::OwnedInterfaceName::try_from(
+            "org.freedesktop.portal.FileChooser",
+        )?);
+        let call = zbus::message::Message::method_call("/", "OpenFile")?.build(&())?;
+        let no_service = ashpd::Error::Portal(ashpd::PortalError::ZBus(zbus::Error::MethodError(
+            zbus::names::OwnedErrorName::try_from("org.freedesktop.DBus.Error.ServiceUnknown")?,
+            Some(
+                "The name org.freedesktop.portal.Desktop was not provided by any .service files"
+                    .into(),
+            ),
+            call.clone(),
+        )));
+        let other = ashpd::Error::Portal(ashpd::PortalError::ZBus(zbus::Error::MethodError(
+            zbus::names::OwnedErrorName::try_from("org.freedesktop.DBus.Error.AccessDenied")?,
+            None,
+            call,
+        )));
+
+        for error in [no_backend, no_service] {
+            let error = path_prompt_error(error);
+            assert!(
+                matches!(error, PathPromptError::NoFileChooser(_)),
+                "{error:?}"
+            );
+        }
+        let error = path_prompt_error(other);
+        assert!(
+            matches!(error, PathPromptError::Uncategorized(_)),
+            "{error:?}"
+        );
+        Ok(())
     }
 }
 

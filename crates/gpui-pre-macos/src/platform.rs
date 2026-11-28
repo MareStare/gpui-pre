@@ -12,10 +12,10 @@ use futures::channel::oneshot;
 use gpui::{
     Action, ActivationPolicy, ActivityGuard, AnyWindowHandle, BackgroundExecutor, ClipboardItem,
     CursorRequest, ForegroundExecutor, GraphicalEnvironment, KeyContext, Keymap, Menu, MenuItem,
-    OsMenu, OwnedMenu, PathPromptOptions, Platform, PlatformDisplay, PlatformKeyboardLayout,
-    PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, PowerMode, Result, SystemMenuType,
-    Task, ThermalState, WindowAppearance, WindowKind, WindowParams, WindowingRequest,
-    popup::PopupNotSupportedError,
+    OsMenu, OwnedMenu, PathPromptError, PathPromptOptions, Platform, PlatformDisplay,
+    PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, PowerMode,
+    Result, SystemMenuType, Task, ThermalState, WindowAppearance, WindowKind, WindowParams,
+    WindowingRequest, popup::PopupNotSupportedError,
 };
 use gpui_apple::{
     keychain,
@@ -897,7 +897,7 @@ impl Platform for MacPlatform {
     fn prompt_for_paths(
         &self,
         options: PathPromptOptions,
-    ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
+    ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>, PathPromptError>> {
         let (done_tx, done_rx) = oneshot::channel();
         self.foreground_executor()
             .spawn(async move {
@@ -910,7 +910,7 @@ impl Platform for MacPlatform {
                     unsafe { msg_send![class!(NSOpenPanel), openPanel] };
                 let Some(panel) = panel else {
                     // The receiver may have been dropped while the panel was being created.
-                    _ = done_tx.send(Err(anyhow!("macOS could not create the open dialog")));
+                    _ = done_tx.send(Err(anyhow!("macOS could not create the open dialog").into()));
                     return;
                 };
                 panel.setCanChooseDirectories(options.directories);
@@ -954,7 +954,7 @@ impl Platform for MacPlatform {
         &self,
         directory: &Path,
         suggested_name: Option<&str>,
-    ) -> oneshot::Receiver<Result<Option<PathBuf>>> {
+    ) -> oneshot::Receiver<Result<Option<PathBuf>, PathPromptError>> {
         let url = NSURL::from_directory_path(directory);
         let suggested_name = suggested_name.map(NSString::from_str);
         let (done_tx, done_rx) = oneshot::channel();
@@ -969,7 +969,7 @@ impl Platform for MacPlatform {
                     unsafe { msg_send![class!(NSSavePanel), savePanel] };
                 let Some(panel) = panel else {
                     // The receiver may have been dropped while the panel was being created.
-                    _ = done_tx.send(Err(anyhow!("macOS could not create the save dialog")));
+                    _ = done_tx.send(Err(anyhow!("macOS could not create the save dialog").into()));
                     return;
                 };
                 panel.setDirectoryURL(url.as_deref());

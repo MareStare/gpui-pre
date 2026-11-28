@@ -8,7 +8,7 @@
 use crate::ScreenCaptureSource;
 use crate::{
     ActivityGuard, AnyWindowHandle, BackgroundExecutor, ClipboardItem, ForegroundExecutor, Keymap,
-    Menu, MenuItem, OwnedMenu, PathPromptOptions, Platform, PlatformDisplay,
+    Menu, MenuItem, OwnedMenu, PathPromptError, PathPromptOptions, Platform, PlatformDisplay,
     PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, Task,
     TestDispatcher, WindowAppearance, WindowParams,
 };
@@ -152,7 +152,7 @@ impl Platform for VisualTestPlatform {
     fn prompt_for_paths(
         &self,
         _options: PathPromptOptions,
-    ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
+    ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>, PathPromptError>> {
         let (tx, rx) = oneshot::channel();
         tx.send(Ok(None)).ok();
         rx
@@ -162,7 +162,7 @@ impl Platform for VisualTestPlatform {
         &self,
         _directory: &Path,
         _suggested_name: Option<&str>,
-    ) -> oneshot::Receiver<Result<Option<PathBuf>>> {
+    ) -> oneshot::Receiver<Result<Option<PathBuf>, PathPromptError>> {
         let (tx, rx) = oneshot::channel();
         tx.send(Ok(None)).ok();
         rx

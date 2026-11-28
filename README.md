@@ -358,6 +358,11 @@ gpui-pre version goes.
   click of a focused element. The focus can move onto an element while the
   key is down, as when the press of the key ends a key recording, and the
   release of the key then clicks nothing there.
+- Typed file dialog errors: `prompt_for_paths` and `prompt_for_new_path`
+  fail with `PathPromptError`. On Linux, `NoFileChooser` covers a session
+  with no desktop portal service and a portal with no file chooser
+  backend. Other failures are `Uncategorized`.
+  `TestAppContext::simulate_new_path_failure` fails a pending save dialog.
 
 ## License
 

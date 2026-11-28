@@ -50,9 +50,9 @@ use crate::{
     BackgroundExecutor, Bounds, ClipboardItem, ClipboardReadError, CursorStyle, DispatchPhase,
     DisplayChanges, DisplayEvent, DisplayId, EventEmitter, ExternalDragPayload, FocusHandle,
     FocusMap, ForegroundExecutor, Global, KeyBinding, KeyContext, Keymap, Keystroke, LayoutId,
-    Menu, MenuItem, MissingGlyph, OwnedMenu, PathPromptOptions, PenApi, Pixels, Platform,
-    PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, Point, PowerMode, Priority,
-    PromptBuilder, PromptButton, PromptHandle, PromptLevel, Render, RenderImage,
+    Menu, MenuItem, MissingGlyph, OwnedMenu, PathPromptError, PathPromptOptions, PenApi, Pixels,
+    Platform, PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, Point, PowerMode,
+    Priority, PromptBuilder, PromptButton, PromptHandle, PromptLevel, Render, RenderImage,
     RenderablePromptHandle, Reservation, ScreenCaptureSource, SharedString, SubscriberSet,
     Subscription, SvgRenderer, SystemNotification, SystemNotificationResponse, Task,
     TextRenderingMode, TextSystem, ThermalState, Window, WindowAppearance, WindowButtonLayout,
@@ -2055,11 +2055,12 @@ impl App {
     ///
     /// When one or more paths are selected, they'll be relayed asynchronously via the returned oneshot channel.
     /// If cancelled, a `None` will be relayed instead.
-    /// May return an error on Linux if the file picker couldn't be opened.
+    /// Fails with [`PathPromptError::NoFileChooser`] when no service of the system
+    /// provides a file dialog.
     pub fn prompt_for_paths(
         &self,
         options: PathPromptOptions,
-    ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
+    ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>, PathPromptError>> {
         self.platform.prompt_for_paths(options)
     }
 
@@ -2068,12 +2069,13 @@ impl App {
     /// The provided directory will be used to set the initial location.
     /// When a path is selected, it is relayed asynchronously via the returned oneshot channel.
     /// If cancelled, a `None` will be relayed instead.
-    /// May return an error on Linux if the file picker couldn't be opened.
+    /// Fails with [`PathPromptError::NoFileChooser`] when no service of the system
+    /// provides a file dialog.
     pub fn prompt_for_new_path(
         &self,
         directory: &Path,
         suggested_name: Option<&str>,
-    ) -> oneshot::Receiver<Result<Option<PathBuf>>> {
+    ) -> oneshot::Receiver<Result<Option<PathBuf>, PathPromptError>> {
         self.platform.prompt_for_new_path(directory, suggested_name)
     }
 

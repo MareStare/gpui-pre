@@ -402,6 +402,11 @@ impl TestAppContext {
         self.test_platform.simulate_new_path_selection(select_path);
     }
 
+    /// Simulates the failure of the platform's "Save" dialog.
+    pub fn simulate_new_path_failure(&self, error: crate::PathPromptError) {
+        self.test_platform.simulate_new_path_failure(error);
+    }
+
     /// Simulates responding to a `prompt_for_paths` ("Open") dialog.
     pub fn simulate_path_prompt_response(
         &self,

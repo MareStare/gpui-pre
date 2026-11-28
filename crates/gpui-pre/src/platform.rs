@@ -458,12 +458,12 @@ pub trait Platform: 'static {
     fn prompt_for_paths(
         &self,
         options: PathPromptOptions,
-    ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>>;
+    ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>, PathPromptError>>;
     fn prompt_for_new_path(
         &self,
         directory: &Path,
         suggested_name: Option<&str>,
-    ) -> oneshot::Receiver<Result<Option<PathBuf>>>;
+    ) -> oneshot::Receiver<Result<Option<PathBuf>, PathPromptError>>;
     fn can_select_mixed_files_and_dirs(&self) -> bool;
     fn reveal_path(&self, path: &Path);
     fn open_with_system(&self, path: &Path);
@@ -3016,6 +3016,20 @@ pub struct PathPromptOptions {
     pub multiple: bool,
     /// The prompt to show to a user when selecting a path
     pub prompt: Option<SharedString>,
+}
+
+/// The failure of a file dialog of the platform.
+#[derive(Debug, thiserror::Error)]
+pub enum PathPromptError {
+    /// No service of the system provides a file dialog. On Linux, the
+    /// session has no desktop portal, or its portal has no backend with a
+    /// file chooser.
+    #[error("no service of the system provides a file dialog")]
+    NoFileChooser(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    /// Another failure.
+    #[error(transparent)]
+    Uncategorized(#[from] anyhow::Error),
 }
 
 /// What kind of prompt styling to show

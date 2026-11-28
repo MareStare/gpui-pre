@@ -7,7 +7,7 @@ use crate::PathPromptOptions;
 use crate::{
     ActivityGuard, AnyWindowHandle, AppLifecyclePhase, BackgroundExecutor, ClipboardItem,
     CursorStyle, DevicePixels, DummyKeyboardMapper, ForegroundExecutor, Keymap, OwnedMenu,
-    Platform, PlatformDisplay, PlatformHeadlessRenderer, PlatformKeyboardLayout,
+    PathPromptError, Platform, PlatformDisplay, PlatformHeadlessRenderer, PlatformKeyboardLayout,
     PlatformKeyboardMapper, PlatformTextSystem, PromptButton, ScreenCaptureFrame,
     ScreenCaptureSource, ScreenCaptureStream, SharedString, SourceMetadata, SystemNotification,
     SystemNotificationResponse, Task, TestDisplay, TestWindow, TestWindowState, ThermalState,
@@ -153,10 +153,13 @@ pub(crate) struct TestSystemNotifications {
 #[derive(Default)]
 pub(crate) struct TestPrompts {
     multiple_choice: VecDeque<TestPrompt>,
-    new_path: VecDeque<(PathBuf, oneshot::Sender<Result<Option<PathBuf>>>)>,
+    new_path: VecDeque<(
+        PathBuf,
+        oneshot::Sender<Result<Option<PathBuf>, PathPromptError>>,
+    )>,
     paths: VecDeque<(
         PathPromptOptions,
-        oneshot::Sender<Result<Option<Vec<PathBuf>>>>,
+        oneshot::Sender<Result<Option<Vec<PathBuf>>, PathPromptError>>,
     )>,
 }
 
@@ -334,6 +337,17 @@ impl TestPlatform {
             .pop_front()
             .expect("no pending new path prompt");
         tx.send(Ok(select_path(&path))).ok();
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn simulate_new_path_failure(&self, error: PathPromptError) {
+        let (_, tx) = self
+            .prompts
+            .borrow_mut()
+            .new_path
+            .pop_front()
+            .expect("no pending new path prompt");
+        tx.send(Err(error)).ok();
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -718,7 +732,7 @@ impl Platform for TestPlatform {
     fn prompt_for_paths(
         &self,
         options: crate::PathPromptOptions,
-    ) -> oneshot::Receiver<Result<Option<Vec<std::path::PathBuf>>>> {
+    ) -> oneshot::Receiver<Result<Option<Vec<std::path::PathBuf>>, PathPromptError>> {
         let (tx, rx) = oneshot::channel();
         self.prompts.borrow_mut().paths.push_back((options, tx));
         rx
@@ -732,7 +746,7 @@ impl Platform for TestPlatform {
     fn prompt_for_paths(
         &self,
         _options: crate::PathPromptOptions,
-    ) -> oneshot::Receiver<Result<Option<Vec<std::path::PathBuf>>>> {
+    ) -> oneshot::Receiver<Result<Option<Vec<std::path::PathBuf>>, PathPromptError>> {
         oneshot::channel().1
     }
 
@@ -743,7 +757,7 @@ impl Platform for TestPlatform {
         &self,
         directory: &std::path::Path,
         _suggested_name: Option<&str>,
-    ) -> oneshot::Receiver<Result<Option<std::path::PathBuf>>> {
+    ) -> oneshot::Receiver<Result<Option<std::path::PathBuf>, PathPromptError>> {
         let (tx, rx) = oneshot::channel();
         self.prompts
             .borrow_mut()
@@ -761,7 +775,7 @@ impl Platform for TestPlatform {
         &self,
         _directory: &std::path::Path,
         _suggested_name: Option<&str>,
-    ) -> oneshot::Receiver<Result<Option<std::path::PathBuf>>> {
+    ) -> oneshot::Receiver<Result<Option<std::path::PathBuf>, PathPromptError>> {
         oneshot::channel().1
     }
 

@@ -82,15 +82,17 @@ impl Cancellation {
 /// thread must keep pumping messages rather than waiting for the dialog thread.
 /// Holding the owner's lock through native completion also allows window
 /// destruction to wait for the dialog without blocking the foreground thread.
-pub(crate) fn show_dialog<T: Send + 'static>(
+pub(crate) fn show_dialog<T: Send + 'static, E: From<anyhow::Error> + Send + 'static>(
     owner: Option<Rc<DialogOwner>>,
     executor: &ForegroundExecutor,
-    dialog: impl FnOnce(HWND) -> Result<T> + Send + 'static,
-) -> oneshot::Receiver<Result<T>> {
+    dialog: impl FnOnce(HWND) -> Result<T, E> + Send + 'static,
+) -> oneshot::Receiver<Result<T, E>> {
     let (mut sender, receiver) = oneshot::channel();
     let cancellation = Cancellation::new(owner.as_deref());
     if cancellation.is_requested() {
-        sender.send(Err(anyhow!("dialog owner has closed"))).ok();
+        sender
+            .send(Err(anyhow!("dialog owner has closed").into()))
+            .ok();
         return receiver;
     }
     let hwnd = owner.as_ref().map(|owner| SafeHwnd::from(owner.hwnd));
@@ -119,11 +121,11 @@ pub(crate) fn show_dialog<T: Send + 'static>(
                             let _apartment = Apartment::new()?;
                             let _timer = CancellationTimer::new(cancellation.clone())?;
                             if cancellation.is_requested() {
-                                return Err(anyhow!("dialog cancelled"));
+                                return Err(anyhow!("dialog cancelled").into());
                             }
                             let result = dialog(hwnd.map(|hwnd| hwnd.as_raw()).unwrap_or_default());
                             if cancellation.is_requested() {
-                                return Err(anyhow!("dialog cancelled"));
+                                return Err(anyhow!("dialog cancelled").into());
                             }
                             result
                         })();
@@ -132,7 +134,7 @@ pub(crate) fn show_dialog<T: Send + 'static>(
                 });
             if let Err(error) = thread {
                 drop(serialization);
-                sender.send(Err(error.into())).ok();
+                sender.send(Err(anyhow::Error::from(error).into())).ok();
                 return;
             }
             let result = match select(&mut result_receiver, sender.cancellation()).await {
@@ -146,7 +148,7 @@ pub(crate) fn show_dialog<T: Send + 'static>(
             // native loop exits, even if the caller no longer wants its result.
             drop(serialization);
             sender
-                .send(result.unwrap_or_else(|error| Err(error.into())))
+                .send(result.unwrap_or_else(|error| Err(anyhow::Error::from(error).into())))
                 .ok();
         })
         .detach();
