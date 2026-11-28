@@ -3258,12 +3258,15 @@ impl Interactivity {
                     // - no other key events happen in between
                     // - the focus generation is the same (implying focus did not move)
                     //
+                    // A repeat of a held key arms nothing: the focus can move
+                    // onto the element while the key is down.
+                    //
                     // This design avoids an ABA problem that happens if you
                     // store the focus handle that registered the keypress.
                     window.on_key_event({
                         let pending_keyboard_down = pending_keyboard_down.clone();
                         move |event: &KeyDownEvent, phase, window, _cx| {
-                            if phase.bubble() && !window.default_prevented() {
+                            if phase.bubble() && !window.default_prevented() && !event.is_held {
                                 let stroke = &event.keystroke;
                                 let is_activation_key = (stroke.key.eq("enter")
                                     || stroke.key.eq("space"))
@@ -6916,6 +6919,24 @@ mod tests {
         .unwrap();
     }
 
+    /// A repeat of `key` while it is held down.
+    fn key_repeat(cx: &mut TestAppContext, window: AnyWindowHandle, key: &str) {
+        let os = cx.read(|cx| cx.platform_info().os);
+        let keystroke = Keystroke::parse_with_os(key, os).unwrap();
+        cx.update_window(window, |_, window, cx| {
+            window.dispatch_event(
+                KeyDownEvent {
+                    keystroke,
+                    is_held: true,
+                    prefer_character_input: false,
+                }
+                .to_platform_input(),
+                cx,
+            );
+        })
+        .unwrap();
+    }
+
     fn key_up(cx: &mut TestAppContext, window: AnyWindowHandle, key: &str) {
         let os = cx.read(|cx| cx.platform_info().os);
         let keystroke = Keystroke::parse_with_os(key, os).unwrap();
@@ -6934,6 +6955,26 @@ mod tests {
         key_down(&mut cx, window, "enter");
         key_up(&mut cx, window, "enter");
 
+        assert_eq!(*clicks.borrow(), vec!["a"]);
+    }
+
+    /// A held Enter fires one click on its release. A held Enter whose
+    /// press went to another element fires none on the element that takes
+    /// the focus while it is down.
+    #[test]
+    fn keyboard_activation_ignores_repeats_of_a_held_key() {
+        let (mut cx, window, clicks, focus_a, focus_b) = setup_keyboard_activation_test();
+
+        focus_and_draw(&mut cx, window, &focus_a);
+        key_down(&mut cx, window, "enter");
+        key_repeat(&mut cx, window, "enter");
+        key_up(&mut cx, window, "enter");
+        assert_eq!(*clicks.borrow(), vec!["a"]);
+
+        key_down(&mut cx, window, "enter");
+        focus_and_draw(&mut cx, window, &focus_b);
+        key_repeat(&mut cx, window, "enter");
+        key_up(&mut cx, window, "enter");
         assert_eq!(*clicks.borrow(), vec!["a"]);
     }
 

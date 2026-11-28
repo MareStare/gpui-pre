@@ -354,6 +354,10 @@ gpui-pre version goes.
   `InteractiveElement::no_focus_on_press` makes an element that Tab
   reaches, such as a row with a menu, pass the focus of a press to the
   element around it.
+- Held activation keys: a repeat of a held Enter or Space does not arm the
+  click of a focused element. The focus can move onto an element while the
+  key is down, as when the press of the key ends a key recording, and the
+  release of the key then clicks nothing there.
 
 ## License
 
