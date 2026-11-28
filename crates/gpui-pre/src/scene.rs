@@ -232,16 +232,17 @@ pub enum Primitive {
 
 #[expect(missing_docs)]
 impl Primitive {
-    pub fn bounds(&self) -> &Bounds<ScaledPixels> {
+    /// The area that the primitive paints.
+    pub fn bounds(&self) -> Bounds<ScaledPixels> {
         match self {
-            Primitive::Shadow(shadow) => &shadow.bounds,
-            Primitive::Quad(quad) => &quad.bounds,
-            Primitive::Path(path) => &path.bounds,
-            Primitive::Underline(underline) => &underline.bounds,
-            Primitive::MonochromeSprite(sprite) => &sprite.bounds,
-            Primitive::SubpixelSprite(sprite) => &sprite.bounds,
-            Primitive::PolychromeSprite(sprite) => &sprite.bounds,
-            Primitive::Surface(surface) => &surface.bounds,
+            Primitive::Shadow(shadow) => shadow.painted_bounds(),
+            Primitive::Quad(quad) => quad.bounds,
+            Primitive::Path(path) => path.bounds,
+            Primitive::Underline(underline) => underline.bounds,
+            Primitive::MonochromeSprite(sprite) => sprite.bounds,
+            Primitive::SubpixelSprite(sprite) => sprite.bounds,
+            Primitive::PolychromeSprite(sprite) => sprite.bounds,
+            Primitive::Surface(surface) => surface.bounds,
         }
     }
 
@@ -583,6 +584,21 @@ pub struct Shadow {
     /// 0 = drop shadow (rendered outside the element), 1 = inset shadow (rendered inside).
     pub inset: u32,
     pub pad: u32, // align to 8 bytes
+}
+
+impl Shadow {
+    /// The area that the shadow paints. An inset shadow paints inside the
+    /// element. A drop shadow paints its shape and the tail of its blur.
+    /// The shaders draw the same area.
+    pub fn painted_bounds(&self) -> Bounds<ScaledPixels> {
+        if self.inset != 0 {
+            return self.element_bounds;
+        }
+        // The tail of a Gaussian blur fades out within three standard
+        // deviations. The half pixel holds the anti-aliased edge.
+        self.bounds
+            .dilate(ScaledPixels(3.0 * self.blur_radius.0 + 0.5))
+    }
 }
 
 impl From<Shadow> for Primitive {
