@@ -1041,8 +1041,10 @@ fn fs_shadow(input: ShadowVarying) -> @location(0) vec4<f32> {
         alpha = 1.0 - alpha;
         alpha *= saturate(0.5 - element_distance);
     } else {
-        // The drop shadow shows only outside the element, as in CSS.
-        alpha *= saturate(0.5 + element_distance);
+        // The drop shadow shows only outside the element, as in CSS. It keeps
+        // its full alpha under the pixels that the edge of the element only
+        // partly covers, so the edge shows no light seam.
+        alpha *= saturate(1.0 + element_distance);
     }
 
     return blend_color(input.color, alpha);

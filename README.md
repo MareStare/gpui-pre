@@ -281,8 +281,10 @@ gpui-pre version goes.
   pixel, as in a browser.
 - Drop shadows outside the element: a drop shadow paints only outside its
   element, as in CSS, so the clear pixels of an image show what lies under
-  the image. The scene keeps a shadow whose blur reaches into the content
-  mask, also where its shape lies outside the mask.
+  the image. Under the pixels that the edge of the element only partly
+  covers, the shadow keeps its full alpha, so the edge shows no light seam.
+  The scene keeps a shadow whose blur reaches into the content mask, also
+  where its shape lies outside the mask.
 - Tab groups that wrap: a tab group made with `tab_wrap` keeps
   `focus_next` and `focus_prev` inside it while the focus is in it, and
   wraps at its ends, so a modal view keeps the keys. A wrapping group

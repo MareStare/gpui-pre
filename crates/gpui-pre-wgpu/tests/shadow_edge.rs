@@ -126,5 +126,15 @@ fn a_drop_shadow_paints_only_outside_its_element() -> anyhow::Result<()> {
     for (x, y) in [(8, 20), (20, 32)] {
         assert_eq!(red(x, y), 0, "below the band at {x}, {y}");
     }
+
+    // A ring around an element whose left edge halves column 10. The ring
+    // keeps its full alpha under that column.
+    let element = device(10.5, 10., 19.5, 20.);
+    let ring = device(8., 8., 24., 24.);
+    let Some(image) = render(shadow(ring, 0., element, whole), width, height)? else {
+        return Ok(());
+    };
+    assert_eq!(image.get_pixel(10, 20).0[0], 255, "under the edge");
+    assert_eq!(image.get_pixel(12, 20).0[0], 0, "inside the element");
     Ok(())
 }
