@@ -589,7 +589,6 @@ pub struct Shadow {
 impl Shadow {
     /// The area that the shadow paints. An inset shadow paints inside the
     /// element. A drop shadow paints its shape and the tail of its blur.
-    /// The shaders draw the same area.
     pub fn painted_bounds(&self) -> Bounds<ScaledPixels> {
         if self.inset != 0 {
             return self.element_bounds;

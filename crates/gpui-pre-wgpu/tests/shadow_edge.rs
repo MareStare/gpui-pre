@@ -115,13 +115,16 @@ fn a_drop_shadow_paints_only_outside_its_element() -> anyhow::Result<()> {
         assert!(red(x, y) > 0, "outside the element at {x}, {y}");
     }
 
-    // The shape lies under the mask of the band above the element, and
-    // its blur reaches into the band.
+    // The shape lies below the band above the element, and its blur
+    // reaches into the band. The shadow paints only in the band.
     let band = device(0., 0., width as f32, 10.);
     let Some(image) = render(shadow(shape, 3., element, band), width, height)? else {
         return Ok(());
     };
-    assert!(image.get_pixel(20, 9).0[0] > 0, "in the band");
-    assert_eq!(image.get_pixel(20, 11).0[0], 0, "under the band");
+    let red = |x: u32, y: u32| image.get_pixel(x, y).0[0];
+    assert!(red(20, 9) > 0, "in the band");
+    for (x, y) in [(8, 20), (20, 32)] {
+        assert_eq!(red(x, y), 0, "below the band at {x}, {y}");
+    }
     Ok(())
 }
